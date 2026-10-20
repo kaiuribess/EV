@@ -1,0 +1,342 @@
+"""Novig v3 signed REST and native streaming/trading protocol."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import json
+import time
+from copy import deepcopy
+from decimal import Decimal
+from pathlib import Path
+from typing import AsyncIterator
+from urllib.parse import quote, quote_from_bytes, unquote_to_bytes
+from uuid import UUID
+
+import httpx
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+from pydantic import Field
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed
+
+from .common import (
+    CredentialsMissing, NativeSettings, NativeTransport, SequenceGap,
+    SequenceTracker, UnknownOrderOutcome, VenueError, decimal_value, json_body,
+)
+
+
+class NovigSettings(NativeSettings):
+    api_key: str = Field(default="", repr=False)  # v3 key UUID, NOT a bearer token
+    private_key_path: str = Field(default="", repr=False)
+
+
+def canonical_query(query: str) -> str:
+    pairs = []
+    for pair in query.split("&"):
+        if not pair:
+            continue
+        name, _, value = pair.partition("=")
+        # Unlike application/x-www-form-urlencoded, a bare "+" is literal.
+        pairs.append(tuple(quote_from_bytes(unquote_to_bytes(part), safe="-._~") for part in (name, value)))
+    return "&".join(f"{name}={value}" for name, value in sorted(pairs))
+
+
+def novig_canonical(timestamp: str, method: str, path: str, query: str = "", body: bytes = b"") -> bytes:
+    return "\n".join(
+        ("NOVIG-V3", timestamp, method.upper(), path, canonical_query(query), hashlib.sha256(body).hexdigest())
+    ).encode()
+
+
+def sign_novig(private_key, canonical: bytes) -> str:
+    if isinstance(private_key, ed25519.Ed25519PrivateKey):
+        signature = private_key.sign(canonical)
+    elif isinstance(private_key, ec.EllipticCurvePrivateKey) and isinstance(private_key.curve, ec.SECP256R1):
+        signature = private_key.sign(canonical, ec.ECDSA(hashes.SHA256()))
+    else:
+        raise ValueError("Novig supports Ed25519 or P-256 signing keys")
+    return base64.b64encode(signature).decode()
+
+
+class NovigBook:
+    """L3 order book with atomic delta batches and per-market/channel sequences."""
+
+    def __init__(self):
+        self.sequences = SequenceTracker()
+        self.books: dict[str, dict[str, dict]] = {}
+        self.statuses: dict[str, str] = {}
+
+    def reset(self):
+        self.sequences.reset()
+        self.books.clear()
+        self.statuses.clear()
+
+    def apply(self, frame: dict) -> None:
+        snapshot = "snapshot" in frame
+        for market, channels in frame.get("snapshot" if snapshot else "delta", {}).items():
+            # A newly opened market can include its first book delta alongside
+            # OPEN. Seed its counters before processing that book delta.
+            lifecycle = channels.get("lifecycle", {})
+            if not snapshot and market not in self.statuses and lifecycle.get("deltas") == ["OPEN"]:
+                self.sequences.snapshot(f"{market}:book", 0)
+                self.books.setdefault(market, {})
+            for channel in ("book", "lifecycle"):
+                if channel not in channels:
+                    continue
+                data = channels[channel]
+                subject = f"{market}:{channel}"
+                if snapshot:
+                    self.sequences.snapshot(subject, int(data["seq"]))
+                elif channel == "lifecycle" and market not in self.statuses and data.get("deltas", []) == ["OPEN"]:
+                    # Newly opened markets under event subscriptions have no snapshot.
+                    self.sequences.snapshot(subject, int(data["seq"]))
+                    self.books.setdefault(market, {})
+                elif not self.sequences.delta(subject, int(data["seq"])):
+                    continue
+                if channel == "lifecycle":
+                    if snapshot:
+                        self.statuses[market] = data["status"]
+                    else:
+                        for transition in data["deltas"]:
+                            if transition in {"OPEN", "CLOSE", "GRADE"}:
+                                self.statuses[market] = {"OPEN": "OPEN", "CLOSE": "CLOSED", "GRADE": "SETTLED"}[transition]
+                            if transition in {"GOLIVE", "UNLIVE", "CLOSE", "GRADE"}:
+                                self.books[market] = {}
+                    continue
+                if snapshot:
+                    rebuilt = {
+                        row["order"]: {"outcome": outcome, "price": decimal_value(row["price"]), "qty": int(row["qty"])}
+                        for outcome, rows in data["orders"].items() for row in rows
+                    }
+                    if any(not 0 < row["price"] < 1 or row["qty"] <= 0 for row in rebuilt.values()):
+                        self.sequences.invalid.add(subject)
+                        raise ValueError("Invalid Novig snapshot level")
+                    self.books[market] = rebuilt
+                else:
+                    # Validate a whole batch before publishing any changed book.
+                    updated = deepcopy(self.books.get(market, {}))
+                    for delta in data["deltas"]:
+                        if delta["kind"] == "remove":
+                            if delta["order"] not in updated:
+                                self.sequences.invalid.add(subject)
+                                raise SequenceGap(subject, None, int(data["seq"]))
+                            del updated[delta["order"]]
+                        elif delta["kind"] == "add":
+                            price, qty = decimal_value(delta["price"]), int(delta["qty"])
+                            if not 0 < price < 1 or qty <= 0:
+                                raise ValueError("Invalid Novig book level")
+                            updated[delta["order"]] = {"outcome": delta["outcome"], "price": price, "qty": qty}
+                        else:
+                            raise ValueError("Unknown Novig book delta")
+                    self.books[market] = updated
+        for channel in ("orders", "positions"):
+            if channel not in frame:
+                continue
+            data = frame[channel]
+            subject = f"PRIVATE:{channel}"
+            if snapshot:
+                self.sequences.snapshot(subject, int(data["seq"]))
+            else:
+                self.sequences.delta(subject, int(data["seq"]))
+        # Private heartbeat sequence proves whether a private frame was dropped.
+        for channel, seq in frame.get("heartbeat", {}).items():
+            if channel not in {"orders", "positions"}:
+                continue
+            subject = f"PRIVATE:{channel}"
+            previous = self.sequences.values.get(subject)
+            if previous is not None and int(seq) > previous:
+                self.sequences.invalid.add(subject)
+                raise SequenceGap(subject, previous + 1, int(seq))
+
+    def asks(self, market: str, opposing_outcome: str) -> list[tuple[Decimal, int]]:
+        if f"{market}:book" in self.sequences.invalid or self.statuses.get(market) != "OPEN":
+            return []
+        totals: dict[Decimal, int] = {}
+        for order in self.books.get(market, {}).values():
+            if order["outcome"] == opposing_outcome:
+                price = Decimal(1) - order["price"]
+                totals[price] = totals.get(price, 0) + order["qty"]
+        return sorted(totals.items())
+
+
+class NovigClient(NativeTransport):
+    venue_id = "novig"
+    HOSTS = {"sandbox": "https://api.paper.novig.com", "production": "https://api.novig.com"}
+
+    def __init__(self, settings: NovigSettings | None = None, client: httpx.AsyncClient | None = None):
+        super().__init__(settings or NovigSettings(), client)
+        self._key = None
+        self._nonce = 0
+        self.book = NovigBook()
+        self.selection: dict = {"private": ["orders", "positions"]}
+        self._pending: dict[int, asyncio.Future] = {}
+
+    def _load_key(self):
+        if not self.settings.api_key or not self.settings.private_key_path:
+            self.health = "credentials_missing"
+            raise CredentialsMissing("Novig v3 requires a key UUID and Ed25519/P-256 private key file")
+        if self._key is None:
+            self._key = serialization.load_pem_private_key(
+                Path(self.settings.private_key_path).read_bytes(), password=None
+            )
+        return self._key
+
+    def headers(self, method: str, path: str, query="", body=b"", timestamp=None) -> dict:
+        timestamp = timestamp or str(time.time_ns() // 1_000_000)
+        return {
+            "Novig-Key-Id": self.settings.api_key, "Novig-Timestamp": timestamp,
+            "Novig-Signature": sign_novig(self._load_key(), novig_canonical(timestamp, method, path, query, body)),
+            "Content-Type": "application/json",
+        }
+
+    async def request(self, method: str, path: str, *, params=None, body=None, mutation_id=None):
+        raw_body = json_body(body)
+        request = self.http.build_request(method, self.HOSTS[self.settings.environment] + path,
+                                          params=params, content=raw_body)
+        raw_path = request.url.raw_path.decode("ascii").split("?")[0]
+        request.headers.update(self.headers(method, raw_path, request.url.query.decode("ascii"), raw_body))
+        return await self._request(request, mutation_id=mutation_id)
+
+    async def connect(self) -> dict:
+        result = await self.request("POST", "/v3/echo", body={"probe": "evplatform"})
+        self.health = "authenticated"
+        return result
+
+    async def discover_events(self, **params) -> dict:
+        return await self.request("GET", "/v3/catalog/events", params=params)
+
+    async def discover_markets(self, **params) -> dict:
+        return await self.request("GET", "/v3/catalog/markets", params=params)
+
+    async def reconcile_order(self, order_id: str) -> dict:
+        return await self.request("GET", f"/v3/orders/{quote(order_id, safe='')}")
+
+    async def reconcile_account(self, **params) -> dict:
+        return await self.request("GET", "/v3/orders", params=params)
+
+    async def fetch_fills(self, **params) -> dict:
+        return await self.request("GET", "/v3/portfolio/fills", params=params)
+
+    @staticmethod
+    def order_body(outcome_id: str, price: Decimal, quantity: int, client_order_id: str, tif="IOC") -> dict:
+        price = decimal_value(price)
+        milli = price * 1000
+        if milli != milli.to_integral_value() or not 1 <= milli <= 999:
+            raise ValueError("Novig price is outside its three-decimal grid")
+        if 50 < milli < 950 and int(milli) % 5:
+            raise ValueError("Novig middle price band requires increments of 0.005")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("Novig quantity must be positive whole 1-cent contracts")
+        if tif not in {"GTC", "IOC", "FOK", "PO"}:
+            raise ValueError("Unsupported Novig order time in force")
+        UUID(outcome_id)
+        UUID(client_order_id)
+        return {"outcomeId": outcome_id, "price": format(price, ".3f"),
+                "qty": quantity, "clientId": client_order_id, "tif": tif}
+
+    async def submit_order(self, body: dict) -> dict:
+        client_id = body.get("clientId", "")
+        self.settings.gate.require(client_id, self.settings.environment)
+        return await self.request("POST", "/v3/orders", body=body, mutation_id=client_id)
+
+    async def cancel_order(self, order_id: str) -> dict:
+        return await self.request("DELETE", f"/v3/orders/{quote(order_id, safe='')}", mutation_id=order_id)
+
+    async def _command(self, verb: str, payload, *, mutation_id: str | None = None, wait=True):
+        if self._ws is None:
+            raise VenueError("Novig stream must be running before sending WebSocket commands")
+        self._nonce += 1
+        nonce = self._nonce
+        future = asyncio.get_running_loop().create_future()
+        if wait:
+            self._pending[nonce] = future
+        try:
+            await self._send_ws({"nonce": nonce, verb: payload})
+            if not wait:
+                return nonce
+            return await asyncio.wait_for(future, self.settings.timeout_seconds)
+        except (TimeoutError, ConnectionClosed, OSError, VenueError):
+            if mutation_id:
+                raise UnknownOrderOutcome(mutation_id) from None
+            raise VenueError("Novig command requires stream reconciliation") from None
+        finally:
+            self._pending.pop(nonce, None)
+
+    async def submit_ws(self, body: dict) -> dict:
+        client_id = body.get("clientId", "")
+        self.settings.gate.require(client_id, self.settings.environment)
+        return await self._command("place", {"orders": [body]}, mutation_id=client_id)
+
+    async def cancel_ws(self, order_id: str) -> dict:
+        return await self._command("cancel", {"orderIds": [order_id]}, mutation_id=order_id)
+
+    async def fetch_snapshot(self, market_id: str) -> dict:
+        return await self._command("snapshot", {"markets": {market_id: "book"}})
+
+    async def subscribe(self, market_ids: list[str]):
+        self.selection["markets"] = {market: "book" for market in market_ids}
+        if self._ws:
+            await self._command("subscribe", self.selection, wait=False)
+
+    async def unsubscribe(self, subjects: list[str]):
+        for subject in subjects:
+            if subject.startswith("market:"):
+                self.selection.get("markets", {}).pop(subject[7:], None)
+        await self._command("unsubscribe", subjects, wait=False)
+
+    async def stream_updates(self) -> AsyncIterator[dict]:
+        self._load_key()
+        failures = 0
+        while not self._closed:
+            self.book.reset()
+            self._nonce = 0
+            try:
+                url = self.HOSTS[self.settings.environment].replace("https://", "wss://") + "/v3/ws"
+                async with ws_connect(url, additional_headers=self.headers("GET", "/v3/ws"),
+                                      ping_interval=15, max_size=16 * 1024 * 1024) as socket:
+                    self._ws, self.health = socket, "streaming"
+                    await self._command("subscribe", self.selection, wait=False)
+                    async for raw in socket:
+                        frame = json.loads(raw)
+                        if not isinstance(frame, dict):
+                            raise ValueError("Novig frame must be an object")
+                        self.last_message_time = time.time()
+                        self.book.apply(frame)
+                        nonce = frame.get("nonce")
+                        if nonce in self._pending and not self._pending[nonce].done():
+                            self._pending[nonce].set_result(frame)
+                        failures = 0
+                        yield frame
+                    raise VenueError("Novig stream closed; reconcile and resubscribe")
+            except (OSError, ConnectionClosed, VenueError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                self.error_count += 1
+                self.book.reset()
+                yield {"type": "transport_invalidated", "venue": self.venue_id,
+                       "reason": type(exc).__name__, "all_books_invalid": True, "reconcile_private": True}
+                if not self._closed:
+                    await self._backoff(failures)
+                    failures += 1
+            finally:
+                self._ws = None
+                for future in self._pending.values():
+                    if not future.done():
+                        future.set_exception(VenueError("Disconnected; reconcile before resubmission"))
+
+    @staticmethod
+    def get_manifest() -> dict:
+        return {
+            "id": "novig", "name": "Novig Native v3", "version": "1.0.0", "type": "execution",
+            "contract_version": "1.0", "sports": ["discovered"], "markets": ["discovered"],
+            "input_schemas": ["order.intent.v1"], "output_schemas": ["native.novig.v3"],
+            "transports": ["rest", "websocket"], "authentication": "NOVIG-V3 Ed25519 or P-256",
+            "credentials": ["NOVIG_API_KEY", "NOVIG_PRIVATE_KEY_PATH"],
+            "capabilities": {"discovery": True, "orderbook": True, "private_fills": True,
+                             "limit_orders": True, "cancel": True, "reconcile": True, "sandbox": True,
+                             "websocket_trading": True, "streaming": True, "polling": True,
+                             "payout_usd": "0.01", "quantity_unit": "whole_cent_contracts",
+                             "client_id_deduplicated_by_exchange": False, "native_live_tested": False},
+            "permissions": ["network", "secret:novig", "orders:conditional"],
+            "health_check": True, "rate_limits": {"local_default_rps": 2, "separate_buckets": ["read", "place", "cancel", "stream"]},
+            "config_schema": {"environment": {"type": "string", "enum": ["sandbox", "production"], "default": "sandbox"}},
+            "docs": "https://docs.novig.com/api/streaming/connection",
+        }

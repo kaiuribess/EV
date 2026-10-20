@@ -1,0 +1,529 @@
+from __future__ import annotations
+
+import asyncio
+import heapq
+import time
+from collections import deque
+from datetime import datetime
+from decimal import Decimal
+
+from .core.bus import EventBus, SchemaRegistry
+from .core.config import Settings
+from .core.metrics import Metrics
+from .core.models import (
+    Candidate, Contract, Envelope, Fill, GameState, Market, Order, OrderBook,
+    PlayerProjection, Quote, SettlementResult, utcnow,
+)
+from .core.normalization import MarketMatcher
+from .core.oms import OrderManager
+from .core.plugins import PluginContext, PluginRegistry, StrategyPlugin
+from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, worst_fee
+from .core.risk import RiskEngine, RiskRejected
+from .core.storage import Storage
+from .plugins.demo import DemoInput
+from .plugins.paper import PaperVenue
+from .plugins.positive_ev import PositiveEV
+
+
+class Notice(Contract):
+    level: str
+    message: str
+    component: str
+
+
+class Engine:
+    def __init__(self, settings=None):
+        self.settings = settings or Settings()
+        self.risk = RiskEngine(self.settings.risk)
+        self.schemas = SchemaRegistry()
+        for name, model in [
+            ("sports.market", Market), ("odds.quote", Quote), ("exchange.book", OrderBook),
+            ("sports.game_state", GameState), ("player.projection", PlayerProjection),
+            ("trade.candidate", Candidate), ("trade.order", Order), ("trade.fill", Fill),
+            ("trade.settlement", SettlementResult),
+            ("system.notice", Notice),
+        ]:
+            self.schemas.register(name, 1, model)
+        self.bus = EventBus(self.schemas, self.risk.halt)
+        self.metrics = Metrics()
+        self.storage = Storage(self.settings.database_path)
+        self.storage.on_failure = self.risk.halt
+        self.matcher = MarketMatcher()
+        self.markets = self.matcher.markets
+        self.quotes: dict[str, dict[tuple[str, str], Quote]] = {}
+        self.books: dict[str, dict[tuple[str, str], OrderBook]] = {}
+        self.opportunities = {}
+        self.signals = {}
+        self.history = {}
+        self.latest_typed = {}
+        self.expirations = []
+        self.expiration_revisions = {}
+        self.events = deque(maxlen=100)
+        self.registry = PluginRegistry()
+        self.paper = PaperVenue(self.risk.authority)
+        self.registry.register(DemoInput(), enabled=self.settings.mode in {"demo", "paper"})
+        self.registry.register(PositiveEV(), enabled=True)
+        self.registry.register(self.paper, enabled=True)
+        self.registry.configure("synthetic_schedule", {"interval": self.settings.demo_interval, "seed": self.settings.demo_seed})
+        self.registry.configure("positive_ev", self.settings.pricing.model_dump(mode="json"))
+        self.oms = OrderManager(self.risk, self.storage, self.bus, self.paper, self.book, self.revalidate, self.metrics)
+        self.tasks = []
+        self.started_at = utcnow()
+        self.process_queue = self.bus.subscribe("strategy-engine", ["sports.market", "odds.quote", "exchange.book",
+                                                                   "sports.game_state", "player.projection"], critical=True)
+        self.risk_queue = self.bus.subscribe("central-risk", ["trade.candidate"], critical=True)
+        self.audit_queue = self.bus.subscribe("audit", critical=True)
+        self.dashboard_queue = self.bus.subscribe("dashboard-events", ["trade.order", "trade.fill", "system.notice"])
+        self.settlement_queue = self.bus.subscribe("settlement-accounting", ["trade.settlement"], critical=True)
+        self.settlements = {}
+        self.closing_observations = {}
+        self.stopping = False
+        self.halt_persisted = False
+        self.risk.on_halt = self._persist_halt
+
+    def context(self, name):
+        return PluginContext(self.bus, self.schemas, self.registry.records[name].config)
+
+    async def start(self):
+        await self.storage.open()
+        saved = await self.storage.load_config()
+        if "pricing" in saved:
+            self.settings.pricing = type(self.settings.pricing).model_validate(saved["pricing"])
+            self.registry.configure("positive_ev", saved["pricing"])
+        if "risk" in saved:
+            self.settings.risk = type(self.settings.risk).model_validate(saved["risk"])
+            self.risk.config = self.settings.risk
+        await self.oms.recover()
+        accounting = saved.get("accounting", {})
+        self.risk.settled = set(accounting.get("settled_order_ids", []))
+        self.settlements = accounting.get("settlements", {})
+        if accounting.get("daily_date") == utcnow().date().isoformat():
+            self.risk.daily_realized = Decimal(accounting.get("daily_realized", "0"))
+        if saved.get("kill_switch", False) or saved.get("unclean_shutdown", False):
+            self.risk.halt("Persisted emergency stop; reset explicitly")
+        await self.storage.save_config("unclean_shutdown", True)
+        self.risk.auto_trade = self.settings.auto_trade and not self.risk.kill_switch and self.settings.mode in {"demo", "paper"}
+        from .plugins.external import register_external
+        register_external(self.registry, self)
+        self.registry.discover()
+        startup_order = self.registry.compatible_startup_order()
+        for name, config in saved.get("plugin_configs", {}).items():
+            if name in self.registry.records:
+                self.registry.configure(name, config)
+        self.tasks = [
+            asyncio.create_task(self._process(), name="normalization-strategy"),
+            asyncio.create_task(self._risk_loop(), name="risk-routing"),
+            asyncio.create_task(self._audit(), name="audit-enqueue"),
+            asyncio.create_task(self._dashboard_events(), name="dashboard-observer"),
+            asyncio.create_task(self._maintenance(), name="freshness-fill-maintenance"),
+            asyncio.create_task(self._settlement_loop(), name="settlement-accounting"),
+        ]
+        for task in self.tasks:
+            task.add_done_callback(self._task_done)
+        for name in startup_order:
+            record = self.registry.records[name]
+            if record.enabled:
+                await self.registry.start(name, self.context(name))
+        await self.notice("info", "SYNTHETIC mode active. Automatic trading is " +
+                          ("enabled for paper fills." if self.risk.auto_trade else "disabled."), "engine")
+
+    async def stop(self):
+        self.stopping = True
+        self.risk.auto_trade = False
+        for name in list(self.registry.records):
+            await self.registry.stop(name)
+        await self.oms.cancel_all()
+        # Let observers drain already emitted order events before cancelling workers.
+        await self.audit_queue.join()
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await self.storage.save_config("unclean_shutdown", False)
+        await self.storage.close()
+
+    def _persist_halt(self, reason):
+        if not self.storage.connection or self.storage.failure or self.halt_persisted:
+            return
+        self.halt_persisted = True
+        try:
+            self.storage.enqueue_config("kill_switch", True)
+        except asyncio.QueueFull:
+            # The durable unclean_shutdown marker also blocks unattended restart.
+            self.storage.failure = "Emergency-stop persistence queue full"
+
+    def _task_done(self, task):
+        if not self.stopping and not task.cancelled():
+            exception = task.exception()
+            self.risk.halt(f"Critical worker stopped: {task.get_name()} ({type(exception).__name__})")
+
+    async def notice(self, level, message, component):
+        await self.bus.publish(Envelope(schema_name="system.notice", source=component,
+                                       payload=Notice(level=level, message=message, component=component)))
+
+    async def _audit(self):
+        while True:
+            event = await self.audit_queue.get()
+            try:
+                await self.storage.event(event)
+            except Exception:
+                self.risk.halt("Audit persistence unavailable")
+            finally:
+                self.audit_queue.task_done()
+
+    async def _dashboard_events(self):
+        while True:
+            event = await self.dashboard_queue.get()
+            self.events.appendleft({
+                "id": event.id, "type": event.schema_name, "timestamp": event.emitted_at.isoformat(),
+                "source": event.source, **event.payload.model_dump(mode="json"),
+            })
+            self.dashboard_queue.task_done()
+
+    async def _process(self):
+        while True:
+            event = await self.process_queue.get()
+            started = time.perf_counter_ns()
+            try:
+                await self.process_event(event)
+            except Exception as exc:
+                self.risk.halt(f"Processing failure: {type(exc).__name__}")
+                await self.notice("error", f"Processing failed: {type(exc).__name__}", "engine")
+            finally:
+                self.metrics.observe("internal_processing_ms", (time.perf_counter_ns() - started) / 1e6)
+                self.process_queue.task_done()
+
+    async def process_event(self, event):
+        payload = event.payload
+        self.latest_typed[event.schema_name] = payload
+        market_id = getattr(payload, "market_id", None)
+        if isinstance(payload, Market):
+            market_id = payload.id
+            self.matcher.register(payload)
+            self.markets[market_id] = payload
+        elif isinstance(payload, Quote):
+            if market_id not in self.markets:
+                self.matcher.quarantine.append({"reason": "Unknown market", "market_id": market_id})
+                return
+            key = (payload.provider, payload.bookmaker)
+            old = self.quotes.setdefault(market_id, {}).get(key)
+            if payload.source_time and payload.source_time > utcnow():
+                self.matcher.quarantine.append({"reason": "Future source clock", "market_id": market_id, "provider": payload.provider})
+                return
+            # Arrival time is never used to promote an old source observation.
+            if old and old.source_time and payload.source_time and payload.source_time < old.source_time and payload.status == "active":
+                self.metrics.counters["out_of_order_quotes"] += 1
+                return
+            if old and old.status != "active" and payload.status == "active" and old.source_time and payload.source_time and payload.source_time <= old.source_time:
+                self.metrics.counters["out_of_order_quotes"] += 1
+                return
+            if old and payload.status != "active" and old.source_time and payload.source_time and payload.source_time < old.source_time:
+                payload = old.model_copy(update={"status": payload.status, "received_at": payload.received_at})
+            self.quotes[market_id][key] = payload
+        elif isinstance(payload, OrderBook):
+            if market_id not in self.markets:
+                self.matcher.quarantine.append({"reason": "Unknown book market", "market_id": market_id})
+                return
+            key = (payload.venue, payload.outcome)
+            previous = self.books.setdefault(market_id, {}).get(key)
+            if payload.source_time and payload.source_time > utcnow():
+                self.matcher.quarantine.append({"reason": "Future order-book source clock", "market_id": market_id})
+                return
+            if previous and payload.sequence < previous.sequence:
+                self.metrics.counters["out_of_order_books"] += 1
+                return
+            self.books[market_id][key] = payload
+        if market_id and market_id in self.markets:
+            await self.recalculate(market_id, event)
+            received = getattr(payload, "received_at", None)
+            if received:
+                self.metrics.observe("receipt_to_calculation_ms", (utcnow() - received).total_seconds() * 1000)
+        # Non-odds strategies can also subscribe independently to typed bus events in start().
+
+    async def recalculate(self, market_id, event=None):
+        market = self.markets[market_id]
+        self.schedule_expiration(market_id)
+        for key in [k for k, v in self.opportunities.items() if v.market_id == market_id]:
+            del self.opportunities[key]
+        quotes = list(self.quotes.get(market_id, {}).values())
+        books = list(self.books.get(market_id, {}).values())
+        if not any(r.enabled and isinstance(r.plugin, StrategyPlugin) for r in self.registry.records.values()):
+            self.signals[market_id] = {"status": "NO SIGNAL", "reason": "Strategy disabled"}
+            return
+        view = {"market": market, "quotes": quotes, "books": books, "config": self.settings.pricing,
+                "typed_events": self.latest_typed}
+        if market_id in self.settlements:
+            self.signals[market_id] = {"status": "NO SIGNAL", "reason": "Market settled"}
+            return
+        generated, reasons = [], []
+        for name, strategy in self.registry.records.items():
+            if strategy.enabled and isinstance(strategy.plugin, StrategyPlugin):
+                manifest = strategy.plugin.manifest
+                if not any(s in manifest.sports for s in (market.sport, "*", "discoverable")):
+                    continue
+                if not any(m in manifest.markets for m in (market.market_type, "*", "discoverable")):
+                    continue
+                required = {schema.split("@")[0] for schema in manifest.input_schemas}
+                available = set(self.latest_typed)
+                if market:
+                    available.add("sports.market")
+                if quotes:
+                    available.add("odds.quote")
+                if books:
+                    available.add("exchange.book")
+                if required - available:
+                    reasons.append(f"{name}: required input unavailable")
+                    continue
+                try:
+                    generated.extend(await strategy.plugin.evaluate(event, view))
+                except NoSignal as exc:
+                    reasons.append(str(exc))
+                except Exception as exc:
+                    strategy.enabled = False
+                    strategy.health = {"status": "error", "message": f"Strategy stopped: {type(exc).__name__}"}
+                    self.risk.halt("Strategy failure")
+        if not generated:
+            self.signals[market_id] = {"status": "NO SIGNAL", "reason": "; ".join(reasons) if reasons else "No executable synchronized book"}
+            return
+        config = market_config(self.settings.pricing, market)
+        eligible = [c for c in generated if c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi]
+        self.signals[market_id] = {"status": "POSITIVE EV" if eligible else "NEGATIVE EV",
+                                  "reason": "Fee-adjusted executable offers",
+                                  "best_ev": str(max(c.ev_per_contract for c in generated))}
+        for candidate in generated:
+            key = f"{candidate.strategy}:{market_id}:{candidate.venue}:{candidate.outcome}"
+            self.opportunities[key] = candidate
+            if candidate in eligible and self.risk.auto_trade and not self.risk.kill_switch:
+                await self.bus.publish(Envelope(schema_name="trade.candidate", source=candidate.strategy, payload=candidate))
+        timestamp = utcnow()
+        history = self.history.setdefault(market_id, deque(maxlen=180))
+        if not history or (timestamp - datetime.fromisoformat(history[-1]["time"])).total_seconds() > 1:
+            history.append({"time": timestamp.isoformat(), "fair": str(generated[0].fair_probability),
+                            "price": str(generated[0].price)})
+
+    def book(self, market_id, venue, outcome):
+        return self.books.get(market_id, {}).get((venue, outcome))
+
+    def schedule_expiration(self, market_id):
+        config = market_config(self.settings.pricing, self.markets[market_id])
+        now = utcnow().timestamp()
+        times = [q.source_time.timestamp() + config.max_quote_age_ms / 1000
+                 for q in self.quotes.get(market_id, {}).values() if q.source_time and q.status == "active"]
+        times += [b.source_time.timestamp() + config.max_book_age_ms / 1000
+                  for b in self.books.get(market_id, {}).values() if b.source_time and b.status == "active"]
+        future = [t for t in times if t > now]
+        revision = self.expiration_revisions.get(market_id, 0) + 1
+        self.expiration_revisions[market_id] = revision
+        if future:
+            heapq.heappush(self.expirations, (min(future) + .001, revision, market_id))
+
+    def revalidate(self, candidate_or_order):
+        c = candidate_or_order
+        if self.settings.mode in {"demo", "paper"} and not self.registry.records["paper_execution"].enabled:
+            raise RiskRejected("Paper execution plugin is disabled")
+        if c.market_id in self.settlements:
+            raise RiskRejected("Market settled")
+        market = self.markets.get(c.market_id)
+        strategy = self.registry.records.get(c.strategy)
+        if market is None or strategy is None or not strategy.enabled or not isinstance(strategy.plugin, StrategyPlugin):
+            raise RiskRejected("Market or strategy unavailable")
+        book = self.book(c.market_id, c.venue, c.outcome)
+        if book is None:
+            raise RiskRejected("Executable book unavailable")
+        config = market_config(self.settings.pricing, market)
+        if (book.market_id != market.id or book.venue != c.venue or book.outcome != c.outcome or
+                book.outcome not in market.outcomes or not book.synchronized or book.status != "active" or
+                not book.fresh(config.max_book_age_ms) or not book.asks or book.asks[0].price > c.price or
+                market.status in {"closed", "suspended"}):
+            raise RiskRejected("Fresh executable market validation failed")
+        try:
+            current = strategy.plugin.revalidate(c, {
+                "market": market, "quotes": list(self.quotes.get(market.id, {}).values()),
+                "book": book, "config": self.settings.pricing, "typed_events": self.latest_typed,
+                "strategy_config": strategy.config})
+        except (NoSignal, NotImplementedError) as exc:
+            raise RiskRejected(str(exc)) from exc
+        if (current.strategy, current.market_id, current.venue, current.outcome) != (c.strategy, c.market_id, c.venue, c.outcome):
+            raise RiskRejected("Strategy changed approved trade identity")
+        if current.ev_per_contract < config.min_ev or current.roi < config.min_roi:
+            raise RiskRejected("Signal no longer meets thresholds")
+        if current.price > c.price:
+            raise RiskRejected("Executable price moved above order limit")
+        if isinstance(c, Candidate):
+            if book.sequence != c.book_sequence:
+                raise RiskRejected("Book changed; wait for a newly calculated candidate")
+            # Recheck fee rounding at the actually affordable quantity.
+            qty = min(c.max_quantity, int(self.settings.risk.max_order_stake / c.price))
+            if qty <= 0:
+                raise RiskRejected("No affordable quantity")
+            # Arbitrary partial fills can each trigger fee rounding. Evaluate the
+            # same one-contract worst-case bound used by the exposure reservation.
+            net = current.fair_probability - c.price - worst_fee(book.fee, c.price, 1)
+            if net < config.min_ev or net / c.price < config.min_roi:
+                raise RiskRejected("Size-adjusted net edge below threshold")
+        return current.model_copy(update={"id": c.id}) if isinstance(c, Candidate) else current
+
+    async def _risk_loop(self):
+        while True:
+            event = await self.risk_queue.get()
+            try:
+                c = event.payload
+                await self.oms.execute(c, self.markets[c.market_id], self.book(c.market_id, c.venue, c.outcome), self.settings.mode)
+                self.metrics.counters["orders_routed"] += 1
+            except RiskRejected as exc:
+                self.metrics.counters["risk_rejections"] += 1
+                self.metrics.counters[f"risk:{str(exc)}"] += 1
+            except Exception as exc:
+                self.risk.halt(f"Routing failure: {type(exc).__name__}")
+            finally:
+                self.risk_queue.task_done()
+
+    async def _maintenance(self):
+        while True:
+            await asyncio.sleep(.5)
+            now = utcnow().timestamp()
+            while self.expirations and self.expirations[0][0] <= now:
+                _, revision, market_id = heapq.heappop(self.expirations)
+                if self.expiration_revisions.get(market_id) == revision:
+                    await self.recalculate(market_id)
+            await self.oms.tick()
+            if self.risk.kill_switch:
+                await self.oms.cancel_all()
+            positive = {k for k, c in self.opportunities.items()
+                        if c.ev_per_contract >= self.settings.pricing.min_ev}
+            self.metrics.update_opportunities(positive, utcnow())
+            for name, record in self.registry.records.items():
+                if record.enabled:
+                    try:
+                        record.health = await record.plugin.health_check()
+                    except Exception as exc:
+                        record.health = {"status": "error", "message": type(exc).__name__}
+
+    async def _settlement_loop(self):
+        while True:
+            event = await self.settlement_queue.get()
+            try:
+                await self.apply_settlement(event.payload)
+            finally:
+                self.settlement_queue.task_done()
+
+    async def apply_settlement(self, result: SettlementResult):
+        market = self.markets.get(result.market_id)
+        if not market or result.market_id in self.settlements:
+            return
+        if set(result.outcome_payouts) != set(market.outcomes) or not result.evidence.strip():
+            raise ValueError("Settlement must cover the exact opposing outcome set and include evidence")
+        if not result.synthetic:
+            raise ValueError("Native settlement reconciliation is not enabled")
+        async with self.oms.lock:
+            if result.market_id in self.settlements:
+                return
+            relevant = [o for o in self.risk.orders.values() if o.market_id == result.market_id]
+            if any(o.synthetic != result.synthetic for o in relevant):
+                raise ValueError("Simulated and real settlements cannot be mixed")
+            if any(o.status.value == "unknown" for o in relevant):
+                raise ValueError("Reconcile unknown orders before settlement")
+            for order in relevant:
+                await self.oms._cancel(order)
+            relevant = [self.risk.orders[o.id] for o in relevant]
+            if any(o.status.value in {"unknown", "cancel_pending"} for o in relevant):
+                raise ValueError("Confirm cancellations before settlement")
+            realized = Decimal(0)
+            settled_ids = set(self.risk.settled)
+            self.risk.roll_day()
+            for order in relevant:
+                cost = order.average_fill_price * order.filled_quantity + order.fees
+                payout = cost if result.refund else order.filled_quantity * result.outcome_payouts[order.outcome]
+                realized += payout - cost
+                settled_ids.add(order.id)
+            settlements = {**self.settlements, result.market_id: {**result.model_dump(mode="json"), "realized_pnl": str(realized)}}
+            daily_pnl = self.risk.daily_realized + realized
+            await self.storage.save_config("accounting", {
+                "daily_date": self.risk.daily_date.isoformat(), "daily_realized": str(daily_pnl),
+                "settled_order_ids": sorted(settled_ids), "settlements": settlements,
+            })
+            self.risk.settled, self.settlements, self.risk.daily_realized = settled_ids, settlements, daily_pnl
+        await self.recalculate(result.market_id)
+        await self.notice("info", f"Simulated settlement recorded; realized P&L {realized:.2f}", "paper_settlement")
+
+    async def control(self, *, auto_trade=None, kill_switch=None):
+        if kill_switch is True:
+            self.risk.halt("Operator emergency stop")
+            await self.storage.save_config("kill_switch", True)
+            await self.oms.cancel_all()
+        elif kill_switch is False:
+            if any(o.status.value == "unknown" for o in self.risk.orders.values()):
+                raise ValueError("Reconcile unknown orders before resetting")
+            self.risk.kill_switch, self.risk.kill_reason = False, ""
+            self.halt_persisted = False
+            await self.storage.save_config("kill_switch", False)
+        if auto_trade is not None:
+            if auto_trade and self.settings.mode not in {"demo", "paper"}:
+                raise ValueError("Native trading requires separate documented live preflight")
+            if auto_trade and self.risk.kill_switch:
+                raise ValueError("Reset kill switch first")
+            self.risk.auto_trade = auto_trade
+            if not auto_trade:
+                await self.oms.cancel_all()
+        await self.notice("info", f"Automatic paper trading: {self.risk.auto_trade}; kill switch: {self.risk.kill_switch}", "operator")
+
+    def candidate_public(self, candidate):
+        market = self.markets[candidate.market_id]
+        config = market_config(self.settings.pricing, market)
+        return {**candidate.model_dump(mode="json"), "event_name": market.event_name,
+                "sport": market.sport, "league": market.league, "market_type": market.market_type,
+                "player": market.player, "line": str(market.line) if market.line is not None else None,
+                "status": "POSITIVE EV" if candidate.ev_per_contract >= config.min_ev and candidate.roi >= config.min_roi else "NEGATIVE EV"}
+
+    def quote_public(self, quote):
+        return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(),
+                "fresh": quote.status == "active" and quote.fresh(self.settings.pricing.max_quote_age_ms)}
+
+    def market_detail(self, market_id):
+        market = self.markets[market_id]
+        return {
+            "market": market.model_dump(mode="json"),
+            "quotes": [self.quote_public(q) for q in self.quotes.get(market_id, {}).values()],
+            "books": [b.model_dump(mode="json") for b in self.books.get(market_id, {}).values()],
+            "opportunities": [self.candidate_public(c) for c in self.opportunities.values() if c.market_id == market_id],
+            "history": list(self.history.get(market_id, [])), "signal": self.signals.get(market_id),
+        }
+
+    def state(self):
+        orders = list(self.risk.orders.values())
+        filled = [o for o in orders if o.filled_quantity]
+        positions = [{
+            "market_id": o.market_id, "event_name": self.markets[o.market_id].event_name if o.market_id in self.markets else o.event_id,
+            "venue": o.venue, "outcome": o.outcome, "quantity": o.filled_quantity,
+            "average_price": str(o.average_fill_price), "cost": str(o.average_fill_price * o.filled_quantity + o.fees),
+            "synthetic": o.synthetic, "status": "unsettled",
+        } for o in filled if o.id not in self.risk.settled]
+        metrics = self.metrics.snapshot()
+        metrics.update({"fill_rate": len(filled) / len(orders) if orders else 0, "order_count": len(orders),
+                        "fill_count": sum(o.filled_quantity for o in orders),
+                        "realized_pnl": str(self.risk.daily_realized), "simulated": True,
+                        "clv": None, "clv_status": "Requires compatible verified closing observations",
+                        "bus_dropped": dict(self.bus.dropped), "bus_events": dict(self.bus.counts)})
+        return {
+            "mode": self.settings.mode, "auto_trade": self.risk.auto_trade,
+            "kill_switch": self.risk.kill_switch, "kill_reason": self.risk.kill_reason,
+            "synthetic": self.settings.mode in {"demo", "paper"}, "started_at": self.started_at.isoformat(),
+            "timestamp": utcnow().isoformat(), "plugins": self.registry.public(),
+            "markets": [m.model_dump(mode="json") for m in self.markets.values()],
+            "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
+            "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
+            "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
+            "positions": positions, "metrics": metrics,
+            "risk": {**self.risk.config.model_dump(mode="json"), "total_exposure": str(self.risk.exposures()),
+                     "daily_realized": str(self.risk.daily_realized)},
+            "pricing": self.settings.pricing.model_dump(mode="json"),
+            "events": list(self.events),
+            "signals": [{"market_id": k, **v} for k, v in self.signals.items()],
+            "quarantine": self.matcher.quarantine[-30:] + [
+                item for record in self.registry.records.values()
+                if getattr(record.plugin, "mapper", None)
+                for item in list(record.plugin.mapper.quarantine.values())[-30:]
+            ],
+            "settlements": self.settlements,
+            "plugin_load_errors": self.registry.discovery_errors,
+        }
+

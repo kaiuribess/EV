@@ -1,0 +1,191 @@
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlparse
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict
+
+from .core.config import PricingConfig, RiskConfig, Settings
+from .core.models import Envelope, SettlementResult
+from .engine import Engine
+
+
+class ControlBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    auto_trade: bool | None = None
+    kill_switch: bool | None = None
+
+
+class ToggleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
+class ConfigBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    config: dict
+
+
+def local_origin(value, port=8000):
+    if value is None:
+        return True
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port in {port, 5173}
+
+
+def create_app(settings=None):
+    engine = Engine(settings or Settings())
+
+    @asynccontextmanager
+    async def lifespan(app):
+        await engine.start()
+        try:
+            yield
+        finally:
+            await engine.stop()
+
+    app = FastAPI(title="EV Platform", version="0.1.0", lifespan=lifespan)
+    app.state.engine = engine
+
+    @app.middleware("http")
+    async def loopback_guard(request: Request, call_next):
+        if request.url.hostname not in {"localhost", "127.0.0.1", "::1", "testserver"}:
+            return JSONResponse({"detail": "Local access only"}, status_code=403)
+        if not local_origin(request.headers.get("origin"), engine.settings.port):
+            return JSONResponse({"detail": "Untrusted origin"}, status_code=403)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.headers.get("X-EV-Control") != "local":
+            return JSONResponse({"detail": "Local control header required"}, status_code=403)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    @app.get("/api/health")
+    async def health():
+        return {"status": "running", "mode": engine.settings.mode, "kill_switch": engine.risk.kill_switch}
+
+    @app.get("/api/state")
+    async def state():
+        return engine.state()
+
+    @app.post("/api/shutdown")
+    async def shutdown():
+        if not hasattr(app.state, "request_shutdown"):
+            raise HTTPException(409, "Shutdown is available through the local launcher")
+        await engine.control(auto_trade=False)
+        app.state.request_shutdown()
+        return {"status": "stopping"}
+
+    @app.get("/api/markets/{market_id:path}")
+    async def market(market_id: str):
+        if market_id not in engine.markets:
+            raise HTTPException(404, "Unknown market")
+        return engine.market_detail(market_id)
+
+    @app.post("/api/control")
+    async def control(body: ControlBody):
+        try:
+            await engine.control(**body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return engine.state()
+
+    @app.post("/api/orders/{order_id}/cancel")
+    async def cancel(order_id: str):
+        if order_id not in engine.risk.orders:
+            raise HTTPException(404, "Unknown order")
+        await engine.oms.cancel(order_id)
+        return engine.state()
+
+    @app.post("/api/paper/settle")
+    async def paper_settle(body: SettlementResult):
+        if not body.synthetic or engine.settings.mode not in {"demo", "paper"}:
+            raise HTTPException(409, "Only explicitly simulated settlements are accepted here")
+        try:
+            await engine.apply_settlement(body)
+            await engine.bus.publish(Envelope(schema_name="trade.settlement", source="paper_operator", payload=body))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        return engine.state()
+
+    @app.post("/api/plugins/{name}/toggle")
+    async def toggle(name: str, body: ToggleBody):
+        if name not in engine.registry.records:
+            raise HTTPException(404, "Unknown plugin")
+        if body.enabled:
+            await engine.registry.start(name, engine.context(name))
+        else:
+            await engine.registry.stop(name)
+            if name in {"synthetic_schedule", "positive_ev", "paper_execution"}:
+                engine.risk.auto_trade = False
+                await engine.oms.cancel_all()
+        return engine.state()
+
+    @app.post("/api/plugins/{name}/config")
+    async def configure(name: str, body: ConfigBody):
+        if name not in engine.registry.records:
+            raise HTTPException(404, "Unknown plugin")
+        try:
+            enabled = engine.registry.records[name].enabled
+            engine.registry.configure(name, body.config)
+            if name == "positive_ev":
+                engine.settings.pricing = PricingConfig.model_validate(body.config)
+                await engine.storage.save_config("pricing", engine.settings.pricing.model_dump(mode="json"))
+            if enabled:
+                await engine.registry.stop(name)
+                await engine.registry.start(name, engine.context(name))
+            await engine.storage.save_config("plugin_configs", {k: r.config for k, r in engine.registry.records.items()})
+        except (ValueError, TypeError) as exc:
+            # Pydantic errors may echo secrets; only non-secret fields are allowed by config schemas.
+            raise HTTPException(422, "Plugin configuration did not pass schema validation")
+        return engine.state()
+
+    @app.post("/api/settings")
+    async def settings_update(body: dict):
+        allowed_pricing = set(PricingConfig.model_fields)
+        allowed_risk = set(RiskConfig.model_fields) - {"live_max_order_stake"}
+        if set(body) - allowed_pricing - allowed_risk:
+            raise HTTPException(422, "Unknown or restricted setting")
+        try:
+            pricing = PricingConfig.model_validate({**engine.settings.pricing.model_dump(),
+                                                    **{k: v for k, v in body.items() if k in allowed_pricing}})
+            risk = RiskConfig.model_validate({**engine.risk.config.model_dump(),
+                                              **{k: v for k, v in body.items() if k in allowed_risk}})
+        except ValueError:
+            raise HTTPException(422, "Settings failed validation")
+        engine.settings.pricing = pricing
+        engine.risk.config = engine.settings.risk = risk
+        engine.registry.configure("positive_ev", pricing.model_dump(mode="json"))
+        await engine.storage.save_config("pricing", pricing.model_dump(mode="json"))
+        await engine.storage.save_config("risk", risk.model_dump(mode="json"))
+        return engine.state()
+
+    @app.websocket("/ws")
+    async def websocket(socket: WebSocket):
+        if not local_origin(socket.headers.get("origin"), engine.settings.port):
+            await socket.close(code=1008)
+            return
+        await socket.accept()
+        try:
+            while True:
+                await socket.send_json({"type": "state", "data": engine.state()})
+                await asyncio.sleep(.5)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+
+    dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if dist.exists():
+        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+        @app.get("/")
+        async def dashboard():
+            return FileResponse(dist / "index.html")
+    else:
+        @app.get("/")
+        async def dashboard_missing():
+            return {"message": "Build dashboard with setup_windows.ps1 or run npm run dev in frontend", "api": "/docs"}
+    return app
+
