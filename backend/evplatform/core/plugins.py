@@ -241,7 +241,8 @@ class PluginRegistry:
         return [{
             "manifest": r.plugin.manifest.model_dump(mode="json"),
             "enabled": r.enabled, "health": r.health,
-            "credential_status": r.credential_status,
+            "credential_status": ("authenticated" if r.health.get("authenticated") is True else
+                                  "rejected" if r.health.get("state") == "unauthorized" else r.credential_status),
             "config": r.config,
         } for r in self.records.values()]
 

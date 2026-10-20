@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from pydantic import Field
 from websockets.asyncio.client import connect as ws_connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from .common import (
     CredentialsMissing, NativeSettings, NativeTransport, SequenceGap,
@@ -170,6 +170,8 @@ class NovigClient(NativeTransport):
         self.book = NovigBook()
         self.selection: dict = {"private": ["orders", "positions"]}
         self._pending: dict[int, asyncio.Future] = {}
+        self.authenticated = False
+        self.health_reason = "Novig is disconnected"
 
     def _load_key(self):
         if not self.settings.api_key or not self.settings.private_key_path:
@@ -199,8 +201,28 @@ class NovigClient(NativeTransport):
 
     async def connect(self) -> dict:
         result = await self.request("POST", "/v3/echo", body={"probe": "evplatform"})
+        self.authenticated = True
         self.health = "authenticated"
+        self.health_reason = "Novig REST signature verified; WebSocket subscription not yet confirmed"
         return result
+
+    async def disconnect(self) -> None:
+        await super().disconnect()
+        self.authenticated = False
+        self.health_reason = "Novig is disconnected"
+
+    def health_check(self) -> dict:
+        return {**super().health_check(), "authenticated": self.authenticated,
+                "streaming": self.health == "streaming" and self._ws is not None,
+                "reason": self.health_reason}
+
+    def _invalidate_stream(self, state: str, reason: str) -> dict:
+        self.error_count += 1
+        self.book.reset()
+        self.health, self.health_reason = state, reason
+        # Only local classifications are emitted; never expose response bodies or headers.
+        return {"type": "transport_invalidated", "venue": self.venue_id,
+                "reason": state, "all_books_invalid": True, "reconcile_private": True}
 
     async def discover_events(self, **params) -> dict:
         return await self.request("GET", "/v3/catalog/events", params=params)
@@ -294,30 +316,61 @@ class NovigClient(NativeTransport):
                 url = self.HOSTS[self.settings.environment].replace("https://", "wss://") + "/v3/ws"
                 async with ws_connect(url, additional_headers=self.headers("GET", "/v3/ws"),
                                       ping_interval=15, max_size=16 * 1024 * 1024) as socket:
-                    self._ws, self.health = socket, "streaming"
-                    await self._command("subscribe", self.selection, wait=False)
+                    self.authenticated = True
+                    self._ws, self.health = socket, "subscribing"
+                    self.health_reason = "Waiting for Novig WebSocket subscription acknowledgement"
+                    subscription_nonce = await self._command("subscribe", self.selection, wait=False)
                     async for raw in socket:
                         frame = json.loads(raw)
                         if not isinstance(frame, dict):
                             raise ValueError("Novig frame must be an object")
                         self.last_message_time = time.time()
-                        self.book.apply(frame)
                         nonce = frame.get("nonce")
+                        if self.health == "subscribing" and nonce in {None, subscription_nonce}:
+                            if "error" in frame or "code" in frame:
+                                error = frame.get("error")
+                                code = error.get("code") if isinstance(error, dict) else frame.get("code", error)
+                                if code == "RATE_LIMIT_EXCEEDED":
+                                    raise VenueError("Novig subscription temporarily throttled")
+                                yield self._invalidate_stream(
+                                    "subscription_rejected", "Novig rejected the WebSocket subscription; check requested channels and key permissions")
+                                return
+                            if nonce == subscription_nonce and (
+                                not isinstance(frame.get("subscribed"), dict)
+                                or not isinstance(frame.get("snapshot"), dict)
+                            ):
+                                raise VenueError("Novig subscription acknowledgement is missing its snapshot")
+                        self.book.apply(frame)
+                        if nonce == subscription_nonce and "subscribed" in frame:
+                            self.health = "streaming"
+                            self.health_reason = "Novig WebSocket subscription confirmed"
                         if nonce in self._pending and not self._pending[nonce].done():
                             self._pending[nonce].set_result(frame)
                         failures = 0
                         yield frame
                     raise VenueError("Novig stream closed; reconcile and resubscribe")
-            except (OSError, ConnectionClosed, VenueError, ValueError, KeyError, TypeError, AttributeError) as exc:
-                self.error_count += 1
-                self.book.reset()
-                yield {"type": "transport_invalidated", "venue": self.venue_id,
-                       "reason": type(exc).__name__, "all_books_invalid": True, "reconcile_private": True}
+            except (OSError, TimeoutError, ConnectionClosed, InvalidHandshake, VenueError,
+                    ValueError, KeyError, TypeError, AttributeError) as exc:
+                status = exc.response.status_code if isinstance(exc, InvalidStatus) else None
+                if status in {401, 403, 451}:
+                    if status == 401:
+                        self.authenticated = False
+                    state, reason = {
+                        401: ("unauthorized", "Novig WebSocket authentication failed (HTTP 401); check key, environment, signature, and clock"),
+                        403: ("access_denied", "Novig WebSocket access denied (HTTP 403); this endpoint requires a trading or trading::read key"),
+                        451: ("geolocation_required", "Novig WebSocket location check failed (HTTP 451); review eligibility in the official Novig app"),
+                    }[status]
+                    yield self._invalidate_stream(state, reason)
+                    return
+                yield self._invalidate_stream("reconnecting", "Novig WebSocket interrupted; reconnecting and resubscribing")
                 if not self._closed:
                     await self._backoff(failures)
                     failures += 1
             finally:
                 self._ws = None
+                if self.health in {"streaming", "subscribing"}:
+                    self.health = "disconnected"
+                    self.health_reason = "Novig WebSocket disconnected"
                 for future in self._pending.values():
                     if not future.done():
                         future.set_exception(VenueError("Disconnected; reconcile before resubmission"))

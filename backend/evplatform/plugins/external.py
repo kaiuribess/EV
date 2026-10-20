@@ -159,6 +159,9 @@ class NativeMonitor(Plugin):
             async for frame in self.client.stream_updates():
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
+                if frame.get("type") == "transport_invalidated":
+                    self.engine.metrics.counters[f"native_invalidations:{self.manifest.name}"] += 1
+                    continue
                 self.frames += 1
                 self.engine.metrics.counters[f"native_messages:{self.manifest.name}"] += 1
         except asyncio.CancelledError:
@@ -179,8 +182,10 @@ class NativeMonitor(Plugin):
         if not self.client:
             return {"status": "blocked", "message": "Native credentials missing; trading remains gated"}
         state = self.client.health_check()
-        return {**state, "status": "error" if self.task and self.task.done() else state["state"],
-                "message": "Native monitor; normalized venue mapping and live preflight required for orders",
+        blocked = state["state"] in {"credentials_missing", "unauthorized", "access_denied", "geolocation_required", "subscription_rejected"}
+        status = "blocked" if blocked else "error" if self.task and self.task.done() else state["state"]
+        return {**state, "status": status,
+                "message": state.get("reason") or "Native monitor; normalized venue mapping and live preflight required for orders",
                 "frames": self.frames}
 
 
