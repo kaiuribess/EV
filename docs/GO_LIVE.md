@@ -63,6 +63,21 @@ the profile's environment must match the workspace. Keep one approved native
 environment/profile active at a time. Do not reuse the demo database as an
 account ledger.
 
+For the first **Kalshi-only, one-order pilot**, a paused production workspace
+can be prepared with:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\prepare_kalshi_pilot.py --url http://127.0.0.1:8002
+```
+
+The command performs a read-only Kalshi account inventory, then sets a $1
+per-order/total exposure cap, one lifetime native order attempt, one open
+order, and quarter-Kelly sizing. It writes the matching local limits draft and
+prints whether the current release gate passes. It never transmits an order or
+creates launch evidence. Re-running shared feed setup preserves any stricter
+native money caps; it cannot silently reset this pilot's saved cap. Use the
+actual production port if different from 8002.
+
 Stop a managed workspace safely with its actual port:
 
 ```powershell

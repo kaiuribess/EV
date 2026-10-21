@@ -21,3 +21,16 @@ The running paper workspace reported zero verified native market mappings and ze
 To reach a defensible first real order, obtain a reference source contract with quote-bound current/active and withdrawal evidence for enough independent books, establish the exact contract settlement match or validate a separate interruption/payout model, bind the current exchange fees and executable depth, and pass the scoped account/order/settlement release checks. Re-evaluate a fresh market when those inputs exist; never reuse this snapshot as a signal. The [Kalshi demo account](https://help.kalshi.com/en/articles/13823775-creating-and-using-a-demo-account) has separate credentials from production and can validate exchange order handling with mock funds, but cannot establish real sportsbook quote quality or actual cash settlement.
 
 Offline verification on this build: 1,946 backend tests passed with 89% aggregate coverage; 97 frontend tests passed and the Vite build succeeded. These tests do not constitute an authenticated production order-to-settlement test.
+
+At 23:23 UTC on October 21, a fresh authenticated production account probe
+confirmed $50.00 spendable cash, trading permission, an attested account
+location, and zero open orders or positions. The Kalshi market stream was
+authenticated. The paused production workspace now has a **one-attempt, $1
+pilot cap**, quarter-Kelly sizing, and a matching local limits draft. This
+selects Kalshi as the first operational venue; the Novig monitor may remain
+read-only. No reviewed launch profile or native market mapping was created.
+The dashboard still reports `safe_to_arm=false`, zero verified native markets,
+zero eligible real reference markets and zero native candidates. The later
+Orlando/Atlanta market price moved materially during this review; old odds
+must never be reused as an EV signal. The remaining quote-status, settlement
+and actual lifecycle evidence above still block automatic orders.

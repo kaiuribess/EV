@@ -14,6 +14,16 @@ market mappings, fees and genuine lifecycle evidence are reviewed, copy its
 validated `LiveLimits` fields into that account's launch profile. Scope and
 limit changes invalidate old launch evidence.
 
+The first Kalshi production pilot is deliberately narrower. Running
+`scripts/prepare_kalshi_pilot.py` in a paused production workspace saves a
+temporary **$1 per-order and total exposure cap**, one open order, one order
+per minute and one lifetime native order attempt. It retains quarter Kelly,
+the $5 reporting unit, account-specific available-cash checks and no daily-loss
+stop. That local pilot draft supersedes the uncapped example below until it is
+explicitly changed after the first order has been fully reconciled. The script
+only probes the account and configures limits; it creates no market mapping,
+launch profile, execution certificate or order.
+
 ```json
 {
   "max_order_stake_usd": null,

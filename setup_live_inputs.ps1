@@ -135,10 +135,9 @@ if ($isPaper) {
 } else {
     $riskChanges.available_cash_only = $true
     $riskChanges.stake_sizing = 'quarter_kelly'
-    foreach ($key in @('max_order_stake', 'max_event_exposure', 'max_player_exposure',
-            'max_venue_exposure', 'max_correlated_exposure', 'max_total_exposure')) {
-        $riskChanges[$key] = $null
-    }
+    # This script configures shared input feeds. Preserve any stricter native
+    # stake, exposure, rate and lifetime-attempt limits already saved by an
+    # operator; a restart must not silently remove the pilot's risk cap.
 }
 $riskBody = $riskChanges | ConvertTo-Json -Compress
 Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
