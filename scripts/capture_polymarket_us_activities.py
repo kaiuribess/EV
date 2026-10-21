@@ -15,6 +15,7 @@ from evplatform.core.lifecycle_evidence import artifact_digest
 from evplatform.core.models import utcnow
 from evplatform.venues.polymarket_us import PolymarketUSClient, PolymarketUSSettings
 from evplatform.venues.polymarket_us_activities import activity_read_guard, capture_activities
+from evplatform.venues.polymarket_us_private_evidence import capture_private_evidence
 
 
 async def run(args):
@@ -36,6 +37,11 @@ async def run(args):
             await client.connect()
             artifact["authenticated"] = True
             artifact["account_balance_response"] = client.account_snapshot
+            if getattr(args, "stream_seconds", 0):
+                try:
+                    artifact["private_wire_evidence"] = await capture_private_evidence(client, seconds=args.stream_seconds)
+                except Exception as exc:
+                    artifact["errors"].append({"operation": "private_wire", "error": type(exc).__name__})
             try:
                 participant = await client.authenticated_participant()
                 identity = participant.get("rfqUserId") if isinstance(participant, dict) else None
@@ -62,6 +68,8 @@ async def run(args):
         "pagination_complete": activities.get("pagination_complete", False), "parse_complete": activities.get("complete", False),
         "errors": artifact["errors"] + activities.get("errors", []), "cash_posting_join_verified": False,
         "settlements_emitted": 0, "certifies_current_oms": False, "execution_enabled": False}
+    if "private_wire_evidence" in artifact:
+        summary["private_wire"] = artifact["private_wire_evidence"]["summary"]
     protected_json(args.output / "activities.json", artifact)
     protected_json(args.output / "coverage.json", summary)
     print(json.dumps({"ok": True, **summary}))
@@ -72,6 +80,8 @@ def main(argv=None):
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-pages", type=int, choices=range(1, 21), default=4)
+    parser.add_argument("--stream-seconds", type=int, choices=range(0, 61), default=0,
+                        help="Optional bounded private read-only subscription capture; zero skips")
     args = parser.parse_args(argv)
     try:
         asyncio.run(run(args))

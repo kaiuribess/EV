@@ -63,10 +63,10 @@ current trading authorization.
 
 ## Validation
 
-Full offline run: **1,728 backend tests passed in 47.81 seconds**, with
-**88.50% statement coverage** (11,547 of 13,047 statements), plus **89 frontend
+Latest full offline run: **1,757 backend tests passed in 50.09 seconds**, with
+**88.58% statement coverage** (11,630 of 13,129 statements), plus **89 frontend
 tests passed** and a successful TypeScript/Vite production build. The run is
-saved in `data/validation-live-gaps-20261021.log`. This is software regression
+saved in `data/validation-sdk-rules-20261021.log`. This is software regression
 evidence, not genuine native lifecycle or profitability validation. No new
 live fill latency was measured because no native order was placed.
 
@@ -74,6 +74,15 @@ The audit also corrected stale documentation that still described $5 as a stake
 cap. The validated local draft already correctly uses quarter Kelly, $5 units,
 no fixed dollar cap, no daily-loss stop, cash segregation and event/player overlap
 protection. It remains unapplied until a reviewed launch scope passes.
+
+## Follow-up implementation and source review
+
+- Detailed contingency rules now participate in runtime market identity and durable serialization. Mapping evidence validation rejects omitted or contradictory runtime rules. Existing identities remain stable when this extension is absent; missing evidence stays missing.
+- The official Polymarket US Python SDK reveals private balance identifiers omitted by the prose example. A bounded private capture now preserves these fields and reports their presence without exposing values. The real 20-second account capture contained only an order snapshot, so settlement identifiers and cash joins were not established. See [the SDK comparison and capture](POLYMARKET_US_SETTLEMENT_GAPS.md).
+- Read the full ProphetX order-history OpenAPI schema, wallet guide, and its GitHub integration guide. The reviewed history schema declares a string cursor; the wallet guide says the cursor is absent on the last page. Neither establishes the observed order-history null-cursor semantics. No undocumented history-completeness assertion was added.
+- No new support messages were sent. GitHub examples and official documentation were inspected directly; Chrome was unavailable through this session's browser connection.
+
+After loading these changes at approximately **15:11 UTC**, the local dashboard was healthy in demo mode with automation off, the kill switch active and zero native orders. All four native monitors authenticated and reached streaming; Novig retained nine startup request errors, so this is not a claim of an error-free session. Parlay's server reported `tier: scale`, `push_mode: raw`, and `min_push_interval_s: 0` for the NBA subscription, confirming the previously transferred temporary trial. That interval is a coalescing setting, not measured end-to-end latency. Real quote mappings still numbered zero.
 
 ## Official contracts rechecked
 

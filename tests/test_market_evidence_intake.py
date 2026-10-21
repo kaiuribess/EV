@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from evplatform.core.market_review import ContractReview, FACT_FIELDS, FieldEvidence, compare_contracts
+from evplatform.core.models import SettlementContingencies
 from evplatform.integrations.review_report import ReviewPair, ReviewPairs, build_review_report
 from test_market_review import review
 from test_review_report import NOW, record
@@ -115,7 +116,9 @@ def market_review(market, source, source_market_id):
                   sport=market.sport, league=market.league, participant_ids=market.participants,
                   start_time=market.start_time, market_type=market.market_type, player_id=market.player_id,
                   statistic=market.statistic, line=market.line, outcomes=market.outcomes,
-                  **{k: v for k, v in market.settlement.model_dump().items() if k != "payout"})
+                  **{k: v for k, v in market.settlement.model_dump().items() if k not in {"payout", "contingencies"}})
+    if market.settlement.contingencies:
+        values.update(market.settlement.contingencies.model_dump(exclude={"schema_version"}))
     return evidenced(review(**values))
 
 
@@ -142,6 +145,9 @@ def test_same_fingerprint_cannot_conceal_different_reviewed_line(market):
 
 
 def test_complete_fixture_reviews_validate_offline_but_do_not_authorize(market):
+    from evplatform.core.market_review import RULE_FIELDS
+    rules = SettlementContingencies(**{field: getattr(review(), field) for field in RULE_FIELDS})
+    market = market.model_copy(update={"settlement": market.settlement.model_copy(update={"contingencies": rules})})
     module = script("validate_market_mappings")
     provider, native = mapping_fixture(market)
     pairs = [ReviewPair(left=market_review(market, item.bookmaker, "OFFLINE source market"),

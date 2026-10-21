@@ -55,7 +55,9 @@ From the repository directory:
 
 The last command binds each pair's `provider_signature`, `canonical_market_id`, and `canonical_identity` to the actual mapping, its bookmaker ID and exact execution instrument. It also compares the real canonical fields with the reviewed fields; copying the correct hash over a different threshold fails. Full review content contributes to the report digest. The validator still performs no publication. Document bytes must be inspected and their hash checked independently; a declared SHA-256 is not a verification signature.
 
-Do not lose these detailed contingencies when creating a canonical mapping. The current runtime settlement schema stores strings for period/scope/void/participation/push rather than this expanded review schema. Any approved mapping must represent **all** applicable rules in its fingerprinted settlement fields or first introduce a validated versioned settlement type. Supplemental review fields are not automatically injected into the runtime.
+The runtime now preserves these rules in `settlement.contingencies`, a versioned `SettlementContingencies` extension. Set `schema_version` to `1` and supply all eight rule fields listed above from the reviewed contract. Every rule contributes to the canonical market identity and survives serialization/restart. The evidence validator rejects a mapping that omits this extension or disagrees with either reviewed contract; agreeing review documents alone cannot conceal different runtime rules.
+
+Legacy records without the extension retain their original identity hash and load normally, with their missing rule evidence still missing. No migration fabricates rules or approves an old mapping. Supplying explicit strings establishes internal consistency only; actual source applicability and equivalence still require evidence.
 
 ## Order minima and quarter-Kelly evidence
 

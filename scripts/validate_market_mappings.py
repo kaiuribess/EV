@@ -14,7 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from evplatform.core.readiness import digest_json
-from evplatform.core.market_review import compare_contracts
+from evplatform.core.market_review import RULE_FIELDS, compare_contracts
 from evplatform.integrations.normalization import MappingFile
 from evplatform.integrations.review_report import ReviewPairs
 from evplatform.venues.bridge import VerifiedVenueMapping
@@ -152,6 +152,12 @@ def validate_mappings(provider_files: list[MappingFile], venue_files: list[Venue
                   "statistic": market.statistic, "line": market.line, "outcomes": market.outcomes,
                   **{field: getattr(market.settlement, field) for field in
                      ("period", "scope", "overtime", "participation", "void_rule", "push_rule", "currency", "contract_type")}}
+        rules = market.settlement.contingencies
+        if rules is None:
+            issue("evidence.runtime_rules_missing", scope,
+                  "Retain all reviewed contingency rules in settlement.contingencies before publishing a mapping")
+        else:
+            values.update({field: getattr(rules, field) for field in RULE_FIELDS})
         for side in (pair.left, pair.right):
             for field, expected in values.items():
                 actual = getattr(side, field)

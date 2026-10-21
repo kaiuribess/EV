@@ -19,6 +19,32 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class SettlementContingencies(Contract):
+    """Versioned exact rule statements; none are inferred from a generic void.
+
+    All fields are required when this extension is supplied. These statements
+    preserve reviewed contract identity, not a claim that external facts were
+    verified or a model for pricing different contracts.
+    """
+    schema_version: Literal[1] = 1
+    postponement_rule: str = Field(min_length=1, max_length=4000)
+    interruption_rule: str = Field(min_length=1, max_length=4000)
+    venue_change_rule: str = Field(min_length=1, max_length=4000)
+    forfeit_rule: str = Field(min_length=1, max_length=4000)
+    tie_rule: str = Field(min_length=1, max_length=4000)
+    correction_rule: str = Field(min_length=1, max_length=4000)
+    official_result_rule: str = Field(min_length=1, max_length=4000)
+    payout_rule: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("postponement_rule", "interruption_rule", "venue_change_rule",
+                     "forfeit_rule", "tie_rule", "correction_rule", "official_result_rule", "payout_rule")
+    @classmethod
+    def explicit_rule(cls, value):
+        if not value.strip() or value.strip().casefold() == "unknown":
+            raise ValueError("An explicit reviewed rule is required")
+        return value
+
+
 class Settlement(Contract):
     period: str = "full_game"
     scope: str = "event"
@@ -29,6 +55,15 @@ class Settlement(Contract):
     payout: Decimal = Field(default=Decimal("1"), gt=0)
     currency: str = "USD"
     contract_type: str = "binary"
+    contingencies: SettlementContingencies | None = None
+
+    def identity_payload(self) -> dict:
+        result = self.model_dump(mode="json")
+        # Keep existing persisted identities stable. Missing detail stays
+        # missing; legacy records are not silently assigned reviewed rules.
+        if self.contingencies is None:
+            result.pop("contingencies")
+        return result
 
 
 class Market(Contract):
@@ -72,7 +107,7 @@ class Market(Contract):
             "event": self.event_id, "sport": self.sport, "league": self.league,
             "type": self.market_type, "player": self.player_id,
             "statistic": self.statistic, "line": str(self.line.normalize()) if self.line is not None else None,
-            "outcomes": sorted(self.outcomes), "settlement": self.settlement.model_dump(mode="json"),
+            "outcomes": sorted(self.outcomes), "settlement": self.settlement.identity_payload(),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
