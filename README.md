@@ -116,9 +116,13 @@ applies the same feed/profile setup to its own paused workspace. This does not
 make the paper-only hypothetical sportsbook offer a native exchange order:
 real bets still require exact exchange mappings, quote-status and settlement
 evidence, account preflight, and the live activation gates. A complete provider
-game board is only a scoped
-baseline; it does not verify each retained price is still offered or that an
-exchange contract has equivalent settlement rules.
+game board is only a scoped baseline; it does not verify each retained price is
+still offered or that an exchange contract has equivalent settlement rules.
+Both workspaces block overlapping events and players and display a $5 unit.
+Paper stakes stay capped at $5 because the simulator has no account cash.
+The paused native workspace stores quarter-Kelly sizing with authenticated
+available-cash limits instead of a fixed dollar cap. Its independent account
+checks and live stake authorization still block real orders until validated.
 
 Useful commands:
 

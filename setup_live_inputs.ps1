@@ -110,13 +110,22 @@ if (@($pricing.enabled_reference_profiles).Count -ne $enabled.Count -or $current
         -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
 }
 
-# These operator preferences apply to both workspaces. The paper simulator
-# cannot know sportsbook account cash, so its per-order exposure stays capped
-# at one $5 reporting unit; the separate native cash-bound Kelly draft remains
-# unapplied until its account and launch checks can verify it.
+# The shared overlap and unit preferences apply to both workspaces. Paper has
+# no authenticated account cash, so its simulated stake stays capped at $5.
+# Native stores the requested quarter-Kelly/cash-only policy, but its separate
+# account and launch gates must still verify cash and authorize any real stake.
 $riskChanges = @{ block_overlapping_events = $true; block_overlapping_players = $true;
     unit_size_usd = '5'; daily_loss_limit = $null }
-if ($isPaper) { $riskChanges.max_order_stake = '5' }
+if ($isPaper) {
+    $riskChanges.max_order_stake = '5'
+} else {
+    $riskChanges.available_cash_only = $true
+    $riskChanges.stake_sizing = 'quarter_kelly'
+    foreach ($key in @('max_order_stake', 'max_event_exposure', 'max_player_exposure',
+            'max_venue_exposure', 'max_correlated_exposure', 'max_total_exposure')) {
+        $riskChanges[$key] = $null
+    }
+}
 $riskBody = $riskChanges | ConvertTo-Json -Compress
 Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
     -ContentType 'application/json' -Body $riskBody -TimeoutSec 30 | Out-Null
@@ -152,5 +161,9 @@ Write-Host 'Configured shared Parlay prop stream, complete game-board stream, an
 Write-Host 'The same research profiles and weights are configured for paper and native workspaces.'
 Write-Host "Workspace: $($result.mode). Automatic orders: $($result.auto_trade). Dashboard: $baseUrl"
 Write-Host 'Source feeds may need several seconds to authenticate and publish a snapshot. Check Provider Center.'
-Write-Host 'Parlay moneyline paper comparisons use live prices, but hypothetical offers, capacity and fills.'
+if ($isPaper) {
+    Write-Host 'Paper comparison: live Parlay prices; hypothetical offers, capacity and fills; $5 simulated stake cap.'
+} else {
+    Write-Host 'Native risk draft: quarter-Kelly, $5 reporting unit, verified available cash required; real stake authorization remains off.'
+}
 Write-Host 'Quote active status and settlement equivalence remain unverified. Native execution stays blocked.'
