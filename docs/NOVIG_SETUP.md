@@ -31,6 +31,17 @@ Keep the journal path printed by preparation. Reuse that journal throughout this
 setup, especially after an interruption. Never paste private keys into the
 dashboard or chat.
 
+If Windows blocks `.ps1` files, run the existing Python environment directly;
+no execution-policy change is necessary:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\setup_novig.py status
+```
+
+The same CLI supports `open --journal PATH`, `fund --journal PATH --amount AMOUNT`,
+and the other actions shown below. Windows key protection calls the operating
+system directly and does not launch PowerShell or require audit privileges.
+
 ## Owner-performed wallet opening
 
 ```powershell

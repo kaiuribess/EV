@@ -7,12 +7,10 @@ require an interactive operator and a durable journal before transmission.
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -225,40 +223,11 @@ def protect_private_path(path: Path):
     if os.name != "nt":
         path.chmod(0o700 if path.is_dir() else 0o600)
         return
-    script = r'''
-$ErrorActionPreference = 'Stop'
-$target = $env:EV_SETUP_ACL_TARGET
-$user = [Security.Principal.WindowsIdentity]::GetCurrent().User
-$system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-$item = Get-Item -LiteralPath $target -Force
-if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse' }
-if ($item.PSIsContainer) { $acl = [Security.AccessControl.DirectorySecurity]::new() }
-else { $acl = [Security.AccessControl.FileSecurity]::new() }
-$acl.SetOwner($user)
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($sid in @($user, $system)) {
-  if ($item.PSIsContainer) {
-    $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-  } else { $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow') }
-  $acl.AddAccessRule($rule)
-}
-$item.SetAccessControl($acl)
-$check = $item.GetAccessControl()
-if (!$check.AreAccessRulesProtected -or $check.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value) { throw 'acl' }
-$entries = @($check.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-if ($entries.Count -lt 1 -or $entries.Count -gt 2) { throw 'acl_count' }
-foreach ($entry in $entries) {
-  if ($entry.IdentityReference.Value -notin @($user.Value, $system.Value) -or $entry.AccessControlType -ne 'Allow' -or $entry.IsInherited -or $entry.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl) { throw 'acl_rule' }
-}
-'''
-    env = dict(os.environ, EV_SETUP_ACL_TARGET=str(path.absolute()))
+    from .windows_private_storage import protect_windows_path
     try:
-        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-            base64.b64encode(script.encode("utf-16le")).decode()], env=env, capture_output=True, timeout=20)
-    except (OSError, subprocess.TimeoutExpired):
+        protect_windows_path(path)
+    except OSError:
         raise SetupError("private_storage_acl_failed") from None
-    if result.returncode:
-        raise SetupError("private_storage_acl_failed")
 
 
 def _atomic(path: Path, content: bytes, protect):

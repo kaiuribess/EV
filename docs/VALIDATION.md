@@ -2,6 +2,18 @@
 
 ## Latest automated checks
 
+Follow-up Windows storage repair: **55 focused tests passed in 2.54 seconds**
+(52 setup cases plus three real Windows permissions/error-handling cases).
+The permissions helper now uses Win32 directly instead of launching PowerShell;
+tests block subprocess launches and verify the resulting owner/DACL independently
+through .NET. Actual protected file creation/replacement and refusal to write
+after a permissions failure passed. The saved production journal and signer also
+passed the real local lock/load path from Windows PowerShell with Restricted
+execution policy. That check made no network requests, preserved the journal,
+and confirmed no opening attempt or transfer was recorded. The earlier reported
+failure was not reproducible in the agent's environment; its shell dependency
+has been removed rather than treating the earlier passing check as sufficient.
+
 Executed on this Windows PC with Python 3.12.0:
 
 ```powershell
