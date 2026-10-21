@@ -63,3 +63,21 @@ The public source snapshots are in `data/prophet-api-review-20261021/`.
 Regression tests cover empty histories, malformed cursors and clocks, fee
 omissions, ownership mismatches, conflicting revisions, wallet disagreement and
 normal paid settlement using the history fee.
+
+## Captured owned-order replay
+
+The read-only diagnostic now preserves the documented individual order,
+matched-detail, history and wallet responses for application-owned native IDs.
+The offline verifier previously always reported ProphetX finances as missing;
+it can now compare their exact financial totals. Raw pages, pagination endings,
+receipt order, reporting clocks and account bindings are validated again during
+replay. The fee-enrichment routine is shared with the runtime.
+
+Offline tests include a $1 submitted stake with a $0.40 partial fill and a killed
+remainder, plus a closed winning fixture, missing fees, foreign ledger entries,
+cursor loops, altered summary rows, duplicate bundles and wrong account scopes.
+These are simulated fixtures with no exchange submission. A closed financial
+match does not clear the separate paid-settlement or restart evidence gates.
+
+Capture commands and environment-specific ledger selection are described in
+[native lifecycle evidence](NATIVE_LIFECYCLE_EVIDENCE.md).

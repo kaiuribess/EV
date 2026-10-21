@@ -31,7 +31,7 @@ _HOSTS = {"kalshi": set(KalshiClient.HOSTS.values()), "novig": set(NovigClient.H
 _GET = {
     "kalshi": r"/trade-api/v2/(?:api_keys|portfolio/(?:balance|orders|fills|settlements|positions))",
     "novig": r"/v3/(?:orders|portfolio/fills|history/positions|account/(?:orders|positions|subaccounts/[0-9a-fA-F-]+/(?:balance|transactions)))",
-    "prophetx": r"/partner/(?:websocket/connection-config|v4/mm/(?:get_balance|get_order_history|get_transactions|get_trades))",
+    "prophetx": r"/partner/(?:websocket/connection-config|v4/mm/(?:get_balance|get_order_history|get_transactions|get_trades|get_order_matched_detail|get_order/[A-Za-z0-9_-]{1,200}))",
 }
 _POST = {"kalshi": set(), "novig": {"/v3/echo"},
          "prophetx": {"/partner/auth/login", "/partner/auth/refresh", "/partner/v4/mm/websocket"}}
@@ -152,7 +152,7 @@ def configured_client(venue, environment, values, http):
     raise ValueError("Unsupported capture venue")
 
 
-async def capture_venue(venue, environment, values, *, max_pages=4):
+async def capture_venue(venue, environment, values, *, max_pages=4, managed_orders=()):
     if environment not in {"sandbox", "production"} or not 1 <= max_pages <= 20:
         raise ValueError("Explicit environment and bounded history are required")
     result = {"venue": venue, "environment": environment, "captured_at": utcnow().isoformat(),
@@ -212,6 +212,9 @@ async def capture_venue(venue, environment, values, *, max_pages=4):
                 except Exception as exc:
                     result["collections"][name] = {"complete": False, "rows": [], "error": type(exc).__name__,
                         "http_status": getattr(exc, "status_code", None)}
+            if venue == "prophetx":
+                from ..venues.prophetx_capture import capture_owned_orders
+                result["owned_order_evidence"] = await capture_owned_orders(client, managed_orders, max_pages=max_pages)
         except Exception as exc:
             result["errors"].append({"kind": type(exc).__name__, "http_status": getattr(exc, "status_code", None)})
         finally:
@@ -226,10 +229,13 @@ def capture_summary(artifact):
     return {"schema_version": 1, "captured_at": artifact["captured_at"], "build_id": artifact["build_id"],
         "artifact_sha256": hashlib.sha256(json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "execution_enabled": False, "certifies_current_oms": False,
+        "local_oms_scope": artifact.get("local_oms_scope"),
         "coverage": [{"venue": record["venue"], "environment": record["environment"],
             "authenticated": record["authenticated"], "identity_verified": record["identity_verified"],
             "account_fingerprint": record["account_fingerprint"], "errors": record["errors"],
             "history_scope": record.get("history_scope"),
+            "owned_order_evidence": {"orders": len(record.get("owned_order_evidence", [])),
+                "complete": sum(item.get("complete") is True for item in record.get("owned_order_evidence", []))},
             "collections": {name: {"rows": len(value.get("rows", [])), "complete": value["complete"],
                 "error": value.get("error"), "http_status": value.get("http_status"),
                 "pagination_end": value.get("pagination_end")}

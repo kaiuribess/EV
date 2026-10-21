@@ -316,6 +316,13 @@ async def owned_financial_order(client, intent, native_order_id, *, user_id, obs
         params={"from": math.floor(created.timestamp()), "to": math.ceil(now.timestamp()),
                 "market_id": str(_number(row.get("market_id"), "market identity", positive=True, whole=True))},
         observed_at=observed_at)
+    return order_with_history_fee(row, history, native_order_id, observed_at=observed_at or utcnow())
+
+
+def order_with_history_fee(row, history, native_order_id, *, observed_at):
+    """Exact-revision fee enrichment shared by runtime and captured replay."""
+    if "fee" in row:
+        return row
     matches = [item for item in unique_rows(history.rows, "order_id") if item.get("order_id") == native_order_id]
     if len(matches) != 1:
         raise ReconciliationError("Owned order fee is missing from reporting history")
@@ -325,7 +332,7 @@ async def owned_financial_order(client, intent, native_order_id, *, user_id, obs
     # comparisons remain exact; conflicting strings conservatively fail.
     if any(key not in reference or reference[key] != value for key, value in row.items()):
         raise ReconciliationError("Order history revision differs from owned order")
-    updated = source_time(row.get("updated_at"), observed_at=observed_at or utcnow(), name="Order update")
+    updated = source_time(row.get("updated_at"), observed_at=observed_at, name="Order update")
     if updated > history.last_synced_at:
         raise ReconciliationError("Order fee history watermark does not cover order revision")
     fee = _number(reference.get("fee"), "explicit order-history fee")

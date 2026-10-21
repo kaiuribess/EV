@@ -66,10 +66,10 @@ current trading authorization.
 
 ## Validation
 
-Latest full offline run: **1,821 backend tests passed in 48.15 seconds**, with
-**88.64% statement coverage** (11,729 of 13,232 statements), plus **89 frontend
+Latest full offline run: **1,853 backend tests passed in 48.17 seconds**, with
+**88.66% statement coverage** (11,834 of 13,347 statements), plus **89 frontend
 tests passed** and a successful TypeScript/Vite production build. The run is
-saved in `data/validation-readiness-coverage-20261021.log`. This is software regression
+saved in `data/validation-owned-final-20261021.log`. This is software regression
 evidence, not genuine native lifecycle or profitability validation. No new
 live fill latency was measured because no native order was placed.
 
@@ -123,6 +123,29 @@ approved. The API's bounded review contained 368 quarantined observations;
 all lacked verified market status and complete settlement/identity mappings.
 Completing local code cannot manufacture those upstream facts or a genuine
 paid settlement. Live execution remains disabled.
+
+### Owned-order replay and ledger-scope repair at 16:28 UTC
+
+The ProphetX forensic collector now captures individual owned order, matching,
+history and wallet responses for offline comparison through the runtime financial
+normalizer. It rejects foreign account IDs, malformed native IDs, incomplete
+pagination, altered summary rows and stale reporting clocks. It shares the exact
+history-fee fallback with the running adapter. The new offline rehearsal includes
+a $1 submitted stake, a $0.40 partial fill and a killed remainder; these are test
+fixtures with no exchange submission.
+
+The capture script also previously selected `data/evplatform.db` by default,
+even during production diagnostics. That is the demo ledger. It now selects
+`data/native-production.db` or `data/native-sandbox.db`, matching native startup,
+and records explicit overrides. Earlier empty local-OMS findings describe only
+the selected demo database; they do not establish the production ledger state.
+
+At **16:28:48 UTC**, the authenticated ProphetX recheck completed its seven-day
+history with zero orders/fills and one wallet transaction. The expected native
+production database did not exist and was reported unavailable. Offline review
+therefore reported `local_inventory_complete: false` and issued no lifecycle or
+launch certification. No real wager, sale, cancellation or transfer occurred.
+Protected evidence: `data/prophetx-native-ledger-audit-20261021/`.
 
 - [Parlay streaming schema](https://parlay-api.com/v1/asyncapi.json): bounded
   recent-row snapshots differ from explicitly complete game-board baselines.

@@ -59,6 +59,9 @@ def _economics(order, fills):
 
 
 def _remote_report(order, record, at):
+    if order.venue == "prophetx":
+        from ..venues.prophetx_capture import normalize_captured_order
+        return normalize_captured_order(order, record, observed_at=at)
     raw_orders = _collection(record, "orders")
     if order.venue == "novig":
         collections = [_collection(record, "orders_" + state) for state in ("pending", "open", "filled", "canceled", "rejected")]
@@ -89,7 +92,10 @@ def verify_native_lifecycle(capture: dict, *, expected_build_id: str | None = No
     if (capture.get("schema_version") != 1 or capture.get("collection_method") != "authenticated_read_only"
             or not isinstance(capture.get("venues"), list)):
         raise ValueError("Expected a read-only native account capture")
-    at = datetime.fromisoformat(capture["captured_at"])
+    started = datetime.fromisoformat(capture["captured_at"])
+    at = datetime.fromisoformat(capture.get("finished_at", capture["captured_at"]))
+    if started.tzinfo is None or at.tzinfo is None or at < started:
+        raise ValueError("Capture requires ordered timezone-aware start/completion clocks")
     if at.tzinfo is None or not isinstance(capture.get("build_id"), str) or not capture["build_id"]:
         raise ValueError("Capture requires an aware clock and build identity")
     records = {}

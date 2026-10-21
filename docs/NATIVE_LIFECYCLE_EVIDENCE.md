@@ -13,6 +13,25 @@ Run from the project directory. Use a new output directory for every capture; ex
 
 Use `--environment sandbox` only with that environment's separately configured credentials. Production credentials are never substituted into a sandbox. `--max-pages` bounds each collection; reaching the bound means incomplete history. Optional `--previous-capture` compares immutable identity continuity, not whether an actual process restart occurred.
 
+The default local ledger is `data/native-production.db` for production and
+`data/native-sandbox.db` for sandbox, matching the Windows native startup scripts.
+Use `--database <path>` only for an explicit alternative ledger. A missing native
+database remains unavailable; the collector never substitutes `data/evplatform.db`
+or interprets the demo inventory as a production inventory check. Earlier captures
+used the demo ledger by default and must be interpreted with that limitation.
+
+For ProphetX, the collector additionally reads exact order, paginated matching
+detail, order-history and wallet responses for locally managed native order IDs.
+Account/environment identity must match before those reads. A maximum of 20
+owned orders is allowed per capture; larger inventories are reported as bounded,
+not silently truncated. The offline verifier replays raw pages and source clocks
+through the same financial normalizer as the runtime. It checks fee fallback,
+filled stake, matched profit and wallet commissions without allocating aggregate
+fees to invented individual fills. Pagination exhaustion is checked again; a
+saved `complete` flag is insufficient. A matching financial report still does
+not certify submission, private synchronization, restart, cash settlement or
+position release.
+
 Files are private account records protected with the existing owner-only storage helper. They remain under ignored `data/`, outside source control. Raw JSON responses retain exact decimal amounts and order/trade IDs, with authentication material redacted. Coverage summaries contain counts and account fingerprints, never secrets. The artifacts include current source-build and content hashes for reproducibility; these hashes are not an independent signature by the exchange and do not make manually modified evidence trustworthy.
 
 ## Actual read-only result: 2026-10-21 UTC
@@ -23,7 +42,7 @@ Protected evidence is stored in `data/native-lifecycle-20261021-readonly/` as `a
 | --- | --- | --- |
 | Kalshi production | Verified native identity | Current orders 0, fills 0, settlements 0; returned pagination exhausted. Archived history and retention are outside this capture. |
 | Novig production trading wallet | Verified native identity | Orders across all five statuses 0; fills 0; settled positions 0; one funding transfer. Funding is not evidence of execution or settlement. |
-| ProphetX production | Verified private sign-in identity | Last seven days: fills 0; one wallet transaction; order history returned `next_cursor: null`. Order pagination remains incomplete because documented exhaustion semantics for that value were not established. Reporting history is eventually consistent. |
+| ProphetX production | Verified private sign-in identity | Original capture: last seven days had fills 0, one wallet transaction and an unverified empty-order null cursor. A later narrow compatibility repair completed that requested window; details are in [ProphetX reconciliation](PROPHETX_RECONCILIATION.md). Reporting remains eventually consistent. |
 | Local native OMS | Database read transaction | No native orders, fills, reconciliations or settlements recorded. |
 
 The verifier reports `no_native_oms_orders_to_validate`. These are genuine read responses, **not successful order-to-settlement tests**. No real orders or funds were changed by this capture.
