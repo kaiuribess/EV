@@ -16,6 +16,11 @@ export type SetupAccount = {
   monitor_running: boolean; profile_configured: boolean; verified_native_markets: number; current_native_books: number;
   account_snapshot: { available: boolean; current: boolean; identity_verified: boolean; reconciled: boolean;
     cash_available_verified: boolean; balance_usd: string | null; observed_at: string | null };
+  diagnostic_account?: { venue: string; environment: string; account_fingerprint: string | null;
+    identity_verified: boolean; observed_at: string; balance_usd: string | null;
+    cash_available_verified: boolean; open_order_count: number | null; position_count: number | null;
+    inventory_reconciled: boolean; trading_permission_verified: boolean;
+    geographic_attestation_expires_at: string | null; usable_for_execution: false } | null;
   settlement_policy: string | null; supported_settlement_policies?: string[]; blockers: SetupBlocker[];
 }
 export type SetupReport = {
@@ -126,6 +131,16 @@ export function parseSetupReport(value: unknown): SetupReport {
       || !(a.account_snapshot.observed_at === null || timestamp(a.account_snapshot.observed_at))
       || !Array.isArray(a.blockers) || a.blockers.some(b => !record(b) || !words(b, ['code', 'category', 'scope', 'message', 'action'])))) return fail()
   if (new Set(value.accounts.map(a => a.venue)).size !== value.accounts.length) return fail()
+  if (value.accounts.some(a => a.diagnostic_account !== undefined && a.diagnostic_account !== null && (
+    !record(a.diagnostic_account) || !words(a.diagnostic_account, ['venue', 'environment'])
+    || !nullableString(a.diagnostic_account.account_fingerprint)
+    || !timestamp(a.diagnostic_account.observed_at)
+    || !(a.diagnostic_account.balance_usd === null || decimal(a.diagnostic_account.balance_usd))
+    || !['open_order_count', 'position_count'].every(k => a.diagnostic_account[k] === null || count(a.diagnostic_account[k]))
+    || !nullableString(a.diagnostic_account.geographic_attestation_expires_at)
+    || a.diagnostic_account.geographic_attestation_expires_at !== null && !timestamp(a.diagnostic_account.geographic_attestation_expires_at)
+    || !bools(a.diagnostic_account, ['identity_verified', 'cash_available_verified', 'inventory_reconciled', 'trading_permission_verified'])
+    || a.diagnostic_account.usable_for_execution !== false))) return fail()
   if (!Array.isArray(value.launch_scope) || value.launch_scope.some(s => !record(s)
       || !words(s, ['venue', 'environment', 'account_fingerprint', 'settlement_policy'])
       || typeof s.account_fingerprint !== 'string' || s.account_fingerprint.trim().length === 0

@@ -132,6 +132,76 @@ def test_cached_account_without_profile_is_not_current_spendable_cash(engine):
     assert not snapshot["cash_available_verified"]
 
 
+@pytest.mark.asyncio
+async def test_preprofile_account_probe_is_diagnostic_only(engine, monkeypatch):
+    from evplatform.venues import account_probe
+
+    record = engine.registry.records["kalshi"]
+    record.enabled = True
+    record.health = {"authenticated": True}
+    record.plugin.task = RunningWorker()
+    client = SimpleNamespace(settings=SimpleNamespace(environment="production"))
+    record.plugin.client = client
+    expected = NativeAccountSnapshot(
+        venue="kalshi", environment="production", observed_at=utcnow(),
+        identity_verified=True, account_fingerprint="a" * 64,
+        balance_usd=Decimal("50"), cash_available_verified=True,
+        reconciled=True, open_order_count=0, position_count=0,
+        trading_permission_verified=True)
+
+    async def fake_probe(probed_client, **kwargs):
+        assert probed_client is client
+        assert kwargs["managed_orders"] == ()
+        return expected
+
+    monkeypatch.setattr(account_probe, "probe_native_account", fake_probe)
+    result = await engine.native.probe_monitor_account("kalshi")
+    assert result["balance_usd"] == "50" and result["usable_for_execution"] is False
+    report = launch_setup(engine)
+    assert account(report, "kalshi")["diagnostic_account"] == result
+    assert account(report, "kalshi")["account_snapshot"]["current"] is False
+    assert not report["activation"]["available"]
+    assert engine.native.account_snapshots == {}
+    assert engine.native.manager.adapters == {}
+
+    # A disconnected or replaced monitor cannot reuse a prior diagnostic.
+    record.plugin.client = SimpleNamespace(settings=SimpleNamespace(environment="production"))
+    assert engine.native.diagnostic_account("kalshi") is None
+
+
+@pytest.mark.asyncio
+async def test_preprofile_probe_requires_authenticated_monitor_and_redacts_errors(engine, monkeypatch):
+    from evplatform.venues import account_probe
+
+    with pytest.raises(ValueError, match="connected authenticated"):
+        await engine.native.probe_monitor_account("kalshi")
+    record = engine.registry.records["kalshi"]
+    record.enabled = True
+    record.health = {"authenticated": True}
+    record.plugin.task = RunningWorker()
+    record.plugin.client = SimpleNamespace(settings=SimpleNamespace(environment="production"))
+
+    async def fails(*args, **kwargs):
+        raise RuntimeError("OFFLINE-private-server-message")
+
+    monkeypatch.setattr(account_probe, "probe_native_account", fails)
+    with pytest.raises(ValueError) as error:
+        await engine.native.probe_monitor_account("kalshi")
+    assert "OFFLINE-private-server-message" not in str(error.value)
+    assert engine.native.diagnostic_account("kalshi") is None
+
+
+def test_launch_probe_api_is_local_and_cannot_enable_trading(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        assert client.post("/api/launch/probe", json={"venue": "kalshi"}).status_code == 403
+        response = client.post("/api/launch/probe", headers=HEADERS, json={"venue": "kalshi"})
+        assert response.status_code == 409
+        assert not engine.risk.auto_trade
+        assert engine.native.profile is None
+
+
 @pytest.mark.parametrize("mutation", [{"source_time": None}, {"source_time": "old"},
     {"source_time": "future"}, {"synthetic": True}, {"status": "suspended"}, {"asks": ()},
     {"synchronized": False}])

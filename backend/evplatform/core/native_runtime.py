@@ -46,6 +46,12 @@ class NativeRuntime:
         self.candidates = {}
         self.signals = {}
         self.account_snapshots = {}
+        # Pre-profile diagnostics are never consulted by risk, sizing or the
+        # release gate. They let an operator identify an account before writing
+        # the reviewed launch profile that enables normal account probing.
+        self.diagnostic_snapshots = {}
+        self._diagnostic_bindings = {}
+        self._diagnostic_probe_lock = asyncio.Lock()
         self.dirty_venues = set()
         self.last_account_probe = 0.0
         self._last_account_probes = {}
@@ -129,6 +135,74 @@ class NativeRuntime:
         self._account_snapshot_fences.pop(venue, None)
         self.last_account_probe = 0.0
         self._last_account_probes.pop(venue, None)
+
+    def diagnostic_account(self, venue):
+        """Return a short-lived, non-authorizing monitor inventory summary."""
+        record = self.engine.registry.records.get(venue)
+        client = getattr(record.plugin, "client", None) if record else None
+        snapshot = self.diagnostic_snapshots.get(venue)
+        binding = self._diagnostic_bindings.get(venue)
+        now = utcnow()
+        if (not record or not record.enabled or client is None or snapshot is None
+                or binding is None or binding[0] is not client
+                or binding[1] != client.settings.environment
+                or not getattr(record.plugin, "task", None)
+                or record.plugin.task.done()
+                or record.health.get("authenticated") is not True
+                or snapshot.observed_at.tzinfo is None
+                or not 0 <= (now - snapshot.observed_at).total_seconds() < 60):
+            return None
+        return {
+            "venue": snapshot.venue, "environment": snapshot.environment,
+            "account_fingerprint": snapshot.account_fingerprint if snapshot.identity_verified else None,
+            "identity_verified": snapshot.identity_verified,
+            "observed_at": snapshot.observed_at.isoformat(),
+            "balance_usd": str(snapshot.balance_usd) if snapshot.cash_available_verified
+                and snapshot.balance_usd is not None else None,
+            "cash_available_verified": snapshot.cash_available_verified,
+            "open_order_count": snapshot.open_order_count,
+            "position_count": snapshot.position_count,
+            "inventory_reconciled": snapshot.reconciled,
+            "trading_permission_verified": snapshot.trading_permission_verified,
+            "geographic_attestation_expires_at": snapshot.geographic_attestation_expires_at.isoformat()
+                if snapshot.geographic_attestation_expires_at else None,
+            "usable_for_execution": False,
+        }
+
+    async def probe_monitor_account(self, venue):
+        """Read an authenticated monitor account without binding an executor."""
+        from ..plugins.external import NativeMonitor
+        from ..venues.account_probe import probe_native_account
+
+        record = self.engine.registry.records.get(venue)
+        if (not record or not isinstance(record.plugin, NativeMonitor)
+                or not record.enabled or record.plugin.client is None
+                or not getattr(record.plugin, "task", None)
+                or record.plugin.task.done()
+                or record.health.get("authenticated") is not True):
+            raise ValueError("Select a connected authenticated native monitor")
+        if self._diagnostic_probe_lock.locked():
+            raise ValueError("An account diagnostic is already running")
+        async with self._diagnostic_probe_lock:
+            client = record.plugin.client
+            self.diagnostic_snapshots.pop(venue, None)
+            self._diagnostic_bindings.pop(venue, None)
+            try:
+                snapshot = await asyncio.wait_for(probe_native_account(
+                    client, managed_orders=tuple(self.engine.risk.native_orders.values()),
+                    settled_order_ids=frozenset(self.engine.risk.settled)), timeout=20)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise ValueError("Authenticated account inventory diagnostic failed") from None
+            current = self.engine.registry.records.get(venue)
+            if (current is not record or not record.enabled or record.plugin.client is not client
+                    or record.health.get("authenticated") is not True
+                    or snapshot.venue != venue or snapshot.environment != client.settings.environment):
+                raise ValueError("Monitor account changed during diagnostic")
+            self.diagnostic_snapshots[venue] = snapshot
+            self._diagnostic_bindings[venue] = (client, client.settings.environment)
+            return self.diagnostic_account(venue)
 
     def _ledger_fence(self):
         # Reporting is a slow path. Capture values, not mutable object identity,

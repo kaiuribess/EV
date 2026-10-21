@@ -218,6 +218,15 @@ Check actual account access without placing orders:
 .\.venv\Scripts\python.exe scripts/check_accounts.py --help
 ```
 
+The Real Trading Setup screen can also run a read-only account inventory check
+for a connected monitor. Its local control endpoint is `POST /api/launch/probe`
+with `X-EV-Control: local` and `{"venue":"kalshi"}` (or another connected
+venue). It returns the current account fingerprint, cash, inventory and
+permission findings without creating a launch profile or binding an executor.
+The displayed diagnostic expires after 60 seconds or when the monitor client
+changes. It never counts as the execution preflight account snapshot, an order
+lifecycle certificate, or permission to trade.
+
 The read-only diagnostic distinguishes production from sandbox and writes only
 allowlisted results. A sandbox key is never silently retried against production
 as a trading fallback. It does not certify order lifecycle or settlement.

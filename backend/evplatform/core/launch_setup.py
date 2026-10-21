@@ -120,6 +120,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                     and snapshot.balance_usd is not None else None,
                 "observed_at": snapshot.observed_at.isoformat() if snapshot else None,
             },
+            "diagnostic_account": native.diagnostic_account(venue),
             "settlement_policy": profile.settlement_policy if profile else None,
             "supported_settlement_policies": policies,
             "blockers": [item.model_dump(mode="json") for item in blockers],
@@ -208,7 +209,11 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
     if not native_markets:
         draft_blockers.append("No verified native market mappings are loaded.")
     if not all_accounts_current:
-        draft_blockers.append("Current account identity and reconciled inventory must be verified before preparing a launch profile.")
+        if not any(item["diagnostic_account"] and item["diagnostic_account"]["identity_verified"]
+                   for item in accounts):
+            draft_blockers.append("Probe a connected account to identify its exact production identity and inventory.")
+        else:
+            draft_blockers.append("A diagnostic account read is available; bind it to a reviewed profile before execution preflight can verify current inventory.")
     return {
         "schema_version": 1, "checked_at": now.isoformat(), "environment": engine.settings.mode,
         "safe_to_arm": aggregate.safe_to_arm and reference_profiles_ready,

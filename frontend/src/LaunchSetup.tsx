@@ -70,6 +70,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [working, setWorking] = useState(false)
+  const [probing, setProbing] = useState<string | null>(null)
   const [clock, setClock] = useState(Date.now())
   const [review, setReview] = useState<SetupReport | null>(null)
   const [confirmed, setConfirmed] = useState(false)
@@ -148,6 +149,17 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
       void fetchReport().catch(() => {})
     } finally { busy.current = false; if (mounted.current) setWorking(false) }
   }
+  const probeAccount = async (venue: string) => {
+    if (disabled || probing || working) return
+    setProbing(venue)
+    try {
+      await mutate('/api/launch/probe', { venue })
+      await fetchReport()
+      notify(`${human(venue)} account inventory checked. This read-only result does not enable orders.`)
+    } catch (failure) {
+      notify(failure instanceof Error ? failure.message : 'Account diagnostic failed.', true)
+    } finally { if (mounted.current) setProbing(null) }
+  }
   const dialogCurrent = gate.allowed && review?.activation.scope_digest === report?.activation.scope_digest
   const pending = report?.requirements.filter(r => r.status !== 'passed') ?? []
   return <section className="panel launch-setup" aria-labelledby={id}>
@@ -162,12 +174,15 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
       <div className="setup-body"><div className="setup-section-title"><h3>Your exchange connections</h3><span>Each wallet is checked independently</span></div>
         <div className="setup-accounts">{report.accounts.map(account => {
           const snapshot = account.account_snapshot
+          const diagnostic = current ? account.diagnostic_account : null
           const cash = current && snapshot.current && snapshot.cash_available_verified && snapshot.balance_usd !== null
           const blocker = account.blockers.find(b => b.code.startsWith('software.')) ?? account.blockers.find(b => b.category !== 'arming')
           return <article className="setup-account" key={account.venue}>
             <div className="setup-account-top"><span><Wallet size={17} />{human(account.venue)}</span><span className={`setup-pill ${current && account.authenticated ? 'good' : ''}`}>{!current ? 'Unconfirmed' : account.authenticated ? 'Authenticated' : account.credentials_configured ? 'Not authenticated' : 'Key missing'}</span></div>
             <div className="setup-account-balance"><strong>{cash ? money(snapshot.balance_usd) : 'Not verified'}</strong><span>Current spendable cash</span></div>
             <dl><div><dt>Environment</dt><dd>{human(account.runtime_environment ?? account.configured_environment)}</dd></div><div><dt>Credential selection</dt><dd>{human(account.credential_profile)}</dd></div><div><dt>Market feed</dt><dd>{!current ? 'Unconfirmed' : account.streaming ? 'Streaming' : 'Not streaming'}</dd></div><div><dt>Reviewed trading scope</dt><dd>{account.profile_configured ? 'Profile loaded' : 'Not configured'}</dd></div><div><dt>Verified markets / fresh books</dt><dd>{account.verified_native_markets} / {current ? account.current_native_books : '—'}</dd></div></dl>
+            {diagnostic && <p className="setup-note">Read-only account check: {diagnostic.identity_verified ? 'identity verified' : 'identity unverified'} · {diagnostic.cash_available_verified && diagnostic.balance_usd !== null ? `${money(diagnostic.balance_usd)} reported spendable cash` : 'cash unverified'} · {diagnostic.trading_permission_verified ? 'trade scope verified' : 'trade scope unverified'}. This is not an execution preflight.</p>}
+            {current && account.authenticated && account.monitor_running && <button className="button quiet" disabled={disabled || working || probing !== null} onClick={() => void probeAccount(account.venue)}><RefreshCw size={13} className={probing === account.venue ? 'setup-spin' : ''} />{probing === account.venue ? 'Checking account…' : 'Check account inventory'}</button>}
             {blocker && <p className="setup-account-blocker"><LockKeyhole size={13} /><span>{blocker.message}</span></p>}
           </article>
         })}</div>

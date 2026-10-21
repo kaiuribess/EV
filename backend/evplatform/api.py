@@ -47,6 +47,11 @@ class CashRefreshBody(BaseModel):
     venue: str | None = None
 
 
+class LaunchProbeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    venue: str = Field(min_length=1)
+
+
 class ManualPreviewBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     market_id: str
@@ -186,6 +191,15 @@ def create_app(settings=None):
     async def launch_preparation():
         limits, error = await asyncio.to_thread(operator_limits_draft)
         return launch_setup(engine, limits_draft=limits, limits_error=error)
+
+    @app.post("/api/launch/probe")
+    async def launch_account_probe(body: LaunchProbeBody):
+        try:
+            account = await engine.native.probe_monitor_account(body.venue)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {"account": account, "read_only": True, "usable_for_execution": False,
+                "note": "Pre-profile account diagnostic; it does not arm trading or certify an order lifecycle."}
 
     @app.get("/api/accounts/cash")
     async def reported_cash():
