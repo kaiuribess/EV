@@ -94,6 +94,28 @@ backend rechecks the gate before changing the emergency stop, and again after
 the persistence wait. A rejected combined enable/reset cannot silently clear
 the previous stop. A missing or stale response displays readiness as unconfirmed.
 
+### Review and place one native order manually
+
+The Trading desk has a separate **Place one trade manually** panel in a paused
+native sandbox or production workspace. Choose a maximum spend (default $1,
+including fees), select a currently qualified native EV candidate, review the
+exact venue, side, native quantity, limit price, fee cap, fair estimate and
+reference books, then click **Place one order**. The review token is one-use and
+expires after 30 seconds. If the current price, quantity, fee, model, fair
+probability, launch scope or order checks change, the click is rejected and a
+fresh review is required. Venue minimums and quarter-Kelly sizing can make a $1
+order impossible; the UI shows the actual cost before submission.
+
+Manual submission leaves automation paused. It still requires a production or
+sandbox native workspace with explicit native execution enablement, a clear
+emergency stop, complete scoped readiness, current account cash, reviewed
+market mappings, verified offers and all central risk checks. The normal OMS
+persists intent before transmission, never retries an unknown result, and
+tracks acknowledgement separately from fills and settlement. An API response
+or transport interruption is not proof of a fill; inspect the native ledger.
+The paper workspace on port 8001 cannot submit a real exchange order through
+this panel, and no test order is sent merely by opening it.
+
 ### Current unresolved release work
 
 The [October 21 Kalshi NBA pilot](KALSHI_PILOT_2026-10-21.md) records a concrete

@@ -1,10 +1,14 @@
 from datetime import timedelta
 from decimal import Decimal as D
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import asyncio
 
 import pytest
 from pydantic import ValidationError
 
 from evplatform.core.config import PricingConfig
+from evplatform.core.manual_native import ManualNativeService
 from evplatform.core.models import utcnow
 from evplatform.core.native_accounting import NativeInstrument, NativePriceBand
 from evplatform.core.native_pricing import (
@@ -12,6 +16,8 @@ from evplatform.core.native_pricing import (
     native_revalidate_intent, settlement_fingerprint,
 )
 from evplatform.core.pricing import NoSignal, fair_value
+from evplatform.core.risk import RiskEngine, RiskRejected
+from evplatform.core.config import RiskConfig
 from evplatform.plugins.native_positive_ev import NativePositiveEV
 
 
@@ -49,6 +55,74 @@ def candidate(data, *, max_stake_usd=D("10"), **changes):
     market, quotes, book, fair, config, now = data
     return native_opportunity(market, fair, book, config, max_stake_usd=max_stake_usd,
                               mode="sandbox", now=now, **changes)
+
+
+async def test_manual_review_is_one_use_and_does_not_enable_automation(market, quotes):
+    data = setup_native(market, quotes)
+    first, second = candidate(data), candidate(data)
+    risk = RiskEngine(RiskConfig())
+    reviewed = []
+    def check(order):
+        assert risk.manual_order_active(order.id)
+        reviewed.append(order.id)
+    async def place(found, *, execution_origin):
+        assert execution_origin == "manual" and risk.manual_order_active(found.intent.id)
+        return SimpleNamespace(model_dump=lambda **_: {"id": found.intent.id, "status": "open"})
+    native = SimpleNamespace(manager=SimpleNamespace(_check=check),
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id), execute=place)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+                             markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(side_effect=[first, second])
+    preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
+    assert preview["candidate"]["intent"]["id"] == first.intent.id
+    result = await service.submit(preview["review_token"])
+    assert result["order"]["id"] == second.intent.id
+    assert reviewed == [first.intent.id]
+    assert not risk.auto_trade and not risk.manual_order_active(second.intent.id)
+    with pytest.raises(RiskRejected, match="already used"):
+        await service.submit(preview["review_token"])
+
+
+async def test_manual_review_rejects_changed_price_without_placement(market, quotes):
+    data = setup_native(market, quotes)
+    first = candidate(data)
+    changed = first.model_copy(update={"roi": first.roi + D(".01")})
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock()
+    native = SimpleNamespace(manager=SimpleNamespace(_check=lambda _: None),
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id), execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+                             markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(side_effect=[first, changed])
+    preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
+    with pytest.raises(RiskRejected, match="changed"):
+        await service.submit(preview["review_token"])
+    execute.assert_not_awaited()
+
+
+async def test_manual_max_cost_resizes_candidate_before_review(market, quotes):
+    data = setup_native(market, quotes, quantity="2000")
+    market, observations, book, _, config, _ = data
+    base = candidate(data)
+    native = SimpleNamespace(books={(market.id, base.venue, base.outcome): book},
+                             candidates={}, sizing_cash=lambda venue: D("10"))
+    async def recalculate(market_id):
+        native.candidates[(market_id, base.venue, base.outcome)] = base
+    native.recalculate = recalculate
+    engine = SimpleNamespace(native=native, risk=RiskEngine(RiskConfig()),
+        registry=SimpleNamespace(records={"native_positive_ev": SimpleNamespace(enabled=True)}),
+        settings=SimpleNamespace(mode="sandbox", pricing=config),
+        markets={market.id: market}, quotes={market.id: {(q.provider, q.bookmaker): q for q in observations}})
+    service = ManualNativeService(engine)
+    limited = await service._fresh_candidate(market.id, base.venue, base.outcome, D("1"))
+    assert limited.intent.reserved_cost_usd <= D("1")
+    assert limited.intent.quantity < base.intent.quantity
+    with pytest.raises(RiskRejected, match="budget|minimum|quantity"):
+        await service._fresh_candidate(market.id, base.venue, base.outcome, D("0.0001"))
 
 
 def test_native_cent_contract_ev_uses_usd_payout_and_cost(market, quotes):

@@ -102,6 +102,27 @@ async def test_durable_intent_precedes_submission_ack_is_not_fill(system, market
     assert risk.exposures() == D(".47")
 
 
+async def test_manual_permit_routes_only_one_reviewed_native_intent_while_automation_stays_off(system, market):
+    manager, risk, storage, adapter = system
+    risk.auto_trade = False
+    approved = order(market).model_copy(update={"execution_origin": "manual"})
+    other = order(market).model_copy(update={"execution_origin": "manual"})
+    with pytest.raises(RiskRejected, match="disabled"):
+        await manager.execute(approved)
+    assert adapter.submissions == []
+    with risk.manual_order(approved.id):
+        with pytest.raises(RiskRejected, match="disabled"):
+            await manager.execute(other)
+        placed = await manager.execute(approved)
+        assert placed.execution_origin == "manual"
+    assert not risk.auto_trade
+    assert len(adapter.submissions) == 1
+    row = await (await storage.connection.execute("SELECT data FROM native_orders WHERE id=?", (approved.id,))).fetchone()
+    assert NativeOrder.model_validate_json(row[0]).execution_origin == "manual"
+    with pytest.raises(RiskRejected):
+        await manager.execute(approved)
+
+
 async def test_unknown_transmission_never_retried_and_survives_restart(system, market):
     manager, risk, storage, adapter = system
     adapter.fail = True

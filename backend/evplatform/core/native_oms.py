@@ -25,6 +25,7 @@ class NativeOrder(Contract):
     intent: NativeOrderIntent
     candidate_id: str
     strategy: str
+    execution_origin: Literal["automatic", "manual"] = "automatic"
     account_fingerprint: str = Field(min_length=8)
     market_snapshot: Market
     market_fingerprint: str

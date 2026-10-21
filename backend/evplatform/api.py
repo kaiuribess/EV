@@ -1,17 +1,20 @@
 import asyncio
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .core.config import PricingConfig, RiskConfig, Settings
 from .core.models import Envelope, SettlementResult
 from .core.market_review import ContractReview, compare_contracts, pending_market_reviews
 from .core.launch_setup import launch_setup, operator_limits_draft
+from .core.manual_native import ManualNativeService
+from .core.risk import RiskRejected
 from .core.signals import SignalResultImport
 from .engine import Engine
 
@@ -42,6 +45,19 @@ class ContractComparisonBody(BaseModel):
 class CashRefreshBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     venue: str | None = None
+
+
+class ManualPreviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    market_id: str
+    venue: str
+    outcome: str
+    max_cost_usd: Decimal = Field(gt=0, allow_inf_nan=False)
+
+
+class ManualSubmitBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_token: str
 
 
 def local_origin(value, port=8000):
@@ -93,6 +109,8 @@ def create_app(settings=None):
     app = FastAPI(title="EV Platform", version="0.1.0", lifespan=lifespan)
     app.state.engine = engine
     app.state.monitor_cash = monitor_cash
+    manual_native = ManualNativeService(engine)
+    app.state.manual_native = manual_native
 
     @app.middleware("http")
     async def loopback_guard(request: Request, call_next):
@@ -202,6 +220,20 @@ def create_app(settings=None):
             (limit, offset))).fetchall()
         return {"items": [json.loads(await engine.storage.decode_event_data(row[0])) for row in rows], "limit": limit, "offset": offset,
                 "note": "Native-unit observations; execution and settlement are tracked separately"}
+
+    @app.post("/api/native/manual/preview")
+    async def native_manual_preview(body: ManualPreviewBody):
+        try:
+            return await manual_native.preview(body.market_id, body.venue, body.outcome, body.max_cost_usd)
+        except (RiskRejected, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/native/manual/submit")
+    async def native_manual_submit(body: ManualSubmitBody):
+        try:
+            return await manual_native.submit(body.review_token)
+        except (RiskRejected, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/native/orders/{order_id}/cancel")
     async def native_cancel(order_id: str):

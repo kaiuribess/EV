@@ -1,0 +1,17 @@
+.manual-trade { margin-bottom: 20px; }
+.manual-trade-list { display: grid; gap: 10px; margin: 16px 0; }
+.manual-trade-cap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0; font-size: 12px; }
+.manual-trade-cap span { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; }
+.manual-trade-cap input { width: 90px; border: 0; background: transparent; color: inherit; padding: 5px; }
+.manual-trade-cap small { display: block; flex-basis: 100%; opacity: .68; }
+.manual-trade-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, auto) auto; align-items: center; gap: 18px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; }
+.manual-trade-row strong, .manual-trade-row small { display: block; }
+.manual-trade-row small { margin-top: 4px; opacity: .72; overflow-wrap: anywhere; }
+.manual-trade-message { margin: 14px 0; padding: 11px 14px; border-radius: 8px; background: rgba(151, 188, 114, .1); overflow-wrap: anywhere; }
+.manual-trade-dialog { max-width: 590px; }
+.manual-trade-terms { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 18px 0; }
+.manual-trade-terms > div { border-bottom: 1px solid var(--border); padding-bottom: 9px; min-width: 0; }
+.manual-trade-terms dt { opacity: .65; font-size: 12px; }
+.manual-trade-terms dd { margin: 4px 0 0; font-weight: 650; overflow-wrap: anywhere; }
+.manual-trade-warning { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; }
+@media (max-width: 650px) { .manual-trade-row { grid-template-columns: 1fr; } .manual-trade-terms { grid-template-columns: 1fr; } }

@@ -187,6 +187,18 @@ def test_setup_endpoint_is_read_only_with_unapplied_limits(tmp_path, monkeypatch
         assert client.get("/api/native/orders").json()["orders"] == []
 
 
+def test_manual_native_api_fails_closed_without_launch_profile(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        body = {"market_id": "unreviewed", "venue": "kalshi", "outcome": "yes", "max_cost_usd": "1.00"}
+        assert client.post("/api/native/manual/preview", json=body).status_code == 403
+        response = client.post("/api/native/manual/preview", headers=HEADERS, json=body)
+        assert response.status_code == 409
+        assert client.post("/api/native/manual/submit", headers=HEADERS,
+                           json={"review_token": "invented"}).status_code == 409
+        assert client.get("/api/native/orders").json()["orders"] == []
+
+
 def test_rejected_combined_activation_preserves_emergency_stop(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with TestClient(native_app(tmp_path)) as client:

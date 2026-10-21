@@ -146,7 +146,10 @@ class NativeRuntime:
 
     def require_preflight(self, order):
         report = self.report()
-        if not (report.live_trading_ready or report.sandbox_trading_ready):
+        manual = order.execution_origin == "manual" and self.engine.risk.manual_order_active(order.id)
+        if not ((report.live_trading_ready or report.sandbox_trading_ready) or
+                (manual and report.safe_to_arm and self.engine.settings.live_enabled
+                 and not self.engine.risk.kill_switch)):
             raise RiskRejected("Native release gate has unresolved checks")
         p = self.profile_for(order.venue)
         if (p is None or order.venue != p.venue or order.mode != p.environment or
@@ -240,10 +243,10 @@ class NativeRuntime:
         This does not consume the one-use risk permit again. Cancellation
         deliberately does not use this placement guard, including while killed.
         """
-        self.engine.risk.check_enabled()
+        order = self.engine.risk.native_orders.get(intent.id)
+        self.engine.risk.check_enabled(intent.id if order and order.execution_origin == "manual" else None)
         if not self.owns_execution_lease():
             raise RiskRejected("Native execution lease is no longer held")
-        order = self.engine.risk.native_orders.get(intent.id)
         if order is None or order.intent != intent or order.status != OrderStatus.SUBMITTING:
             raise RiskRejected("Current durable submitting intent is required")
         age_ms = (utcnow()-intent.created_at).total_seconds()*1000
@@ -253,20 +256,25 @@ class NativeRuntime:
         self.revalidate_order(order)
         self.engine.risk.check_native_reservation(order, reserved=True)
 
-    async def execute(self, candidate):
+    def build_order(self, candidate, *, execution_origin="automatic"):
         p = self.profile_for(candidate.venue)
         if not p:
             raise RiskRejected("Native launch profile required")
+        market = self.engine.markets[candidate.market_id]
+        return NativeOrder(intent=candidate.intent, candidate_id=candidate.id,
+            strategy=candidate.strategy, account_fingerprint=p.account_fingerprint,
+            market_snapshot=market, market_fingerprint=market.identity(), risk_family_id=risk_family(market),
+            reviewed_correlation_groups=reviewed_correlations(market), sizing=candidate.sizing,
+            execution_origin=execution_origin)
+
+    async def execute(self, candidate, *, execution_origin="automatic"):
         market = self.engine.markets[candidate.market_id]
         book = self.books.get((market.id, candidate.venue, candidate.outcome))
         age = (utcnow()-candidate.calculated_at).total_seconds()*1000
         if (book is None or candidate.book_revision != book.revision or age < 0 or
                 age > self.engine.risk.config.max_candidate_age_ms or not candidate.qualified):
             raise RiskRejected("Native candidate or order book changed")
-        order = NativeOrder(intent=candidate.intent, candidate_id=candidate.id,
-            strategy=candidate.strategy, account_fingerprint=p.account_fingerprint,
-            market_snapshot=market, market_fingerprint=market.identity(), risk_family_id=risk_family(market),
-            reviewed_correlation_groups=reviewed_correlations(market), sizing=candidate.sizing)
+        order = self.build_order(candidate, execution_origin=execution_origin)
         try:
             return await self.manager.execute(order)
         finally:

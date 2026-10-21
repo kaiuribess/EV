@@ -80,12 +80,39 @@ def test_final_dispatch_rechecks_current_cash_after_candidate_sizing(runtime):
     # Other guard layers have dedicated integration tests. Leave the real
     # final-dispatch -> revalidate_order -> sizing_cash path under test here.
     runtime.require_preflight = lambda current: None
-    runtime.engine.risk.check_enabled = lambda: None
+    runtime.engine.risk.check_enabled = lambda *_: None
     runtime.engine.risk.check_native_reservation = lambda *args, **kwargs: None
     runtime.dispatch_guard(order.intent)
     ready_cash(runtime, ".1")
     with pytest.raises(RiskRejected, match="quarter-Kelly budget"):
         runtime.dispatch_guard(order.intent)
+
+
+def test_manual_preflight_needs_exact_request_permit_and_launch_gate(runtime):
+    ready_cash(runtime, "100")
+    key, book = next(iter(runtime.books.items()))
+    market = runtime.engine.markets[key[0]]
+    fair = fair_value(market, list(runtime.engine.quotes[market.id].values()), runtime.engine.settings.pricing)
+    found = native_opportunity(market, fair, book, runtime.engine.settings.pricing,
+                               mode="sandbox", max_stake_usd=D("1"))
+    manual = runtime.build_order(found, execution_origin="manual")
+    automatic = runtime.build_order(found)
+    base = runtime.report()
+    runtime.report = lambda *args: base.model_copy(update={"safe_to_arm": True})
+    runtime.engine.settings.live_enabled = True
+    runtime.engine.risk.kill_switch = False
+    runtime.engine.risk.manual_order_active = lambda order_id: order_id == manual.id
+    runtime.require_preflight(manual)
+    assert runtime.manager.adapters["novig"].preflight.native_trading_enabled
+    with pytest.raises(RiskRejected, match="release gate"):
+        runtime.require_preflight(automatic)
+    runtime.engine.risk.manual_order_active = lambda order_id: False
+    with pytest.raises(RiskRejected, match="release gate"):
+        runtime.require_preflight(manual)
+    runtime.engine.risk.manual_order_active = lambda order_id: True
+    runtime.engine.settings.live_enabled = False
+    with pytest.raises(RiskRejected, match="release gate"):
+        runtime.require_preflight(manual)
 
 
 def test_push_void_uncertainty_can_only_reduce_kelly(market, quotes):

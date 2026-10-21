@@ -807,6 +807,7 @@ class Engine:
                         "bus_dropped": dict(self.bus.dropped), "bus_events": dict(self.bus.counts)})
         return {
             "mode": self.settings.mode, "auto_trade": self.risk.auto_trade,
+            "live_enabled": self.settings.live_enabled,
             "kill_switch": self.risk.kill_switch, "kill_reason": self.risk.kill_reason,
             "synthetic": self.settings.mode in {"demo", "paper"},
             "sample_feed_enabled": self.settings.sample_feed_enabled,

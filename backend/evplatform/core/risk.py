@@ -1,4 +1,6 @@
 import secrets
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -46,6 +48,19 @@ class RiskEngine:
         self.settled: set[str] = set()
         self.authority = RiskAuthority()
         self.on_halt = None
+        self._manual_order_id: ContextVar[str | None] = ContextVar("native_manual_order_id", default=None)
+
+    @contextmanager
+    def manual_order(self, order_id: str):
+        """Authorize only this request's one reviewed native intent, not automation."""
+        token = self._manual_order_id.set(order_id)
+        try:
+            yield
+        finally:
+            self._manual_order_id.reset(token)
+
+    def manual_order_active(self, order_id: str) -> bool:
+        return self._manual_order_id.get() == order_id
 
     def halt(self, reason):
         self.kill_switch, self.auto_trade, self.kill_reason = True, False, reason
@@ -68,10 +83,10 @@ class RiskEngine:
     def all_orders(self):
         return (*self.orders.values(), *self.native_orders.values())
 
-    def check_enabled(self):
+    def check_enabled(self, manual_order_id: str | None = None):
         if self.kill_switch:
             raise RiskRejected("Emergency kill switch is active")
-        if not self.auto_trade:
+        if not self.auto_trade and not (manual_order_id and self.manual_order_active(manual_order_id)):
             raise RiskRejected("Automatic trading is disabled")
         self.roll_day()
         if self.config.daily_loss_limit is not None and self.daily_realized <= -self.config.daily_loss_limit:
@@ -79,7 +94,7 @@ class RiskEngine:
 
     def check_native_reservation(self, order, *, reserved=False):
         """Shared limits for an exact-unit order; caller holds the shared OMS lock."""
-        self.check_enabled()
+        self.check_enabled(order.id if getattr(order, "execution_origin", "automatic") == "manual" else None)
         if order.synthetic or order.mode not in {"sandbox", "production"}:
             raise RiskRejected("Native execution requires an explicit native environment")
         if not metadata_consistent(order):
