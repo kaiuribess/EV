@@ -150,6 +150,14 @@ def compare_contracts(left: ContractReview, right: ContractReview) -> dict:
         required.update({"player_id", "statistic", "line"})
     if kinds & {"spread", "spreads", "total", "totals"}:
         required.add("line")
+    sporting_fields = {"event_id", "sport", "league", "participant_ids", "start_time",
+                       "market_type", "outcomes", "period", "scope", "overtime",
+                       "participation", "currency"}
+    if "player_prop" in kinds:
+        sporting_fields.update({"player_id", "statistic", "line"})
+    if kinds & {"spread", "spreads", "total", "totals"}:
+        sporting_fields.add("line")
+    settlement_fields = {"void_rule", "push_rule", "contract_type"} | RULE_FIELDS
     differences, details = [], []
     for field in sorted(required | {"player_id", "statistic", "line"}):
         a, b = getattr(left, field), getattr(right, field)
@@ -170,8 +178,13 @@ def compare_contracts(left: ContractReview, right: ContractReview) -> dict:
                                    if difference.status == "unknown" else
                                    "Keep distinct contracts; a pricing transformation requires a separately validated model")})
     evidence = {"source": evidence_coverage(left, required), "target": evidence_coverage(right, required)}
+    normal_scope_matches = not any(item.field in sporting_fields for item in differences)
+    settlement_differences = [item.model_dump() for item in differences if item.field in settlement_fields]
     return {"schema_version": 1, "source": left.source, "target": right.source,
             "structurally_equivalent": not differences,
+            "normal_sporting_scope_matches": normal_scope_matches,
+            "settlement_transform_required": normal_scope_matches and bool(settlement_differences),
+            "settlement_differences": settlement_differences,
             "differences": [item.model_dump() for item in differences],
             "difference_details": details, "evidence": evidence,
             "evidence_complete": not differences and all(row["complete"] for row in evidence.values()),

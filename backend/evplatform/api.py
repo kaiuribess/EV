@@ -10,8 +10,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .core.config import PricingConfig, RiskConfig, Settings
-from .core.models import Envelope, SettlementResult
+from .core.models import Envelope, Market, SettlementResult
 from .core.market_review import ContractReview, compare_contracts, pending_market_reviews
+from .core.native_accounting import ExactDecimal
+from .core.settlement_bridge import ExceptionalSettlementBound, estimate_bridge
 from .core.launch_setup import launch_setup, operator_limits_draft
 from .core.manual_native import ManualNativeService
 from .core.risk import RiskRejected
@@ -40,6 +42,15 @@ class ContractComparisonBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: ContractReview
     target: ContractReview
+
+
+class SettlementBridgeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Market
+    target: Market
+    outcome: str
+    normal_probability: ExactDecimal
+    exceptional_bound: ExceptionalSettlementBound
 
 
 class CashRefreshBody(BaseModel):
@@ -220,6 +231,14 @@ def create_app(settings=None):
     @app.post("/api/market-review/compare")
     async def compare_review(body: ContractComparisonBody):
         return compare_contracts(body.source, body.target)
+
+    @app.post("/api/market-review/bridge-estimate")
+    async def bridge_estimate(body: SettlementBridgeBody):
+        try:
+            return estimate_bridge(body.source, body.target, body.outcome,
+                                   body.normal_probability, body.exceptional_bound)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/native/orders")
     async def native_orders():

@@ -61,3 +61,17 @@ Local source hashes under `data/prophet-nba-filings-20261021/`:
 [Parlay's current stream documentation](https://api.parlay-api.com/docs/websocket) distinguishes a row's retained `last_update` from the frame send clock and poll heartbeat. Its [main documentation](https://www.parlay-api.com/docs) additionally warns that bookmaker `verified_at`/`is_current` does not bind or verify each outcome; cached rows can remain old and expiry does not itself emit a withdrawal. Some legacy freshness descriptions on that page conflict with the more specific caveats. No heartbeat can safely replace a missing outcome timestamp or certify tradability.
 
 The current engine's exact-identity mapping contract should remain strict. A future model may use a sportsbook's conditional completed-game probabilities to value a different exchange contract, but it must declare, estimate, and validate the additional interruption/void payout states separately. That would be a pricing model with explicit assumptions, not a verified identity mapping or guaranteed arbitrage.
+
+## Conditional settlement bridge (read-only)
+
+The contract review now reports `normal_sporting_scope_matches` separately from `structurally_equivalent`. This identifies a common declared sporting question while retaining every differing settlement field. If the sporting scope matches and settlement terms differ, `settlement_transform_required` is true. Neither flag verifies the external listing facts or authorizes an order.
+
+`evplatform.core.settlement_bridge` implements a bounded research estimate. For a sportsbook probability `p` conditional on the normal result, an upper bound `q_max` on **all** exceptional states, and a lower bound `r_min` on the exchange's payout as a fraction of its normal winning payout in **every** exceptional state, it returns:
+
+```
+conservative payout fraction = min(p, (1 - q_max) * p + q_max * r_min)
+```
+
+This includes interruption, cancellation, shortened-game, forfeiture, venue-change, tie, and correction paths in `q_max`; omitting one invalidates the bound. The bound is tied to both complete canonical market fingerprints, the outcome, and an expiry. Unknowns are `q_max = 1` and `r_min = 0`, which produces zero conservative payout for a positive normal-result probability. The read-only local endpoint is `POST /api/market-review/bridge-estimate` with `X-EV-Control: local`; its response always says `execution_eligible: false` and cannot create an order.
+
+No defensible empirical `q_max` or universally positive fair-price payout floor for the current Kalshi NBA market has been established. The bridge is **not connected to native order routing**, and the existing exact-identity and quote-evidence gates remain unchanged. To use a conditional model for live trading, we still need a reviewed listing-specific source/target binding, a calibrated exceptional-state bound with out-of-sample checks, a complete payout model for the native venue, quote-bound active/fresh sportsbook evidence, and revalidation of the same model before each order. Simply copying a Kalshi fingerprint onto a sportsbook market would misstate the contract.

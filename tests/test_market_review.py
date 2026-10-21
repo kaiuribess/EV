@@ -38,6 +38,24 @@ def test_nonidentical_contract_cannot_pass(field, value):
     assert not report["structurally_equivalent"]
 
 
+def test_same_sporting_question_with_different_void_payout_requires_transform():
+    source = review()
+    target = review(source="OFFLINE venue", void_rule="fair_value",
+                    payout_rule="OFFLINE fair value on cancellation")
+    result = compare_contracts(source, target)
+    assert result["normal_sporting_scope_matches"]
+    assert result["settlement_transform_required"]
+    assert {"field": "void_rule", "status": "mismatch"} in result["settlement_differences"]
+    assert not result["structurally_equivalent"]
+    assert not result["execution_authorized"]
+
+
+def test_different_threshold_is_not_even_same_sporting_question():
+    result = compare_contracts(review(), review(line="21.5"))
+    assert not result["normal_sporting_scope_matches"]
+    assert not result["settlement_transform_required"]
+
+
 @pytest.mark.parametrize("field", ["player_id", "line", "period", "void_rule", "overtime", "event_id"])
 def test_missing_facts_never_inherit_default_settlement(field):
     item = review(**{field: None})
