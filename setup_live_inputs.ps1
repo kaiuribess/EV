@@ -83,7 +83,7 @@ if ($isPaper) {
 # Start the consumer before the REST source on a fresh paper workspace, so
 # its first metered snapshot need not be fetched twice.
 Configure-Input 'oddize_rest' @{
-    sports = @('nba'); bookmakers = @('pin', 'circa', 'dk', 'fd'); markets = @('ml');
+    sports = @('nba'); bookmakers = @('pin', 'circa', 'dk', 'fd', 'czr', 'b365', 'mgm'); markets = @('ml');
     poll_interval_seconds = [double]3600; session_request_budget = 30;
     monthly_credit_budget = 1200; include_past = $false;
     use_delta_polling = $false; include_props = $false

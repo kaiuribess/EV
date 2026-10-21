@@ -384,7 +384,7 @@ class ParlayPaperEV(StrategyPlugin):
                       "devig": ["power", "proportional"]},
         permissions=["paper_candidates"], config_schema=ParlayPaperPricingConfig.model_json_schema())
 
-    def _config(self, market: Market, target: str, shared: PricingConfig, *, devig: str) -> tuple[PricingConfig, str]:
+    def _config(self, market: Market, target: str, shared: PricingConfig, *, devig: str) -> tuple[PricingConfig, str, tuple[str, ...]]:
         settings = ParlayPaperPricingConfig.model_validate(self.context.config)
         if shared.reference_profile_mode != "strict":
             raise NoSignal("Paper comparison requires the same configured reference profile used by live pricing")
@@ -396,13 +396,13 @@ class ParlayPaperEV(StrategyPlugin):
             raise NoSignal("No matching shared sportsbook-weight profile for paper comparison")
         weights = selected[1].weights_percent
         required_count = max(settings.min_references, selected[1].min_distinct_books)
-        if target not in weights or target == "pinnacle":
-            raise NoSignal("Paper target has no independent Pinnacle-anchored reference policy")
+        if target not in weights:
+            raise NoSignal("Paper target is outside the selected reference profile")
         return PricingConfig(devig_method=devig, min_references=required_count,
-            eligible_books=list(weights), required_books=["pinnacle"], weights=weights,
+            eligible_books=list(weights), required_books=[], weights=weights,
             max_quote_age_ms=settings.max_quote_age_ms,
             max_book_age_ms=2500, max_disagreement=shared.max_disagreement,
-            min_ev=shared.min_ev, min_roi=shared.min_roi), selected[0]
+            min_ev=shared.min_ev, min_roi=shared.min_roi), selected[0], selected[1].required_any_anchor
 
     def _candidate(self, market: Market, quotes: list[Quote], book: OrderBook, shared: PricingConfig):
         if not market.extensions.get("paper_only") or not book.venue.startswith(PAPER_PREFIX) or not book.synthetic:
@@ -430,10 +430,12 @@ class ParlayPaperEV(StrategyPlugin):
             if previous is not None and previous.decimal_odds != reference.decimal_odds:
                 raise NoSignal("Conflicting same-clock sportsbook copies")
             by_book_clock[key] = reference
-        primary_config, profile_name = self._config(market, target, shared, devig="power")
-        sensitivity_config, _ = self._config(market, target, shared, devig="proportional")
+        primary_config, profile_name, anchors = self._config(market, target, shared, devig="power")
+        sensitivity_config, _, _ = self._config(market, target, shared, devig="proportional")
         primary = fair_value(market, independent, primary_config)
         sensitivity = fair_value(market, independent, sensitivity_config)
+        if not {ref["bookmaker"] for ref in primary.references} & set(anchors):
+            raise NoSignal("Required reference-profile anchor unavailable")
         candidate = opportunity(market, primary, book, primary_config)
         price = candidate.price
         probability = sensitivity.probabilities[book.outcome]

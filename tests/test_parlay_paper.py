@@ -149,7 +149,7 @@ async def test_independent_reference_and_negative_signal(tmp_path):
     negative = strategy._candidate(market, quotes, away, engine.settings.pricing)
     assert negative.ev_per_contract < 0
     assert not negative.execution_eligible
-    with pytest.raises(NoSignal, match="Insufficient fresh independent references|Required reference unavailable"):
+    with pytest.raises(NoSignal, match="Insufficient fresh independent references|Required reference-profile anchor unavailable"):
         strategy._candidate(market, [q for q in quotes if q.bookmaker != "pinnacle"], home,
                             engine.settings.pricing)
     aged_target = [q.model_copy(update={"source_time": utcnow() - timedelta(seconds=601)})

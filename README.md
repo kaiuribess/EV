@@ -89,7 +89,8 @@ By itself, the launcher enables **simulated paper automation** unless you pass
 `-Paused` or an emergency stop is active. The paper-only strategy consumes the existing Parlay
 game-board stream and compares complete, pregame, two-sided moneylines from
 distinct sportsbooks. It excludes the quoted target book from its own fair
-estimate, requires Pinnacle plus another fresh book, checks both power and
+estimate, requires an anchor specified by the selected profile (Pinnacle or
+Circa for NBA/NFL mainlines) plus another fresh book, checks both power and
 proportional devigging, and records positive and negative paper signals. A
 qualifying signal passes the central risk engine into the local simulator.
 The same live-paper workspace also enables the metered Oddize NBA moneyline

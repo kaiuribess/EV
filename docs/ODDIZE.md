@@ -73,7 +73,7 @@ This configuration is suitable for an additional background reference feed:
 ```json
 {
   "sports": ["nba"],
-  "bookmakers": ["pin", "circa", "dk", "fd"],
+  "bookmakers": ["pin", "circa", "dk", "fd", "czr", "b365", "mgm"],
   "markets": ["ml"],
   "poll_interval_seconds": 3600,
   "session_request_budget": 30,
@@ -116,6 +116,15 @@ many returned quotes will be stale even when the API is healthy. This scope
 currently covers NBA pregame moneylines only. No Oddize player props or other
 sports are paper-matched, and no Oddize data is treated as verified native
 execution evidence. Paper offers, depth, and fills are simulated.
+
+On October 21, 2026 an extra read-only NBA query showed 25 complete pairs
+younger than 10 minutes across the full book roster, mostly books outside the
+initial four-book filter. We expanded the same one-credit NBA poll to include
+Caesars, Bet365 and BetMGM so their timestamps are visible. This does not
+silently add them to the NBA mainline profile: that user-supplied profile
+still requires Pinnacle or Circa as an anchor, with its own configured weights.
+The filtered sharp books in that query remained old, so a paid tier alone is
+not evidence that their source observations would become current.
 
 All metadata reads cost zero credits but still count toward the request rate.
 The plugin observes `X-Credits-Cost`, `X-Credits-Remaining`,

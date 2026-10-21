@@ -31,7 +31,8 @@ NBA_TEAMS = {
     "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
 }
 BOOKS = {"pin": "pinnacle", "circa": "circa", "dk": "draftkings",
-         "fd": "fanduel", "czr": "caesars", "b365": "bet365", "boag": "betonline"}
+         "fd": "fanduel", "czr": "caesars", "b365": "bet365",
+         "boag": "betonline", "mgm": "betmgm"}
 
 
 class OddizePaperConfig(BaseModel):

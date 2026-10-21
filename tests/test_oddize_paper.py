@@ -77,6 +77,17 @@ def test_unknown_team_wrong_event_and_ambiguous_match_are_quarantined():
     assert source.ambiguous > 0
 
 
+def test_additional_real_book_codes_are_exactly_normalized_for_paper():
+    expected = market()
+    for source_code, canonical in (("czr", "caesars"), ("b365", "bet365"),
+                                   ("mgm", "betmgm")):
+        source = OddizePaperNormalizer()
+        source.register_market(expected)
+        quote = source.apply_frame(snapshot(utcnow(), start=expected.start_time,
+            book=source_code))[0]
+        assert quote.bookmaker == canonical and quote.status == "active"
+
+
 def test_incomplete_mismatched_or_conflicting_observations_cannot_price():
     source = OddizePaperNormalizer()
     expected = market()
@@ -169,6 +180,18 @@ async def test_oddize_circa_joins_paper_blend_without_double_counting_pinnacle(t
     assert len(candidate.references) == 3
     assert {ref["bookmaker"]: ref["weight"] for ref in candidate.references}["circa"] == "35"
     assert not candidate.live_execution_allowed
+    circa_only = [q for q in oddize_quotes if q.bookmaker == "circa"]
+    no_pinnacle = strategy._candidate(parlay_market,
+        [q for q in parlay_quotes if q.bookmaker != "pinnacle"] + circa_only,
+        home_book, engine.settings.pricing)
+    assert {ref["bookmaker"] for ref in no_pinnacle.references} == {"draftkings", "circa"}
+    pinnacle_target = next(item for item in reversed(updates)
+        if item.__class__.__name__ == "OrderBook" and item.venue == "parlay_paper:pinnacle"
+        and item.outcome == "HOME")
+    target = strategy._candidate(parlay_market, parlay_quotes + circa_only,
+        pinnacle_target, engine.settings.pricing)
+    assert "pinnacle" not in {ref["bookmaker"] for ref in target.references}
+    assert "circa" in {ref["bookmaker"] for ref in target.references}
     duplicate = parlay_quotes + [q for q in oddize_quotes if q.bookmaker == "circa"]
     conflict = next(q for q in oddize_quotes if q.bookmaker == "pinnacle")
     conflict = conflict.model_copy(update={"source_time": next(q.source_time for q in parlay_quotes
