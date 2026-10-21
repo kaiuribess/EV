@@ -3,7 +3,7 @@ import asyncio
 import os
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..core.models import Envelope
 from ..core.plugins import InputPlugin, Manifest, Plugin
@@ -130,27 +130,78 @@ class NativeMonitorConfig(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
 
 
+class ProphetXMonitorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    environment: Literal["sandbox", "production"] = "sandbox"
+    event_ids: list[str] = Field(default_factory=list, description="Native ProphetX event IDs; empty monitors private/system channels only")
+    prop_subtypes: dict[str, list[str]] = Field(default_factory=dict, description="Event ID to discovered prop sub_type values")
+    legacy_market_ids: list[str] = Field(default_factory=list, deprecated=True,
+                                       description="Unverified IDs migrated from older settings; replace with event_ids and clear this list")
+
+    @field_validator("event_ids")
+    @classmethod
+    def numeric_events(cls, values):
+        if any(not value.isascii() or not value.isdigit() for value in values):
+            raise ValueError("ProphetX event IDs must be numeric strings")
+        return list(dict.fromkeys(values))
+
+    @field_validator("prop_subtypes")
+    @classmethod
+    def valid_props(cls, values):
+        if any(not key.isascii() or not key.isdigit() or any(not subtype.strip() for subtype in subtypes)
+               for key, subtypes in values.items()):
+            raise ValueError("Prop subscriptions require numeric event IDs and nonempty discovered subtypes")
+        return values
+
+
+def migrate_prophetx_monitor_config(config):
+    migrated = dict(config)
+    legacy = migrated.pop("market_ids", [])
+    if legacy:
+        # The old generic field did not establish that these were event IDs.
+        # Retain the operator's values, but require explicit scope confirmation.
+        migrated["legacy_market_ids"] = legacy
+    return migrated
+
+
 class NativeMonitor(Plugin):
     config_model = NativeMonitorConfig
 
-    def __init__(self, factory, settings_factory, credentials, engine):
+    def __init__(self, factory, settings_factory, credentials, engine, *, config_model=None):
         self.factory, self.settings_factory, self.credentials = factory, settings_factory, credentials
         self.engine = engine
+        self.config_model = config_model or NativeMonitorConfig
         self.manifest = normalize_manifest(factory.get_manifest()).model_copy(update={
-            "config_schema": NativeMonitorConfig.model_json_schema()})
+            "config_schema": self.config_model.model_json_schema()})
         self.client, self.task = None, None
         self.frames = 0
+        self.config_error = ""
 
     async def start(self, context):
         await self.stop()
         await super().start(context)
+        self.config_error = ""
+        if context.config.get("legacy_market_ids"):
+            self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
+            return
         if not all(os.getenv(env) for env in self.credentials.values()):
             return
         self.client = self.factory(self.settings_factory(
             environment=context.config.get("environment", "sandbox"),
             **{key: os.environ[env] for key, env in self.credentials.items()}))
-        await self.client.connect()
-        if context.config.get("market_ids"):
+        try:
+            await self.client.connect()
+        except Exception:
+            if self.client.health_check()["state"] in {
+                "credentials_missing", "unauthorized", "access_denied", "geolocation_required",
+                "session_limit", "auth_outcome_unknown", "auth_refresh_failed",
+            }:
+                return
+            raise
+        configure = getattr(self.client, "configure_subscriptions", None)
+        if configure is not None:
+            await configure(context.config)
+        elif context.config.get("market_ids"):
             await self.client.subscribe(context.config["market_ids"])
         self.task = asyncio.create_task(self._run(), name=f"native-monitor:{self.manifest.name}")
 
@@ -179,10 +230,14 @@ class NativeMonitor(Plugin):
             self.client = None
 
     async def health_check(self):
+        if self.config_error:
+            return {"status": "blocked", "state": "configuration_required", "message": self.config_error,
+                    "authenticated": False, "streaming": False}
         if not self.client:
             return {"status": "blocked", "message": "Native credentials missing; trading remains gated"}
         state = self.client.health_check()
-        blocked = state["state"] in {"credentials_missing", "unauthorized", "access_denied", "geolocation_required", "subscription_rejected"}
+        blocked = state["state"] in {"credentials_missing", "unauthorized", "access_denied", "geolocation_required", "subscription_rejected",
+                                     "session_limit", "auth_outcome_unknown", "auth_refresh_failed"}
         status = "blocked" if blocked else "error" if self.task and self.task.done() else state["state"]
         return {**state, "status": status,
                 "message": state.get("reason") or "Native monitor; normalized venue mapping and live preflight required for orders",
@@ -192,15 +247,16 @@ class NativeMonitor(Plugin):
 def register_external(registry, engine):
     from ..integrations import PROVIDER_FACTORIES
     from ..venues import KalshiClient, KalshiSettings, NovigClient, NovigSettings, ProphetXClient, ProphetXSettings
+    registry.config_migrations["prophetx", 1] = migrate_prophetx_monitor_config
     for name, factory in PROVIDER_FACTORIES.items():
         registry.register(ProviderBridge(factory, engine))
         registry.records[name].credential_status = "configured_unverified" if os.getenv(factory.credential_env) else "missing"
-    for factory, settings_factory, credentials in [
-        (KalshiClient, KalshiSettings, {"api_key_id": "KALSHI_API_KEY_ID", "private_key_path": "KALSHI_PRIVATE_KEY_PATH"}),
-        (NovigClient, NovigSettings, {"api_key": "NOVIG_API_KEY", "private_key_path": "NOVIG_PRIVATE_KEY_PATH"}),
-        (ProphetXClient, ProphetXSettings, {"api_key": "PROPHETX_API_KEY", "secret_key": "PROPHETX_SECRET_KEY"}),
+    for factory, settings_factory, credentials, config_model in [
+        (KalshiClient, KalshiSettings, {"api_key_id": "KALSHI_API_KEY_ID", "private_key_path": "KALSHI_PRIVATE_KEY_PATH"}, NativeMonitorConfig),
+        (NovigClient, NovigSettings, {"api_key": "NOVIG_API_KEY", "private_key_path": "NOVIG_PRIVATE_KEY_PATH"}, NativeMonitorConfig),
+        (ProphetXClient, ProphetXSettings, {"api_key": "PROPHETX_API_KEY", "secret_key": "PROPHETX_SECRET_KEY"}, ProphetXMonitorConfig),
     ]:
-        plugin = NativeMonitor(factory, settings_factory, credentials, engine)
+        plugin = NativeMonitor(factory, settings_factory, credentials, engine, config_model=config_model)
         registry.register(plugin)
         registry.records[plugin.manifest.name].credential_status = "configured_unverified" if all(os.getenv(v) for v in credentials.values()) else "missing"
 

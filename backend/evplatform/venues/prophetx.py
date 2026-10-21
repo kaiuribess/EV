@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import re
 import time
 from decimal import Decimal
@@ -17,10 +18,10 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import Field, SecretStr
 from websockets.asyncio.client import connect as ws_connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from .common import (
-    CredentialsMissing, NativeSettings, NativeTransport, VenueError,
+    CredentialsMissing, NativeSettings, NativeTransport, VenueError, VenueHTTPError,
     decimal_value, json_body,
 )
 
@@ -88,6 +89,8 @@ class ProphetXClient(NativeTransport):
         "sandbox": "https://api.sandbox.prophetx.dev/partner",
         "production": "https://cash.api.prophetx.co/partner",
     }
+    TERMINAL_STATES = {"credentials_missing", "unauthorized", "access_denied", "geolocation_required",
+                       "session_limit", "auth_outcome_unknown", "subscription_rejected", "auth_refresh_failed"}
 
     def __init__(self, settings: ProphetXSettings | None = None, client: httpx.AsyncClient | None = None):
         super().__init__(settings or ProphetXSettings(), client)
@@ -99,6 +102,39 @@ class ProphetXClient(NativeTransport):
         self.channels: dict[str, dict] = {}
         self._last_sequences: dict[str, int] = {}
         self.price_ladder: set[int] = set()
+        self.authenticated = False
+        self.reason = ""
+        self._signin_confirmed = False
+        self._confirmed_channels: set[str] = set()
+        self._market_frames = 0
+        self._refresh_task: asyncio.Task | None = None
+
+    def _http_failure(self, error: VenueHTTPError):
+        if error.code == "exceed_subscription_count":
+            self.health, self.reason = "subscription_rejected", "ProphetX channel quota exceeded; reduce event or prop subscriptions"
+        elif error.code == "session_num_exceed":
+            self.health, self.reason = "session_limit", "Access-key session pool is full; wait for expiry or use a separately approved key"
+        elif error.status_code == 401:
+            self.health, self.reason = "unauthorized", "ProphetX rejected this session; verify the key's environment and account access"
+        elif error.status_code == 403:
+            self.health, self.reason = "access_denied", "ProphetX denied account or API access"
+        elif error.status_code == 451:
+            self.health, self.reason = "geolocation_required", "ProphetX requires official eligibility verification"
+        elif error.status_code == 429:
+            self.health, self.reason = "rate_limited", "ProphetX rate limit reached"
+        if error.status_code == 401:
+            self.authenticated = False
+
+    def health_check(self) -> dict:
+        authenticated = self.authenticated and self._access_expires > time.time()
+        streaming = (self._ws is not None and self._signin_confirmed and bool(self.channels)
+                     and self._confirmed_channels == set(self.channels) and self.health == "streaming")
+        return {**super().health_check(), "authenticated": authenticated, "streaming": streaming,
+                "reason": self.reason, "environment": self.settings.environment,
+                "signin_confirmed": self._signin_confirmed,
+                "subscriptions_confirmed": len(self._confirmed_channels), "subscriptions_expected": len(self.channels),
+                "market_frames": self._market_frames, "access_expires_at": self._access_expires or None,
+                "market_data_received": self._market_frames > 0, "trading_enabled": False}
 
     def _require_credentials(self):
         if not self.settings.api_key or not self.settings.secret_key.get_secret_value():
@@ -110,18 +146,41 @@ class ProphetXClient(NativeTransport):
             "POST", self.HOSTS[self.settings.environment] + path,
             headers={"Content-Type": "application/json"}, content=json_body(body),
         )
-        response = await self._request(request)
-        session = response["data"]
-        self._access_token = session["access_token"]
-        self._refresh_token = session["refresh_token"]
-        # Honor the server's expiration instead of conflicting prose lifetimes.
-        self._access_expires = float(session["access_expire_time"])
-        self.health = "authenticated"
+        try:
+            response = await self._request(request)
+            session = response["data"]
+            expires = float(session["access_expire_time"])
+            if (not isinstance(session["access_token"], str) or not session["access_token"]
+                    or not isinstance(session["refresh_token"], str) or not session["refresh_token"]
+                    or not math.isfinite(expires) or expires <= time.time()):
+                raise ValueError("Invalid session response")
+        except VenueHTTPError as exc:
+            self._http_failure(exc)
+            if self.health not in self.TERMINAL_STATES:
+                self.health = "auth_outcome_unknown" if path == "/auth/login" else "auth_refresh_failed"
+                self.reason = "Authentication did not complete; no automatic login retry"
+            raise
+        except (VenueError, ValueError, KeyError, TypeError):
+            self.health = "auth_outcome_unknown" if path == "/auth/login" else "auth_refresh_failed"
+            self.reason = "Authentication outcome is unknown; retrying login can consume another session slot"
+            raise VenueError(self.reason) from None
+        self._access_token, self._refresh_token = session["access_token"], session["refresh_token"]
+        # Read server expiry: the reference says 10 min while the guide says 20.
+        self._access_expires = expires
+        self.authenticated, self.reason = True, ""
+        if self._ws is None:
+            self.health = "authenticated"
         return {"authenticated": True, "expires_at": self._access_expires}
 
     async def connect(self) -> dict:
         self._require_credentials()
+        if self.health in self.TERMINAL_STATES:
+            raise VenueError(self.reason or "Native access blocked; operator intervention required")
         async with self._auth_lock:
+            # A caller already queued on this lock must observe an earlier
+            # caller's unknown/denied outcome before attempting another login.
+            if self.health in self.TERMINAL_STATES:
+                raise VenueError(self.reason or "Native access blocked; operator intervention required")
             if self._access_token and self._access_expires > time.time() + 60:
                 return {"authenticated": True, "expires_at": self._access_expires}
             if self._refresh_token:
@@ -137,7 +196,31 @@ class ProphetXClient(NativeTransport):
             headers={"Authorization": f"Bearer {self._access_token}", "Content-Type": "application/json",
                      "X-CFTC-Terminology": "true"},
         )
-        return await self._request(request, mutation_id=mutation_id)
+        try:
+            return await self._request(request, mutation_id=mutation_id)
+        except VenueHTTPError as exc:
+            self._http_failure(exc)
+            raise
+
+    async def _refresh_while_connected(self):
+        """Refresh this session and rediscover connection config even on quiet sockets."""
+        connected_at = time.monotonic()
+        try:
+            while not self._closed and self._ws is not None:
+                delay = max(0.1, min(30.0, self._access_expires - time.time() - 60))
+                await asyncio.sleep(delay)
+                if self._ws is not None and time.monotonic() - connected_at >= 25 * 60:
+                    await self._ws.close()
+                    return
+                if self._ws is not None and self._access_expires <= time.time() + 60:
+                    await self.connect()
+        except asyncio.CancelledError:
+            raise
+        except (VenueError, OSError):
+            if self.health not in self.TERMINAL_STATES:
+                self.health, self.reason = "auth_refresh_failed", "Session refresh failed; reconnect requires operator review"
+            if self._ws is not None:
+                await self._ws.close()
 
     async def discover_sports(self) -> dict:
         return await self.request("GET", "/mm/get_tournaments")
@@ -210,10 +293,14 @@ class ProphetXClient(NativeTransport):
             # Reconnect guarantees removed channels actually disappear as well.
             await self._ws.close()
 
+    async def configure_subscriptions(self, config: dict):
+        await self.subscribe(config.get("event_ids", []), config.get("prop_subtypes", {}))
+
     async def unsubscribe(self, channel_names: list[str]):
         for channel in channel_names:
             await self._send_ws({"event": "pusher:unsubscribe", "data": {"channel": channel}})
             self.channels.pop(channel, None)
+            self._confirmed_channels.discard(channel)
 
     @staticmethod
     def websocket_url(config: dict) -> str:
@@ -232,10 +319,14 @@ class ProphetXClient(NativeTransport):
         })
         data = response["data"]
         if not data.get("success") or data.get("rejected"):
+            self.health, self.reason = "subscription_rejected", "ProphetX rejected the requested event or prop subscriptions"
             raise VenueError("ProphetX rejected one or more requested subscriptions")
         if data.get("channel_count", 0) > data.get("channel_limit", 0):
+            self.health, self.reason = "subscription_rejected", "ProphetX channel quota exceeded"
             raise VenueError("ProphetX channel quota exceeded")
         self.channels = {item["channel_name"]: item for item in data["authorized_channel"]}
+        self._confirmed_channels.clear()
+        self.health = "authenticating_stream"
         await self._send_ws({"event": "pusher:signin", "data": data["authenticated"]})
 
     async def _subscribe_authorized_channels(self):
@@ -271,12 +362,16 @@ class ProphetXClient(NativeTransport):
         failures = 0
         while not self._closed:
             self._last_sequences.clear()
+            self._signin_confirmed = False
+            self._confirmed_channels.clear()
+            self.channels.clear()
             try:
                 config = await self.request("GET", "/websocket/connection-config")
+                self.health = "connecting"
                 async with ws_connect(self.websocket_url(config), ping_interval=20,
                                       max_size=16 * 1024 * 1024) as socket:
-                    self._ws, self.health = socket, "streaming"
-                    connected_at = time.monotonic()
+                    self._ws, self.health = socket, "connected"
+                    self._refresh_task = asyncio.create_task(self._refresh_while_connected(), name="prophetx-session-refresh")
                     async for raw in socket:
                         frame = decode_talaria(raw)
                         self.last_message_time = time.time()
@@ -287,26 +382,52 @@ class ProphetXClient(NativeTransport):
                             yield {"type": "snapshot_required", "venue": self.venue_id,
                                    "subscriptions": self.subscriptions, "reconcile_private": True}
                         elif event == "pusher:signin_success":
+                            self._signin_confirmed = True
+                            self.health = "subscribing"
                             await self._subscribe_authorized_channels()
+                        elif event == "pusher_internal:subscription_succeeded":
+                            channel = frame.get("channel")
+                            if self._signin_confirmed and channel in self.channels:
+                                self._confirmed_channels.add(channel)
+                                if self._confirmed_channels == set(self.channels):
+                                    self.health, self.reason = "streaming", ""
                         elif event == "pusher:ping":
                             await self._send_ws({"event": "pusher:pong", "data": {}})
                         elif event == "pusher:error":
                             raise VenueError("Talaria protocol error")
-                        elif self.accept_message(frame):
+                        elif (self._signin_confirmed and frame.get("channel") in self._confirmed_channels
+                              and self.accept_message(frame)):
+                            if event == "v2.market_selections":
+                                self._market_frames += 1
                             yield frame
                         failures = 0
-                        if time.monotonic() - connected_at > 25 * 60:
-                            break  # rediscover config and refresh token before server migration
                     raise VenueError("Talaria stream closed; reconcile and resubscribe")
-            except (OSError, ConnectionClosed, ValueError, VenueError, KeyError, TypeError, AttributeError) as exc:
+            except (OSError, ConnectionClosed, InvalidStatus, ValueError, VenueError, KeyError, TypeError, AttributeError) as exc:
                 self.error_count += 1
+                if isinstance(exc, InvalidStatus):
+                    self._http_failure(VenueHTTPError(self.venue_id, exc.response.status_code))
+                if self.health not in self.TERMINAL_STATES:
+                    self.health, self.reason = "reconnecting", f"Native transport interrupted: {type(exc).__name__}"
                 yield {"type": "transport_invalidated", "venue": self.venue_id,
-                       "reason": type(exc).__name__, "all_books_invalid": True, "reconcile_private": True}
+                       "reason": self.health, "all_books_invalid": True, "reconcile_private": True}
+                if self.health in self.TERMINAL_STATES:
+                    return
                 if not self._closed:
                     await self._backoff(failures)
                     failures += 1
             finally:
+                if self._refresh_task:
+                    self._refresh_task.cancel()
+                    await asyncio.gather(self._refresh_task, return_exceptions=True)
+                    self._refresh_task = None
                 self._ws = None
+                self._signin_confirmed = False
+                self._confirmed_channels.clear()
+
+    async def disconnect(self):
+        await super().disconnect()
+        self._signin_confirmed = False
+        self._confirmed_channels.clear()
 
     @staticmethod
     def get_manifest() -> dict:
@@ -322,7 +443,7 @@ class ProphetXClient(NativeTransport):
                              "book_depth_field": "value", "price_unit": "american_odds",
                              "all_or_none": False, "asynchronous_matching": True, "native_live_tested": False},
             "permissions": ["network", "secret:prophetx", "orders:conditional"],
-            "health_check": True, "rate_limits": {"local_default_rps": 2, "read_poll_min_seconds": 1},
+            "health_check": True, "rate_limits": {"local_default_rps": 1, "read_poll_min_seconds": 1},
             "config_schema": {"environment": {"type": "string", "enum": ["sandbox", "production"], "default": "sandbox"}},
             "docs": "https://docs.prophetx.co/docs/integrate-with-websockets",
         }

@@ -71,6 +71,17 @@ class NovigBook:
         self.books.clear()
         self.statuses.clear()
 
+    @staticmethod
+    def _identifier(row: dict, documented: str, observed: str) -> str:
+        if not isinstance(row, dict):
+            raise ValueError("Invalid Novig book row")
+        values = [row[key] for key in (documented, observed) if key in row]
+        if not values or any(not isinstance(value, str) or not value for value in values):
+            raise ValueError("Invalid Novig book identifier")
+        if len(values) == 2 and values[0] != values[1]:
+            raise ValueError("Conflicting Novig book identifier aliases")
+        return values[0]
+
     def apply(self, frame: dict) -> None:
         snapshot = "snapshot" in frame
         for market, channels in frame.get("snapshot" if snapshot else "delta", {}).items():
@@ -104,10 +115,15 @@ class NovigBook:
                                 self.books[market] = {}
                     continue
                 if snapshot:
-                    rebuilt = {
-                        row["order"]: {"outcome": outcome, "price": decimal_value(row["price"]), "qty": int(row["qty"])}
-                        for outcome, rows in data["orders"].items() for row in rows
-                    }
+                    try:
+                        rebuilt = {
+                            self._identifier(row, "order", "orderId"): {
+                                "outcome": outcome, "price": decimal_value(row["price"]), "qty": int(row["qty"])}
+                            for outcome, rows in data["orders"].items() for row in rows
+                        }
+                    except (KeyError, TypeError, ValueError):
+                        self.sequences.invalid.add(subject)
+                        raise
                     if any(not 0 < row["price"] < 1 or row["qty"] <= 0 for row in rebuilt.values()):
                         self.sequences.invalid.add(subject)
                         raise ValueError("Invalid Novig snapshot level")
@@ -115,19 +131,25 @@ class NovigBook:
                 else:
                     # Validate a whole batch before publishing any changed book.
                     updated = deepcopy(self.books.get(market, {}))
-                    for delta in data["deltas"]:
-                        if delta["kind"] == "remove":
-                            if delta["order"] not in updated:
-                                self.sequences.invalid.add(subject)
-                                raise SequenceGap(subject, None, int(data["seq"]))
-                            del updated[delta["order"]]
-                        elif delta["kind"] == "add":
-                            price, qty = decimal_value(delta["price"]), int(delta["qty"])
-                            if not 0 < price < 1 or qty <= 0:
-                                raise ValueError("Invalid Novig book level")
-                            updated[delta["order"]] = {"outcome": delta["outcome"], "price": price, "qty": qty}
-                        else:
-                            raise ValueError("Unknown Novig book delta")
+                    try:
+                        for delta in data["deltas"]:
+                            order_id = self._identifier(delta, "order", "orderId")
+                            if delta["kind"] == "remove":
+                                if order_id not in updated:
+                                    self.sequences.invalid.add(subject)
+                                    raise SequenceGap(subject, None, int(data["seq"]))
+                                del updated[order_id]
+                            elif delta["kind"] == "add":
+                                price, qty = decimal_value(delta["price"]), int(delta["qty"])
+                                if not 0 < price < 1 or qty <= 0:
+                                    raise ValueError("Invalid Novig book level")
+                                outcome = self._identifier(delta, "outcome", "outcomeId")
+                                updated[order_id] = {"outcome": outcome, "price": price, "qty": qty}
+                            else:
+                                raise ValueError("Unknown Novig book delta")
+                    except (KeyError, TypeError, ValueError):
+                        self.sequences.invalid.add(subject)
+                        raise
                     self.books[market] = updated
         for channel in ("orders", "positions"):
             if channel not in frame:
@@ -172,6 +194,9 @@ class NovigClient(NativeTransport):
         self._pending: dict[int, asyncio.Future] = {}
         self.authenticated = False
         self.health_reason = "Novig is disconnected"
+        self.last_error_type: str | None = None
+        self.received_close_code: int | None = None
+        self.sent_close_code: int | None = None
 
     def _load_key(self):
         if not self.settings.api_key or not self.settings.private_key_path:
@@ -214,7 +239,11 @@ class NovigClient(NativeTransport):
     def health_check(self) -> dict:
         return {**super().health_check(), "authenticated": self.authenticated,
                 "streaming": self.health == "streaming" and self._ws is not None,
-                "reason": self.health_reason}
+                "orderbook_markets": len(self.book.books),
+                "orderbook_orders": sum(len(orders) for orders in self.book.books.values()),
+                "invalid_book_subjects": len(self.book.sequences.invalid),
+                "reason": self.health_reason, "last_error_type": self.last_error_type,
+                "received_close_code": self.received_close_code, "sent_close_code": self.sent_close_code}
 
     def _invalidate_stream(self, state: str, reason: str) -> dict:
         self.error_count += 1
@@ -351,6 +380,9 @@ class NovigClient(NativeTransport):
                     raise VenueError("Novig stream closed; reconcile and resubscribe")
             except (OSError, TimeoutError, ConnectionClosed, InvalidHandshake, VenueError,
                     ValueError, KeyError, TypeError, AttributeError) as exc:
+                self.last_error_type = type(exc).__name__
+                self.received_close_code = int(exc.rcvd.code) if isinstance(exc, ConnectionClosed) and exc.rcvd else None
+                self.sent_close_code = int(exc.sent.code) if isinstance(exc, ConnectionClosed) and exc.sent else None
                 status = exc.response.status_code if isinstance(exc, InvalidStatus) else None
                 if status in {401, 403, 451}:
                     if status == 401:

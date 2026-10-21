@@ -1,14 +1,16 @@
 """Offline Novig connection health checks; no credentials or network access."""
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidHandshake, InvalidStatus
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidStatus
+from websockets.frames import Close
 from websockets.http11 import Response
 
 import evplatform.venues.novig as novig_module
-from evplatform.venues.novig import NovigClient
+from evplatform.venues.novig import NovigBook, NovigClient
 
 
 PRIVATE_DETAIL = "private-server-detail-must-not-appear"
@@ -104,6 +106,9 @@ async def test_terminal_upgrade_denial_preserves_sanitized_health(
     assert health["authenticated"] is authenticated
     assert health["streaming"] is False
     assert health["errors"] == 1
+    assert health["last_error_type"] == "InvalidStatus"
+    assert health["received_close_code"] is None
+    assert health["sent_close_code"] is None
     assert str(status) in health["reason"]
     assert PRIVATE_DETAIL not in json.dumps([health, frames])
     assert native._ws is None
@@ -204,3 +209,141 @@ async def test_transient_or_invalid_subscription_acknowledgement_reconnects(nati
         assert backoffs == [0]
     finally:
         await updates.aclose()
+
+
+def test_private_only_snapshot_and_independent_channel_deltas():
+    book = NovigBook()
+    book.apply({"nonce": 1, "subscribed": {"markets": {}, "events": {}, "private": ["orders", "positions"]},
+                "snapshot": {},
+                "orders": {"seq": 907, "open": [{"orderId": "order-one", "qty": 110}]},
+                "positions": {"seq": 12, "positions": [{"marketId": "market-one", "qty": 110, "cost": "0.73150"}]}})
+    assert book.sequences.values == {"PRIVATE:orders": 907, "PRIVATE:positions": 12}
+    assert book.books == {}
+    book.apply({"delta": {}, "orders": {"seq": 908, "deltas": [
+        {"kind": "fill", "orderId": "order-one", "qty": 40, "remaining": 70}]}})
+    assert book.sequences.values == {"PRIVATE:orders": 908, "PRIVATE:positions": 12}
+    book.apply({"delta": {}, "positions": {"seq": 13, "deltas": [
+        {"marketId": "market-one", "qty": 0, "cost": "0.00000"}]}})
+    book.apply({"heartbeat": {"orders": 908, "positions": 13, "ts": 1757894415123}})
+    assert book.sequences.values == {"PRIVATE:orders": 908, "PRIVATE:positions": 13}
+    assert not book.sequences.invalid
+
+
+@pytest.mark.parametrize("channel", ["orders", "positions"])
+async def test_private_heartbeat_gap_invalidates_and_reconnects_from_fresh_snapshot(native, monkeypatch, channel):
+    sessions = [Socket([SUBSCRIBED, {"heartbeat": {channel: 2, "ts": 1757894415123}}]),
+                Socket([SUBSCRIBED, {"heartbeat": {"orders": 0, "positions": 0, "ts": 1757894430123}}])]
+    backoffs = []
+
+    async def backoff(failures):
+        backoffs.append(failures)
+
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *args, **kwargs: sessions.pop(0))
+    monkeypatch.setattr(native, "_backoff", backoff)
+    updates = native.stream_updates()
+    try:
+        await anext(updates)
+        assert native.health_check()["streaming"] is True
+        invalidation = await anext(updates)
+        assert invalidation["reconcile_private"] is True
+        assert native.health_check()["streaming"] is False
+        assert native.book.sequences.values == {}
+        assert await anext(updates) == SUBSCRIBED
+        assert native.book.sequences.values == {"PRIVATE:orders": 0, "PRIVATE:positions": 0}
+        heartbeat = await anext(updates)
+        assert "heartbeat" in heartbeat
+        assert native.health_check()["streaming"] is True
+        assert native.health_check()["errors"] == 1
+        assert backoffs == [0]
+    finally:
+        await updates.aclose()
+
+
+@pytest.mark.parametrize("received,sent", [(1008, 1008), (None, 1011), (None, None)])
+async def test_close_diagnostics_are_sanitized_and_survive_recovery(native, monkeypatch, received, sent):
+    failure = ConnectionClosedError(Close(received, PRIVATE_DETAIL) if received is not None else None,
+                                    Close(sent, PRIVATE_DETAIL) if sent is not None else None,
+                                    True if received is not None and sent is not None else None)
+    sessions = [Socket(failure=failure), Socket([SUBSCRIBED])]
+
+    async def backoff(failures):
+        return None
+
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *args, **kwargs: sessions.pop(0))
+    monkeypatch.setattr(native, "_backoff", backoff)
+    updates = native.stream_updates()
+    try:
+        invalidation = await anext(updates)
+        health = native.health_check()
+        assert health["last_error_type"] == "ConnectionClosedError"
+        assert health["received_close_code"] == received
+        assert health["sent_close_code"] == sent
+        assert PRIVATE_DETAIL not in json.dumps([health, invalidation])
+        assert await anext(updates) == SUBSCRIBED
+        health = native.health_check()
+        assert health["streaming"] is True
+        assert health["last_error_type"] == "ConnectionClosedError"
+        assert health["received_close_code"] == received
+        assert health["sent_close_code"] == sent
+        assert PRIVATE_DETAIL not in json.dumps(health)
+    finally:
+        await updates.aclose()
+
+
+def book_snapshot(identifier):
+    return {"snapshot": {"market-one": {"book": {"seq": 1, "orders": {
+        "opposing": [{**identifier, "price": "0.315", "qty": 8}]}},
+        "lifecycle": {"seq": 1, "status": "OPEN"}}}}
+
+
+@pytest.mark.parametrize("identifier", [{"order": "order-one"}, {"orderId": "order-one"},
+                                         {"order": "order-one", "orderId": "order-one"}])
+def test_book_snapshot_accepts_documented_and_observed_identifier_aliases(identifier):
+    book = NovigBook()
+    book.apply(book_snapshot(identifier))
+    assert book.asks("market-one", "opposing") == [(Decimal("0.685"), 8)]
+    assert set(book.books["market-one"]) == {"order-one"}
+
+
+@pytest.mark.parametrize("identifier", [
+    {"order": "order-one", "orderId": "different-order"}, {},
+    {"orderId": None}, {"orderId": 123}, {"orderId": True}, {"orderId": ""},
+    {"order": "order-one", "orderId": None},
+])
+def test_book_snapshot_rejects_conflicting_or_untyped_identifiers(identifier):
+    book = NovigBook()
+    book.apply(book_snapshot({"order": "order-one"}))
+    with pytest.raises(ValueError):
+        book.apply(book_snapshot(identifier))
+    assert "market-one:book" in book.sequences.invalid
+    assert book.asks("market-one", "opposing") == []
+
+
+@pytest.mark.parametrize("order_key,outcome_key", [("order", "outcome"), ("orderId", "outcomeId"),
+                                                    ("order", "outcomeId"), ("orderId", "outcome")])
+def test_book_delta_accepts_documented_and_observed_identifier_aliases(order_key, outcome_key):
+    book = NovigBook()
+    book.apply(book_snapshot({"orderId": "order-one"}))
+    book.apply({"delta": {"market-one": {"book": {"seq": 2, "deltas": [
+        {"kind": "remove", order_key: "order-one", "reason": "fill"},
+        {"kind": "add", order_key: "order-one", outcome_key: "opposing", "price": "0.315", "qty": 3},
+    ]}}}})
+    assert book.asks("market-one", "opposing") == [(Decimal("0.685"), 3)]
+
+
+@pytest.mark.parametrize("delta", [
+    {"kind": "remove", "order": "order-one", "orderId": "different-order"},
+    {"kind": "add", "orderId": "order-two", "outcome": "opposing", "outcomeId": "different-outcome", "price": "0.315", "qty": 3},
+    {"kind": "add", "orderId": "order-two", "outcomeId": None, "price": "0.315", "qty": 3},
+])
+def test_book_delta_rejects_conflicting_aliases_without_publishing_partial_batch(delta):
+    book = NovigBook()
+    book.apply(book_snapshot({"orderId": "order-one"}))
+    with pytest.raises(ValueError):
+        book.apply({"delta": {"market-one": {"book": {"seq": 2, "deltas": [
+            {"kind": "add", "orderId": "valid-first-row", "outcomeId": "opposing", "price": "0.315", "qty": 3},
+            delta,
+        ]}}}})
+    assert set(book.books["market-one"]) == {"order-one"}
+    assert "market-one:book" in book.sequences.invalid
+    assert book.asks("market-one", "opposing") == []
