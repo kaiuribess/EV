@@ -11,6 +11,17 @@ terminal failure is still not reproduced in the agent process. A newly opened
 interactive owner setup window passed all six local checks and waited at the
 owner confirmation; no confirmation was supplied by the agent.
 
+The owner then completed both confirmations. A GET-only transfer check proved
+`Applied` for $25.00000; the production trading key passed signed account reads
+with a $25.00000 wallet balance, identity verification and no orders/positions.
+Its credential pair was exported locally without replacing legacy paper keys.
+At October 20 10:24 PM PDT, the restarted app's Novig production monitor reported
+authenticated streaming, ten book markets, zero errors/reconnects and no invalid
+book subjects. Automation remained off, the kill switch on, native orders zero,
+and live readiness false. Local evidence:
+`data/novig-production-trading-diagnostic.json` and
+`data/novig-production-monitor-connected.json`. No live order was submitted.
+
 Follow-up Windows storage repair: **55 focused tests passed in 2.54 seconds**
 (52 setup cases plus three real Windows permissions/error-handling cases).
 The permissions helper now uses Win32 directly instead of launching PowerShell;

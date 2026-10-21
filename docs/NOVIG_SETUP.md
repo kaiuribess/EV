@@ -8,15 +8,19 @@ repository root.
 
 ## Already available
 
-The production management key is saved only on this PC and has passed signed
-read checks. Its private file stays outside the repository. The October 20 PDT
-check reported $25.00 primary-wallet cash, zero trading subaccounts, and zero
-production trading keys. The $75.00 website portfolio total is not a funding
-limit: it can also contain open positions and trade credits. Refresh actual cash
-before deciding an amount.
+The production management and trading keys are saved only on this PC, with
+private files outside the repository. On October 20 at approximately 10:23 PM
+PDT, the owner completed wallet-opening and $25 funding confirmations. A
+subsequent scoped transfer GET reported `Applied`, and signed trading-account
+reads reported a $25.00 trading-wallet balance with no open orders or positions.
+The production monitor then authenticated and streamed ten discovered markets.
+Live betting remains disabled and release readiness is false.
 
-The existing paper connection retains its current credentials. Production setup
-uses separate environment variables and does not overwrite the legacy pair.
+Do not repeat preparation/opening/funding for this completed setup. The commands
+below document the workflow and recovery options. The old paper credentials are
+preserved; the running Novig monitor explicitly selects the separate production
+credential pair. The website portfolio total is not assumed to equal spendable
+API cash; refresh actual balances before deciding any later funding amount.
 
 ## Prepare and review
 

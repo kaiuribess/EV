@@ -13,7 +13,7 @@ It is **not a completed production autonomous trading release**.
 | Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
 | Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger | Genuine sandbox lifecycle certification; supported venue settlement proof; no native orders have been sent |
 | Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
-| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper book/private subscriptions and production management reads verified; operator-run production wallet/key setup with durable recovery | Owner-submitted production wallet opening/funding, account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
+| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper subscriptions and production account/book reads verified; owner opened and funded a trading wallet with $25; protected setup and durable recovery | Account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
 | ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, matched-fill/wallet accounting and restricted funded-cash win/loss settlement; production read-only subscriptions and market messages verified | Genuine complete history, funded-cash and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
 | Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; earlier actual signed production read/stream checks passed | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, actionable launch blockers and separate native order ledger | Broader browser/device QA; native arming remains an explicit backend operation behind preflight |
@@ -106,14 +106,15 @@ credentials remain unchanged. No account is labelled unfunded merely because
 its sandbox is empty. `scripts/check_accounts.py` repeats
 these explicit environment checks without sending orders or transferring money.
 
-The [Novig setup helper](NOVIG_SETUP.md) has now prepared a protected local
-Ed25519 signer outside the repository and verified production management access.
-It has not opened or funded a remote trading wallet. Those submissions require
-the owner at an interactive terminal. A versioned local journal prevents blind
-opening retries and preserves transfer identity through unknown outcomes. The
-operator has selected $25 funding; the helper still checks fresh cash and never
-chooses an amount automatically. Separate production trading credentials can
-be exported without replacing the current paper pair or enabling live orders.
+The owner subsequently completed wallet-opening and $25 funding confirmations
+in the [Novig setup helper](NOVIG_SETUP.md). A scoped transfer GET confirmed
+`Applied`; signed production trading-account reads confirmed the $25 balance
+and an empty order/position inventory. The private signer remains protected
+outside the repository, and the separate production pair is now saved locally.
+The Novig monitor switched explicitly to production and streamed ten discovered
+markets with no reported errors. Paper credentials remain preserved; trading
+automation remains off and live release readiness remains false. Read access
+and a completed wallet transfer do not certify order/fill/settlement behavior.
 
 ProphetX now has local private connection/revision fencing, heartbeat-gap
 invalidation and exact comparison with complete REST history. Its reporting
