@@ -77,6 +77,12 @@ durable intent and never treat an acknowledgement as a fill. See
 [the launch guide](docs/GO_LIVE.md) and [native accounting](docs/NATIVE_ACCOUNTING.md).
 No startup script arms native trading.
 
+Novig's production management key is separate from its trading-wallet key.
+Run `.\setup_novig.ps1` for a read-only setup status. The
+[Novig setup guide](docs/NOVIG_SETUP.md) covers protected key preparation,
+owner-performed wallet opening/funding, and unknown-outcome recovery. Preparing
+or exporting credentials never enables betting.
+
 For frontend development, run `npm.cmd run dev` in `frontend/`; Vite proxies to
 8001. Set `EV_API_TARGET=http://127.0.0.1:8002` for another backend port.
 

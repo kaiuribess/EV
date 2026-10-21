@@ -142,9 +142,16 @@ def build_client(venue, environment, values, http):
     return PolymarketUSClient(PolymarketUSSettings(**common, api_key_id=values[0], secret_key=values[1]), http)
 
 
-async def check_account(venue, environment="production", *, environ=None, transport=None):
+async def check_account(venue, environment="production", *, environ=None, transport=None,
+                        novig_credential_profile="legacy"):
     environ = os.environ if environ is None else environ
-    values = [environ.get(key, "") for key in CREDS[venue]]
+    names = CREDS[venue]
+    if novig_credential_profile not in {"legacy", "environment"}:
+        raise ValueError("Invalid Novig credential profile")
+    if venue == "novig" and novig_credential_profile == "environment":
+        prefix = "NOVIG_PRODUCTION_TRADING" if environment == "production" else "NOVIG_PAPER_TRADING"
+        names = (prefix + "_API_KEY", prefix + "_PRIVATE_KEY_PATH")
+    values = [environ.get(key, "") for key in names]
     result = {"venue": venue, "environment": environment, "money_type": "real" if environment == "production" else "play",
               "credentials_present": all(values), "read_only": True, "live_readiness_verified": False,
               "observed_at": datetime.now(timezone.utc).isoformat(), "checks": {}}
@@ -213,9 +220,11 @@ async def run(args):
         report["local_monitor_scope"] = await monitor_scope(args.dashboard)
     except Exception as exc:
         report["local_monitor_scope"] = error_summary(exc)
-    report["accounts"] = await asyncio.gather(*(check_account(venue, args.environment) for venue in args.venues))
+    profile = getattr(args, "novig_credential_profile", "legacy")
+    report["accounts"] = await asyncio.gather(*(check_account(venue, args.environment,
+        novig_credential_profile=profile) for venue in args.venues))
     if args.compare_novig_sandbox and args.environment == "production" and "novig" in args.venues:
-        report["accounts"].append(await check_account("novig", "sandbox"))
+        report["accounts"].append(await check_account("novig", "sandbox", novig_credential_profile=profile))
     text = json.dumps(report, indent=2)
     if args.output:
         path = Path(args.output)
@@ -229,6 +238,7 @@ def main():
     parser.add_argument("--environment", choices=("sandbox", "production"), default="production")
     parser.add_argument("--venues", nargs="+", choices=VENUES, default=list(VENUES))
     parser.add_argument("--compare-novig-sandbox", action="store_true")
+    parser.add_argument("--novig-credential-profile", choices=("legacy", "environment"), default="legacy")
     parser.add_argument("--dashboard", default="http://127.0.0.1:8001")
     parser.add_argument("--output", default="data/account-access-diagnostic.json")
     asyncio.run(run(parser.parse_args()))

@@ -13,7 +13,7 @@ It is **not a completed production autonomous trading release**.
 | Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
 | Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger | Genuine sandbox lifecycle certification; supported venue settlement proof; no native orders have been sent |
 | Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
-| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper book/private subscriptions verified | Account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
+| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper book/private subscriptions and production management reads verified; operator-run production wallet/key setup with durable recovery | Owner-submitted production wallet opening/funding, account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
 | ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, matched-fill/wallet accounting and restricted funded-cash win/loss settlement; production read-only subscriptions and market messages verified | Genuine complete history, funded-cash and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
 | Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; earlier actual signed production read/stream checks passed | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, actionable launch blockers and separate native order ledger | Broader browser/device QA; native arming remains an explicit backend operation behind preflight |
@@ -106,6 +106,15 @@ credentials remain unchanged. No account is labelled unfunded merely because
 its sandbox is empty. `scripts/check_accounts.py` repeats
 these explicit environment checks without sending orders or transferring money.
 
+The [Novig setup helper](NOVIG_SETUP.md) has now prepared a protected local
+Ed25519 signer outside the repository and verified production management access.
+It has not opened or funded a remote trading wallet. Those submissions require
+the owner at an interactive terminal. A versioned local journal prevents blind
+opening retries and preserves transfer identity through unknown outcomes. The
+operator has selected $25 funding; the helper still checks fresh cash and never
+chooses an amount automatically. Separate production trading credentials can
+be exported without replacing the current paper pair or enabling live orders.
+
 ProphetX now has local private connection/revision fencing, heartbeat-gap
 invalidation and exact comparison with complete REST history. Its reporting
 watermark must cover the start of the account probe; a heartbeat alone cannot
@@ -118,10 +127,10 @@ The TypeScript/Vite build and actual paused native Windows startup have also bee
 responses; real connection checks above were separate read-only observations.
 
 An isolated 15-second synthetic run measured 2,190 internal calculations:
-median **0.202 ms**, p95 **0.384 ms**, p99 **0.552 ms**. Local
-receipt-to-calculation measured median **10.998 ms**, p95 **19.001 ms**,
-p99 **23.000 ms**. Nine paper orders were routed; four had fills. Seven
-simulated fill events had median submission-to-fill delay **578.279 ms**;
+median **0.232 ms**, p95 **0.529 ms**, p99 **0.720 ms**. Local
+receipt-to-calculation measured median **11.187 ms**, p95 **25.998 ms**,
+p99 **36.001 ms**. Nine paper orders were routed; four had fills. Seven
+simulated fill events had median submission-to-fill delay **2,124.501 ms**;
 that sample is too small for p95/p99. These are local synthetic measurements,
 not sportsbook-to-client latency, native fill speed or evidence of profit.
 See [the validation record](VALIDATION.md).

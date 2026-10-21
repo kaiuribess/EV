@@ -30,7 +30,17 @@ Sandbox configuration uses Novig's separate paper exchange at `https://api.paper
 
 A key created in the Novig Profile screen has `management` scope. It authenticates REST discovery but cannot open `/v3/ws`. Streaming requires a subaccount's `trading` or `trading::read` key; use the read-only scope for monitoring. A management key can inspect its scope with `GET /v3/keys/{id}` and list subaccounts with `GET /v3/account/subaccounts`. Subaccount/key creation is a separate account setup action; the application never performs it automatically. See [key scopes](https://docs.novig.com/api/api-keys) and [subaccounts](https://docs.novig.com/api/subaccounts/manage). Health reports REST authentication separately from successful streaming, preserves actionable access-denied messages, and stops reconnecting after HTTP 401, 403, or 451.
 
-The active monitor reads `NOVIG_API_KEY` and `NOVIG_PRIVATE_KEY_PATH`. Locally provisioned management and paper-trading credentials can be retained separately as `NOVIG_MANAGEMENT_API_KEY` / `NOVIG_MANAGEMENT_PRIVATE_KEY_PATH` and `NOVIG_PAPER_TRADING_API_KEY` / `NOVIG_PAPER_TRADING_PRIVATE_KEY_PATH`; those optional variables do not arm the application or select a trading account. Private keys remain outside the checkout. A paper key cannot authenticate production.
+The default `legacy` credential profile reads `NOVIG_API_KEY` and
+`NOVIG_PRIVATE_KEY_PATH`. Explicitly selecting the `environment` credential
+profile reads `NOVIG_PAPER_TRADING_API_KEY` / `NOVIG_PAPER_TRADING_PRIVATE_KEY_PATH`
+for sandbox or `NOVIG_PRODUCTION_TRADING_API_KEY` /
+`NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH` for production. Missing or partial
+selected pairs block instead of borrowing credentials from another profile.
+Management credentials are never selected by that path. Private keys remain
+outside the checkout. A paper key cannot authenticate production, and no
+credential selection grants order authorization. The [setup tool](NOVIG_SETUP.md)
+prepares owner-performed production wallet opening and funding with durable
+unknown-outcome recovery; the application does not do those actions at startup.
 
 Native streaming uses `/v3/ws`. Book sequences are per market/channel; private sequences are per subaccount/channel. Gaps invalidate state and reconnect with new subscription snapshots. `place` and `cancel` use request nonces and wait for an acknowledgement; private events are still required. The implementation requests uncompressed frames. See [streaming](https://docs.novig.com/api/streaming/connection) and [private updates](https://docs.novig.com/api/streaming/private).
 

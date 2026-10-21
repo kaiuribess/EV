@@ -20,6 +20,27 @@ spec.loader.exec_module(diagnostic)
 KEY = "00000000-0000-4000-8000-000000000001"
 
 
+async def test_scoped_production_diagnostic_never_falls_back_to_legacy_pair(monkeypatch):
+    monkeypatch.setattr(diagnostic, "build_client", lambda *args: pytest.fail("No fallback connection allowed"))
+    result = await diagnostic.check_account("novig", novig_credential_profile="environment",
+        environ={"NOVIG_API_KEY": KEY, "NOVIG_PRIVATE_KEY_PATH": "legacy-only",
+                 "NOVIG_PRODUCTION_TRADING_API_KEY": KEY})
+    assert not result["credentials_present"] and not result["checks"]
+
+
+async def test_scoped_production_diagnostic_passes_only_matching_pair(monkeypatch):
+    selected = []
+    def capture(venue, environment, values, http):
+        selected.append((venue, environment, values))
+        raise RuntimeError("Stop before network")
+    monkeypatch.setattr(diagnostic, "build_client", capture)
+    with pytest.raises(RuntimeError, match="Stop before network"):
+        await diagnostic.check_account("novig", novig_credential_profile="environment",
+            environ={"NOVIG_API_KEY": "legacy", "NOVIG_PRIVATE_KEY_PATH": "legacy-path",
+                "NOVIG_PRODUCTION_TRADING_API_KEY": "production", "NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH": "production-path"})
+    assert selected == [("novig", "production", ["production", "production-path"])]
+
+
 @pytest.mark.asyncio
 async def test_production_failure_never_falls_back_to_sandbox_or_exposes_error_body(monkeypatch):
     monkeypatch.setattr(NovigClient, "headers", lambda *args, **kwargs: {})

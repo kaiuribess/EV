@@ -8,13 +8,35 @@ Executed on this Windows PC with Python 3.12.0:
 .\run_tests.ps1
 ```
 
-**1,261 tests passed in 39.19 seconds with coverage enabled.** Backend statement
-coverage is **87.66%** (9,180 of 10,472 statements). TypeScript checking and the Vite
+**1,321 tests passed in 36.38 seconds with coverage enabled.** Backend statement
+coverage is **87.65%** (9,606 of 10,960 statements). TypeScript checking and the Vite
 production build passed. One upstream Starlette/httpx TestClient deprecation
 warning remains. Coverage measures executed statements, not exchange certification.
 
 All order, cancellation, fill, account and settlement exchanges in automated tests
 use controlled offline responses. No test submitted a real native order.
+
+The Novig setup addition contributes 52 offline tests covering production signer
+identity, protected local preparation, durable unknown outcomes, same-ID transfer
+recovery, pending/final states, exact amount and destination checks, concurrent
+process exclusion, and export without replacing paper credentials or enabling
+trading. Eight additional regressions cover explicit environment credential
+selection and account diagnostics. Missing production credentials never fall
+back to a paper or management key.
+
+The Windows setup wrapper passed real GET-only production status checks and
+reported $25.00 primary cash, zero production trading wallets and zero trading
+keys. Local preparation then generated a signer outside the repository, saved
+its journal, and verified a protected ACL restricted to the current user and
+SYSTEM. No remote wallet opening or funding was submitted. The operator's
+selected $25 funding remains an owner-performed step. Actual Windows ACL and
+atomic-write checks were separate from the coverage run; those OS operations
+are mocked in the offline unit suite. See [Novig setup](NOVIG_SETUP.md).
+
+The updated app restarted on port 8001 with 13 plugins, the existing Novig
+sandbox/legacy credential selection, automation off, the kill switch on, and
+zero native orders. The $5 cap, null daily-loss limit and event/player overlap
+guards persisted. Local evidence: `data/novig-setup-paused-restart.json`.
 
 The latest release adds a reviewed multi-venue launch portfolio with separate
 account cash checks and shared event/player exposure guards. Focused regressions

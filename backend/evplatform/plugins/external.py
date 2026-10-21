@@ -131,6 +131,11 @@ class NativeMonitorConfig(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
 
 
+class NovigMonitorConfig(NativeMonitorConfig):
+    credential_profile: Literal["legacy", "environment"] = Field(default="legacy",
+        description="Legacy preserves the existing pair. Environment selects separate paper/production trading credentials.")
+
+
 class ProphetXMonitorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     environment: Literal["sandbox", "production"] = "sandbox"
@@ -170,8 +175,10 @@ def migrate_prophetx_monitor_config(config):
 class NativeMonitor(Plugin):
     config_model = NativeMonitorConfig
 
-    def __init__(self, factory, settings_factory, credentials, engine, *, config_model=None):
+    def __init__(self, factory, settings_factory, credentials, engine, *, config_model=None,
+                 credential_environments=None):
         self.factory, self.settings_factory, self.credentials = factory, settings_factory, credentials
+        self.credential_environments = credential_environments or {}
         self.engine = engine
         self.config_model = config_model or NativeMonitorConfig
         self.manifest = normalize_manifest(factory.get_manifest()).model_copy(update={
@@ -180,6 +187,14 @@ class NativeMonitor(Plugin):
         self.frames = 0
         self.config_error = ""
 
+    def credential_names(self, config):
+        if config.get("credential_profile", "legacy") == "legacy":
+            return self.credentials
+        names = self.credential_environments.get(config.get("environment", "sandbox"))
+        if not names:
+            raise ValueError("No credential profile declared for this environment")
+        return names
+
     async def start(self, context):
         await self.stop()
         await super().start(context)
@@ -187,11 +202,13 @@ class NativeMonitor(Plugin):
         if context.config.get("legacy_market_ids"):
             self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
             return
-        if not all(os.getenv(env) for env in self.credentials.values()):
+        credentials = self.credential_names(context.config)
+        if not all(os.getenv(env) for env in credentials.values()):
+            self.config_error = "Complete the selected backend credential pair; credentials from another profile are not substituted"
             return
         self.client = self.factory(self.settings_factory(
             environment=context.config.get("environment", "sandbox"),
-            **{key: os.environ[env] for key, env in self.credentials.items()}))
+            **{key: os.environ[env] for key, env in credentials.items()}))
         if self.manifest.name == "prophetx":
             review = context.config.get("account_review")
             self.client.account_review = ProphetXAccountReview.model_validate(review) if review else None
@@ -267,11 +284,16 @@ def register_external(registry, engine):
         registry.records[name].credential_status = "configured_unverified" if os.getenv(factory.credential_env) else "missing"
     for factory, settings_factory, credentials, config_model in [
         (KalshiClient, KalshiSettings, {"api_key_id": "KALSHI_API_KEY_ID", "private_key_path": "KALSHI_PRIVATE_KEY_PATH"}, NativeMonitorConfig),
-        (NovigClient, NovigSettings, {"api_key": "NOVIG_API_KEY", "private_key_path": "NOVIG_PRIVATE_KEY_PATH"}, NativeMonitorConfig),
+        (NovigClient, NovigSettings, {"api_key": "NOVIG_API_KEY", "private_key_path": "NOVIG_PRIVATE_KEY_PATH"}, NovigMonitorConfig),
         (ProphetXClient, ProphetXSettings, {"api_key": "PROPHETX_API_KEY", "secret_key": "PROPHETX_SECRET_KEY"}, ProphetXMonitorConfig),
         (PolymarketUSClient, PolymarketUSSettings, {"api_key_id": "POLYMARKET_US_API_KEY_ID", "secret_key": "POLYMARKET_US_SECRET_KEY"}, PolymarketUSMonitorConfig),
     ]:
-        plugin = NativeMonitor(factory, settings_factory, credentials, engine, config_model=config_model)
+        environments = ({
+            "sandbox": {"api_key": "NOVIG_PAPER_TRADING_API_KEY", "private_key_path": "NOVIG_PAPER_TRADING_PRIVATE_KEY_PATH"},
+            "production": {"api_key": "NOVIG_PRODUCTION_TRADING_API_KEY", "private_key_path": "NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH"},
+        } if factory is NovigClient else {})
+        plugin = NativeMonitor(factory, settings_factory, credentials, engine, config_model=config_model,
+                               credential_environments=environments)
         registry.register(plugin)
         registry.records[plugin.manifest.name].credential_status = "configured_unverified" if all(os.getenv(v) for v in credentials.values()) else "missing"
 

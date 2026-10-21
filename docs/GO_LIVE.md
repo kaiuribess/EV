@@ -279,9 +279,12 @@ Novig production and paper keys are separate. The website's
 management key, which cannot place orders or connect to the trading stream.
 Keep that pair in `NOVIG_PRODUCTION_MANAGEMENT_API_KEY` and
 `NOVIG_PRODUCTION_MANAGEMENT_PRIVATE_KEY_PATH` for operator setup diagnostics;
-those variables do not enable the runtime. The separate trading pair belongs in
-`NOVIG_API_KEY` and `NOVIG_PRIVATE_KEY_PATH` only after its correct environment
-and account have been verified.
+those variables do not enable the runtime. The [Novig setup helper](NOVIG_SETUP.md)
+exports a separately verified pair to `NOVIG_PRODUCTION_TRADING_API_KEY` and
+`NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH`. Provider Center must explicitly
+select `production` and `credential_profile: environment` to use it. The default
+`legacy` profile preserves `NOVIG_API_KEY` and `NOVIG_PRIVATE_KEY_PATH`; no paper
+connection is silently switched. Missing/partial scoped credentials are blocked.
 
 The production management check on October 20 PDT verified the key and $25.00
 primary-wallet cash, but found no trading wallet or production trading key.
