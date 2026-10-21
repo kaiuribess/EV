@@ -10,6 +10,16 @@ The documented `last_observed` plus `last_update_type: collector_observation` pa
 
 Retained top-ups, partial/truncated snapshots, continuation pages and degraded sources prevent strict completeness. Separate outcomes must arrive together with matching observation clocks; an older cached opposing side remains research-only. Missing prices invalidate prior usable quotes, without treating unrelated null columns as withdrawals. Observation metadata never changes the source identity signature. These are deliberately conservative local eligibility rules, not claims of upstream guarantees. [Snapshot and pagination contract](https://parlay-api.com/docs).
 
+### October 21 live parser repair
+
+A bounded authenticated NBA capture exposed named spread rows with the same American price in both `price` and `over_price`, and a null `under_price`. The parser now recognizes that exact game/spreads shape, retaining the actual team and signed finite handicap. Unequal price aliases, extra opposing prices, missing/nonfinite handicaps, and conflicting prop/total fields remain invalid. A named spread side does not invent its opposing side, prove a settlement match, or acquire active-status evidence.
+
+Flat Parlay streaming and REST prop batches now isolate malformed rows. The failed row's explicit source event/book/market scope is invalidated, its cached partial sides are cleared, and all rows in that affected scope are excluded from the current batch. Unrelated valid scopes still update. Missing identity broadens invalidation; an unidentifiable row invalidates the provider scope. Reconnect/replacement baselines retain their existing invalidation behavior. Recovery of previously verified observations still requires newer complete evidence.
+
+Streaming `commence_time` and subscription sport now survive discovery as `scheduled_start` and `event_sport`. Missing values stay missing. These facts contribute to the source signature; previously authored mappings without this context require fresh review rather than silent migration. No existing real mappings were present when this repair was installed.
+
+All 25 retained malformed real spread rows parsed successfully after the repair. A new 30-second authenticated NBA capture saw 68 FanDuel/DraftKings moneyline and spread offers with zero extraction errors. It still supplied no verified quote-bound observation or active-status evidence; no execution eligibility was inferred. The captures are bounded windows, not a coverage census. Local artifacts: `data/first-scope-bad-rows-20261021.json` (protected raw rows) and `data/first-scope-feed-fixed-20261021.json` (summary).
+
 ## Oddize
 
 `Price.ts` denotes observation time and `timestamp` is its ISO representation. Conflicting or missing clocks remain unverified. The older opposing-side observation is retained; unequal side timestamps do not receive synchronized completeness. The published flat schemas provide no authoritative current market status, so status verification remains false. [Official OpenAPI](https://oddize.com/api/v1/openapi.json).

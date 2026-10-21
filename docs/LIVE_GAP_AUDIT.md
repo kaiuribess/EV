@@ -63,10 +63,10 @@ current trading authorization.
 
 ## Validation
 
-Latest full offline run: **1,757 backend tests passed in 50.09 seconds**, with
-**88.58% statement coverage** (11,630 of 13,129 statements), plus **89 frontend
+Latest full offline run: **1,790 backend tests passed in 49.22 seconds**, with
+**88.59% statement coverage** (11,667 of 13,169 statements), plus **89 frontend
 tests passed** and a successful TypeScript/Vite production build. The run is
-saved in `data/validation-sdk-rules-20261021.log`. This is software regression
+saved in `data/validation-feed-spreads-20261021.log`. This is software regression
 evidence, not genuine native lifecycle or profitability validation. No new
 live fill latency was measured because no native order was placed.
 
@@ -83,6 +83,14 @@ protection. It remains unapplied until a reviewed launch scope passes.
 - No new support messages were sent. GitHub examples and official documentation were inspected directly; Chrome was unavailable through this session's browser connection.
 
 After loading these changes at approximately **15:11 UTC**, the local dashboard was healthy in demo mode with automation off, the kill switch active and zero native orders. All four native monitors authenticated and reached streaming; Novig retained nine startup request errors, so this is not a claim of an error-free session. Parlay's server reported `tier: scale`, `push_mode: raw`, and `min_push_interval_s: 0` for the NBA subscription, confirming the previously transferred temporary trial. That interval is a coalescing setting, not measured end-to-end latency. Real quote mappings still numbered zero.
+
+### Subsequent live feed repair
+
+A narrower NBA game-board capture found eight frames rejected by strict extraction. Captured examples identified FanDuel/DraftKings spread rows that duplicate the named outcome's `price` in `over_price`. The adapter now handles that observed shape without inventing an over/under market; signed handicaps and conflicting-price checks remain intact. Malformed flat rows invalidate their affected source scope while unrelated valid updates continue. Supplied streaming start times and sport labels now survive discovery.
+
+All 25 retained failing rows replayed successfully. A fresh **15:34:58–15:35:25 UTC** read-only capture parsed 68 offers across FanDuel/DraftKings moneylines and spreads with **zero extraction errors**. No Pinnacle offer was observed in that short window; it does not establish absent provider coverage. None of these rows carried the required verified observation/active-status evidence, so they remain review data. Details and regression behavior are in [the quote contract](QUOTE_OBSERVATION_CONTRACT.md).
+
+An offline replay benchmark of 200 batches of those 25 rows measured **0.765 ms median, 0.982 ms p95, and 1.090 ms p99** for parsing, failure isolation and quarantine. It excludes network, pricing, risk, routing and fills; it is not order latency. Artifact: `data/parser-replay-latency-20261021.json`.
 
 ## Official contracts rechecked
 

@@ -146,6 +146,27 @@ def test_duplicate_alias_exception_never_hides_a_conflicting_market_or_price(cha
         extract_offers(envelope(observed_moneyline_alias(**change)))
 
 
+@pytest.mark.parametrize("line", ["-4.5", "4.5", "0", "-2", "1.25"])
+def test_observed_spread_price_alias_keeps_the_named_team_and_signed_handicap(line):
+    # Authenticated October 21 NBA stream shape; identities are offline substitutes.
+    row = observed_moneyline_alias(market_key="spreads", market="Spread", line=line)
+    offer, = extract_offers(envelope(row))
+    assert offer.prices == {"Fixture Team": 1+Decimal(100)/180}
+    assert offer.line == str(Decimal(line).normalize())
+    assert offer.outcome_points == {"Fixture Team": str(Decimal(line).normalize())}
+    assert not offer.market_status_verified and not offer.observation_complete
+    assert VerifiedProviderMapper()(envelope(row)) == []
+
+
+@pytest.mark.parametrize("changes", [{"line": None}, {"line": "NaN"}, {"line": True}, {"line": "bad"},
+    {"over_price": -181}, {"under_price": 150}, {"market_key": "totals"}, {"kind": "prop"},
+    {"player": "Player"}, {"total": 220.5}, {"outcome": "Different Team"}])
+def test_spread_alias_never_hides_conflicting_prices_or_invalid_handicaps(changes):
+    row = observed_moneyline_alias(market_key="spreads", line="-4.5")
+    with pytest.raises(ValueError, match="Conflicting Parlay"):
+        extract_offers(envelope({**row, **changes}))
+
+
 @pytest.mark.parametrize("source_time,expected", [
     ("2026-05-13T23:24:18Z", SOURCE),
     ("2026-05-13T16:24:18-07:00", SOURCE),

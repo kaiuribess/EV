@@ -123,6 +123,26 @@ def _oldest(values: list[datetime | None]) -> datetime | None:
     return min(values) if values and all(value is not None for value in values) else None
 
 
+def _matches_scope(offer: SourceOffer, selectors: dict) -> bool:
+    return all(getattr(offer, name) == value for name, value in selectors.items())
+
+
+def _parlay_failure_scope(row: Any) -> dict[str, str]:
+    """Only narrow a failed row using explicit, well-formed source identity.
+
+    Missing/invalid identity broadens invalidation. Never guess an individual
+    player or threshold after price parsing failed.
+    """
+    if not isinstance(row, dict):
+        return {}
+    selectors = {key: row[key] for key in ("bookmaker", "market_key")
+                 if isinstance(row.get(key), str) and row[key].strip()}
+    event = row.get("canonical_event_id") or row.get("event_id") or row.get("eventId")
+    if isinstance(event, str) and event.strip():
+        selectors["event_id"] = event
+    return selectors
+
+
 def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | None:
     """Retain adverse completeness evidence without making it market identity."""
     body = envelope.payload if isinstance(envelope.payload, dict) else {}
@@ -263,20 +283,26 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
         has_totals = any(row.get(f"{side}_price") is not None for side in ("over", "under"))
         has_moneyline = any(row.get(f"{side}_ml") is not None for side in ("home", "away", "draw"))
         has_outcome = any(row.get(key) is not None for key in ("price", "price_american", "price_decimal"))
-        # Observed Parlay game/h2h transport variant: a named outcome's
+        # Observed Parlay game/h2h and game/spreads transport variants: a named outcome's
         # documented American `price` is duplicated in `over_price` by the
         # source row container. It is NOT a separate over/under selection.
         # Accept only an exact alias in this narrow shape; preserve all other
         # conflicting-shape checks and never synthesize the opposing side.
+        try:
+            spread_line = (row.get("market_key") == "spreads" and row.get("line") is not None
+                           and not isinstance(row["line"], bool) and Decimal(str(row["line"])).is_finite())
+        except InvalidOperation:
+            spread_line = False
+        named_game_line = row.get("market_key") == "h2h" and row.get("line") is None or spread_line
         if (has_totals and has_outcome and not has_moneyline
-                and row.get("kind") == "game" and row.get("market_key") == "h2h"
+                and row.get("kind") == "game" and named_game_line
                 and isinstance(row.get("team"), str) and row["team"].strip()
                 and row.get("price") is not None and row.get("over_price") is not None
-                and row.get("under_price") is None and row.get("line") is None
+                and row.get("under_price") is None
                 and row.get("total") is None and row.get("player") is None
                 and row.get("outcome", row["team"]) == row["team"]):
             if _parlay_american_price(row["over_price"]) != _parlay_outcome_price(row):
-                raise ValueError("Conflicting Parlay moneyline price alias")
+                raise ValueError("Conflicting Parlay named-outcome price alias")
             has_totals = False
         if sum((has_totals, has_moneyline, has_outcome)) > 1:
             raise ValueError("Conflicting Parlay row shapes")
@@ -310,7 +336,9 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
             row.get("period"), points, prices,
             parse_timestamp(row.get("last_update"), epoch_unit="milliseconds"),
             envelope.published_at, status,
-            {**_row_context(row), "participants": [row.get("home_team"), row.get("away_team")]},
+            {**_row_context(row), "participants": [row.get("home_team"), row.get("away_team")],
+             **({"scheduled_start": row["commence_time"]} if "commence_time" in row else {}),
+             **({"event_sport": envelope.metadata["sport"]} if envelope.metadata.get("sport") else {})},
             **_parlay_observation(envelope, row, complete=len(prices) >= 2),
         ))
     return result
@@ -528,7 +556,8 @@ class VerifiedProviderMapper:
             raise ValueError("Conflicting verified mapping")
         self.mappings[mapping.signature] = mapping
 
-    def _quarantine(self, offer: SourceOffer | None, reason: str, provider: str) -> None:
+    def _quarantine(self, offer: SourceOffer | None, reason: str, provider: str,
+                    *, failed_scope: dict | None = None) -> None:
         self.rejected_count += 1
         key = offer.signature if offer else f"invalid:{provider}"
         self.quarantine[key] = {
@@ -546,6 +575,7 @@ class VerifiedProviderMapper:
                 "status": offer.status,
                 "decimal_odds": {name: str(value) for name, value in offer.prices.items()},
             } if offer else None),
+            **({"affected_source_scope": failed_scope} if failed_scope is not None else {}),
         }
         self.quarantine.move_to_end(key)
         while len(self.quarantine) > self.quarantine_limit:
@@ -649,10 +679,40 @@ class VerifiedProviderMapper:
             ))
         return complete
 
-    def _clear_partial(self, provider: str) -> None:
+    def _clear_partial(self, provider: str, selectors: dict | None = None) -> None:
         for key in list(self._partial):
-            if next(iter(self._partial[key].values())).provider == provider:
+            offer = next(iter(self._partial[key].values()))
+            if offer.provider == provider and (not selectors or _matches_scope(offer, selectors)):
                 del self._partial[key]
+
+    def _extract_isolated(self, envelope: ProviderEnvelope):
+        """Flat Parlay rows fail independently; other shapes remain atomic.
+
+        Reject the entire affected event/book/market scope in this delivery,
+        including otherwise valid rows. A good opposing row cannot resurrect a
+        price whose companion was malformed in the same batch.
+        """
+        flat = (envelope.provider_id == "parlay_ws" and envelope.kind in {"initial_state", "odds_update"}
+                or envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot")
+        if not flat:
+            return extract_offers(envelope), []
+        rows = envelope.payload.get("data") if isinstance(envelope.payload, dict) else envelope.payload
+        if not isinstance(rows, list):
+            raise ValueError("Expected a Parlay row array")
+        offers, failures = [], []
+        for row in rows:
+            try:
+                if not isinstance(row, dict):
+                    raise ValueError("Expected a Parlay row")
+                payload = {**envelope.payload, "data": [row]} if isinstance(envelope.payload, dict) else [row]
+                offers.extend(extract_offers(replace(envelope, payload=payload)))
+            except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
+                scope = _parlay_failure_scope(row)
+                self._quarantine(None, "Invalid provider payload or price",
+                                 envelope.provider_id, failed_scope=scope)
+                if scope not in failures:
+                    failures.append(scope)
+        return [offer for offer in offers if not any(_matches_scope(offer, scope) for scope in failures)], failures
 
     def __call__(self, envelope: ProviderEnvelope) -> list[tuple[Market, Quote]]:
         if envelope.kind == "feed_invalidated":
@@ -689,7 +749,11 @@ class VerifiedProviderMapper:
                             "bookmaker": row.get("bookmaker"), "market_key": row.get("market_key"),
                         }))
         try:
-            offers = self._combine_partial_outcomes(extract_offers(envelope))
+            extracted, failed_scopes = self._extract_isolated(envelope)
+            for scope in failed_scopes:
+                self._clear_partial(envelope.provider_id, scope)
+                result.extend(self._invalidate(envelope, scope))
+            offers = self._combine_partial_outcomes(extracted)
         except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
             self._quarantine(None, "Invalid provider payload or price", envelope.provider_id)
             self._clear_partial(envelope.provider_id)
