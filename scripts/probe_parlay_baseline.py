@@ -10,12 +10,31 @@ import asyncio
 import json
 import os
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
+
+
+def evidence_field_inventory(rows: list) -> dict:
+    """Count supplied fields without assigning undocumented status semantics."""
+    valid = [row for row in rows if isinstance(row, dict)]
+    fields = Counter(key for row in valid for key in row)
+    return {
+        "row_count": len(valid),
+        "documented_observation_pair_rows": sum(
+            isinstance(row.get("last_observed"), str)
+            and row.get("last_update_type") == "collector_observation" for row in valid
+        ),
+        "last_observed_ms_rows": fields["last_observed_ms"],
+        "available_true_rows": sum(row.get("available") is True for row in valid),
+        "explicit_active_status_rows": sum(row.get("status") == "active" for row in valid),
+        "status_verification_established": False,
+        "note": "Field presence is diagnostic; a snapshot, available flag or undocumented clock does not certify current outcome-level status.",
+    }
 
 
 async def probe(sport: str, book: str, key: str, max_age_s: int, event_id: str | None = None) -> dict:
@@ -38,14 +57,19 @@ async def probe(sport: str, book: str, key: str, max_age_s: int, event_id: str |
                         return result
                     kind = frame.get("type")
                     if kind == "initial_state":
+                        data = frame.get("data", [])
+                        if not isinstance(data, list):
+                            result["result"] = "invalid_frame"
+                            return result
                         result.update({"result": "snapshot", "snapshot_scope": frame.get("snapshot_scope"),
                                        "snapshot_complete": frame.get("snapshot_complete"),
                                        "truncated": frame.get("truncated"),
                                        "resume_mode": frame.get("resume_mode"),
                                        "count": frame.get("count"),
                                        "books": frame.get("books"),
-                                       "first_event_id": next((row.get("event_id") for row in frame.get("data", [])
+                                       "first_event_id": next((row.get("event_id") for row in data
                                             if isinstance(row, dict) and isinstance(row.get("event_id"), str)), None),
+                                       "evidence_fields": evidence_field_inventory(data),
                                        "partial": frame.get("partial"),
                                        "missing_books": frame.get("missing_books"),
                                        "replacement_eligible": (frame.get("snapshot_scope") == "current_game_board"

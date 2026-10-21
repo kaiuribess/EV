@@ -34,3 +34,19 @@ zero eligible real reference markets and zero native candidates. The later
 Orlando/Atlanta market price moved materially during this review; old odds
 must never be reused as an EV signal. The remaining quote-status, settlement
 and actual lifecycle evidence above still block automatic orders.
+
+At 23:44–23:47 UTC, a new public Kalshi NBA catalog read returned 49 open
+events, including the still-active Atlanta/Orlando winner listings. The listing
+again identified an original October 21 game and the 48-hour/fair-price
+cancellation condition. Kalshi's `occurrence_datetime` in this listing equaled
+its `expected_expiration_time`; it was not treated as the sportsbook's kickoff
+timestamp. Parlay's contemporaneous authenticated game-board snapshots did not
+provide the documented quote-bound observation pair or verified outcome-level
+active status for the sampled Pinnacle and FanDuel rows. The newer nonsecret
+field counts are in [the baseline audit](PARLAY_BASELINE_2026-10-21.md).
+
+The production dashboard still showed an authenticated, streaming Kalshi
+monitor, `auto_trade=false`, no reviewed launch profile, no native mapping,
+no qualified real candidate and **zero native order attempts**. A current
+readiness check returned `safe_to_arm=false`. The fresh public listing is a
+discovery lead, not a validated EV signal. No $1 production pilot was sent.

@@ -46,3 +46,21 @@ to that sport's paper state. Other sport baselines stay in place while their
 own sockets remain connected. A full provider stop still clears every sport.
 This behavior has an offline regression test and was observed after restarting
 the live-input paper workspace; it does not change the quote-status caveat.
+
+### Outcome-field check at 23:46 UTC
+
+`probe_parlay_baseline.py` now reports a nonsecret field inventory for each
+authenticated snapshot. It does not print odds or credentials, and it never
+interprets `available` or an undocumented clock as verified tradability. Run
+the command above with `--books pinnacle fanduel --max-age-s 600` to repeat it.
+
+The October 21 read returned complete, untruncated NBA game-board snapshots:
+9 Pinnacle rows and 41 FanDuel rows. None contained the documented
+`last_observed` plus `last_update_type: collector_observation` pair or an
+explicit `status: active`. Each had `available: true`; this is a field value,
+not a documented outcome-level withdrawal guarantee. Neither snapshot passed
+the execution quote-evidence gate. A separate `h2h`-only sample included a
+`last_observed_ms` field on Pinnacle rows, but the reviewed public contract did
+not define its verification semantics. The strict parser therefore does not
+promote it to a verified quote clock. Field shapes can vary by request and
+time; these counts describe only this bounded sample.
