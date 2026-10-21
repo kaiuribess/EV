@@ -95,6 +95,9 @@ class RiskEngine:
     def check_native_reservation(self, order, *, reserved=False):
         """Shared limits for an exact-unit order; caller holds the shared OMS lock."""
         self.check_enabled(order.id if getattr(order, "execution_origin", "automatic") == "manual" else None)
+        if (not reserved and self.config.max_native_order_attempts is not None
+                and len(self.native_orders) >= self.config.max_native_order_attempts):
+            raise RiskRejected("Native order attempt limit reached")
         if order.synthetic or order.mode not in {"sandbox", "production"}:
             raise RiskRejected("Native execution requires an explicit native environment")
         if not metadata_consistent(order):

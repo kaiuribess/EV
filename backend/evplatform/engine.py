@@ -595,7 +595,14 @@ class Engine:
             try:
                 c = event.payload
                 if isinstance(c, NativeCandidate):
-                    await self.native.execute(c)
+                    try:
+                        await self.native.execute(c)
+                    finally:
+                        cap = self.risk.config.max_native_order_attempts
+                        if (cap is not None and len(self.risk.native_orders) >= cap
+                                and self.risk.auto_trade):
+                            self.risk.auto_trade = False
+                            await self.notice("info", "Native order attempt limit reached; automatic trading paused", "operator")
                 else:
                     await self.oms.execute(c, self.markets[c.market_id], self.book(c.market_id, c.venue, c.outcome), self.settings.mode)
                 self.metrics.counters["orders_routed"] += 1

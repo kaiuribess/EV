@@ -80,6 +80,9 @@ class RiskConfig(BaseModel):
     unit_size_usd: Decimal = Field(default=Decimal("5"), gt=0, allow_inf_nan=False)
     max_open_orders: int = Field(default=20, ge=1)
     max_orders_per_minute: int = Field(default=30, ge=1)
+    # Count durable native intents, including rejected/unknown attempts. Unlike
+    # a rolling rate limit this remains exhausted across process restarts.
+    max_native_order_attempts: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def require_cash_policy(self):

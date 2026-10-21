@@ -123,6 +123,26 @@ async def test_manual_permit_routes_only_one_reviewed_native_intent_while_automa
         await manager.execute(approved)
 
 
+async def test_one_native_attempt_cap_survives_restart_and_unknown_outcome(system, market):
+    manager, risk, storage, adapter = system
+    risk.config = risk.config.model_copy(update={"max_native_order_attempts": 1})
+    adapter.fail = True
+    first = await manager.execute(order(market))
+    assert first.status == OrderStatus.UNKNOWN
+    assert len(adapter.submissions) == 1
+    risk.kill_switch = False
+    risk.auto_trade = True
+    with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
+        await manager.execute(order(market))
+    risk.native_orders.clear()
+    await manager.start()
+    risk.kill_switch = False
+    risk.auto_trade = True
+    with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
+        await manager.execute(order(market))
+    assert len(adapter.submissions) == 1
+
+
 async def test_unknown_transmission_never_retried_and_survives_restart(system, market):
     manager, risk, storage, adapter = system
     adapter.fail = True

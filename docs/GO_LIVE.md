@@ -116,6 +116,16 @@ or transport interruption is not proof of a fill; inspect the native ledger.
 The paper workspace on port 8001 cannot submit a real exchange order through
 this panel, and no test order is sent merely by opening it.
 
+For an unattended **single-order** test, set `max_native_order_attempts: 1` in
+the native workspace's risk settings before enabling automatic trading. The
+limit counts every durable native intent, including rejected and unknown
+outcomes, and survives a restart in the same native ledger. After the first
+attempt the automatic switch pauses; any queued later candidate is rejected.
+The limit does not relax launch readiness, reference quality, settlement
+matching, quarter-Kelly sizing, account-cash checks, or the approved stake cap.
+It is a total attempt cap for this ledger, so an existing native order exhausts
+it. Review the order and exchange history before changing or removing the cap.
+
 ### Current unresolved release work
 
 The [October 21 Kalshi NBA pilot](KALSHI_PILOT_2026-10-21.md) records a concrete

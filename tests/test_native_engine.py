@@ -83,7 +83,7 @@ def bind_offline_launch(engine, market, monkeypatch):
 async def test_offline_native_engine_stream_risk_fill_audit_and_restart(tmp_path, monkeypatch, market, quotes):
     monkeypatch.chdir(tmp_path)  # Never load a user's runtime launch profile.
     settings = Settings(database_path=str(tmp_path / "native-flow.db"), mode="sandbox", live_enabled=True,
-                        risk=RiskConfig(live_max_order_stake=D("1")))
+                        risk=RiskConfig(live_max_order_stake=D("1"), max_native_order_attempts=1))
     engine = Engine(settings)
     engine.registry.records["positive_ev"].enabled = False
     engine.registry.records["native_positive_ev"].enabled = True
@@ -113,6 +113,7 @@ async def test_offline_native_engine_stream_risk_fill_audit_and_restart(tmp_path
         await asyncio.wait_for(engine.process_queue.join(), 2)
         await asyncio.wait_for(engine.risk_queue.join(), 2)
         assert len(adapter.submissions) == 1, (engine.native.report().blocking_items, list(engine.events))
+        assert not engine.risk.auto_trade
         submitted = next(iter(engine.risk.native_orders.values()))
         assert submitted.status == OrderStatus.OPEN and submitted.filled_quantity == 0
         assert submitted.quantity == 100
