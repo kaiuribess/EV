@@ -1,9 +1,11 @@
 """Live-input paper mode uses observed prices but never claims executable offers."""
 import asyncio
 import json
+from collections import Counter
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,8 @@ from evplatform.integrations.base import ProviderEnvelope
 from evplatform.core.profile_import import compile_priors
 from evplatform.core.pricing import NoSignal
 from evplatform.plugins.parlay_paper import ParlayPaperEV, ParlayPaperNormalizer
+from evplatform.plugins.external import ProviderBridge
+from evplatform.integrations.parlay import ParlayGameBoardWebSocket
 
 
 SPORT = "basketball_nba"
@@ -108,6 +112,47 @@ def test_missing_or_old_book_poll_suspends_paper_capacity():
     stale = normalizer.apply(heartbeat(books=("draftkings", "fanduel"), poll_age=181))
     assert all(item.quality == 0 for item in stale if isinstance(item, Quote))
     assert all(item.status == "suspended" for item in stale if isinstance(item, OrderBook))
+
+
+async def test_one_sport_reconnect_keeps_other_paper_baseline():
+    """A scoped upstream gap must not erase healthy sport sockets."""
+    normalizer = ParlayPaperNormalizer()
+    normalizer.baselines.update({"basketball_nba", "americanfootball_nfl"})
+    published = asyncio.Event()
+    hold_stream = asyncio.Event()
+
+    class Bus:
+        async def publish(self, event):
+            if event.schema_name == "provider.frame":
+                frame = event.payload
+                normalizer.apply(ProviderEnvelope(frame.provider_id, frame.kind,
+                    frame.payload, frame.received_at, 0, metadata=frame.metadata))
+                published.set()
+
+    class Client:
+        config = SimpleNamespace(sports=["basketball_nba", "americanfootball_nfl"])
+
+        async def stream_updates(self):
+            yield ProviderEnvelope("parlay_game_ws", "feed_invalidated",
+                {"sport": "americanfootball_nfl"}, utcnow(), 1,
+                metadata={"sport": "americanfootball_nfl"})
+            await hold_stream.wait()
+
+    engine = SimpleNamespace(registry=SimpleNamespace(records={
+        "parlay_paper_input": SimpleNamespace(enabled=True)}),
+        quotes={}, metrics=SimpleNamespace(counters=Counter()))
+    bridge = ProviderBridge(ParlayGameBoardWebSocket, engine)
+    bridge.context = SimpleNamespace(bus=Bus())
+    bridge.client = Client()
+    bridge.mapper = lambda raw: []
+    task = asyncio.create_task(bridge._run())
+    try:
+        await asyncio.wait_for(published.wait(), 1)
+        await asyncio.sleep(0)
+        assert normalizer.baselines == {"basketball_nba"}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def test_observed_per_outcome_parlay_shape_pairs_only_exact_event_book_and_side():

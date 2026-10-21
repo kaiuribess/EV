@@ -94,7 +94,18 @@ class ProviderBridge(InputPlugin):
                             provider_id=raw.provider_id, kind=raw.kind, payload=raw.payload,
                             received_at=raw.received_at, published_at=raw.published_at,
                             snapshot_complete=raw.snapshot_complete, metadata=raw.metadata)))
-                if raw.kind in {"feed_invalidated", "disconnected", "reconnect"}:
+                # A provider may invalidate only one sport while its other
+                # sockets retain complete, usable baselines. The raw scoped
+                # frame above reaches paper consumers and the mapper below
+                # suspends only that sport's verified quotes. A bridge-wide
+                # invalidation here would erase every healthy sport whenever
+                # one WebSocket reconnects.
+                if raw.kind in {"disconnected", "reconnect"} or (
+                    raw.kind == "feed_invalidated" and not (
+                        isinstance(raw.payload, dict) and raw.payload.get("sport")
+                        or raw.metadata.get("sport")
+                    )
+                ):
                     await self._invalidate()
                 for market, quote in self.mapper(raw):
                     await self.context.bus.publish(Envelope(schema_name="sports.market", source=self.manifest.name, payload=market))

@@ -40,3 +40,9 @@ The running paper feed may consume these complete game frames for hypothetical
 offers, which remain labeled as such. Automatic real execution still requires
 exact settlement matches, quote-bound status/freshness evidence, reviewed
 mappings, a verified execution account and native order-to-settlement evidence.
+
+The local provider bridge forwards a sport-scoped `feed_invalidated` frame only
+to that sport's paper state. Other sport baselines stay in place while their
+own sockets remain connected. A full provider stop still clears every sport.
+This behavior has an offline regression test and was observed after restarting
+the live-input paper workspace; it does not change the quote-status caveat.
