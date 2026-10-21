@@ -19,7 +19,7 @@ from .core.oms import OrderManager
 from .core.native_oms import NativeOrder, NativeSettlement
 from .core.native_pricing import NativeBook, NativeCandidate
 from .core.native_runtime import NativeRuntime, NativeSignalObservation
-from .core.plugins import PluginContext, PluginRegistry, StrategyPlugin
+from .core.plugins import ExecutionVenue, InputPlugin, PluginContext, PluginRegistry, StrategyPlugin
 from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, worst_fee
 from .core.risk import RiskEngine, RiskRejected
 from .core.signals import ResultProvenance, SignalLedger, SignalObservation, SignalResultImport
@@ -94,9 +94,48 @@ class Engine:
         self.stopping = False
         self.halt_persisted = False
         self.risk.on_halt = self._persist_halt
+        self._plugin_enable_preferences: dict[str, bool] = {}
+        self._plugin_toggle_lock = asyncio.Lock()
 
     def context(self, name):
         return PluginContext(self.bus, self.schemas, self.registry.records[name].config)
+
+    def persistent_plugin_toggle(self, name):
+        """Only source/monitor intent survives restart; never execution authorization."""
+        from .plugins.external import NativeMonitor
+        record = self.registry.records.get(name)
+        if record is None or name == "synthetic_schedule":
+            return False
+        plugin = record.plugin
+        return (not isinstance(plugin, (StrategyPlugin, ExecutionVenue))
+                and isinstance(plugin, (InputPlugin, NativeMonitor)))
+
+    def _restore_plugin_toggles(self, saved):
+        self._plugin_enable_preferences = {}
+        if not isinstance(saved, dict):
+            return
+        for name, enabled in saved.items():
+            # bool is deliberate: strings, integers and objects must not activate feeds.
+            if type(enabled) is bool and self.persistent_plugin_toggle(name):
+                self._plugin_enable_preferences[name] = enabled
+                self.registry.records[name].enabled = enabled
+
+    async def toggle_plugin(self, name, enabled):
+        async with self._plugin_toggle_lock:
+            if self.persistent_plugin_toggle(name):
+                preferences = {**self._plugin_enable_preferences, name: enabled}
+                try:
+                    await self.storage.save_config("plugin_enabled", preferences)
+                except Exception:
+                    raise RuntimeError("Plugin startup preference could not be saved") from None
+                self._plugin_enable_preferences = preferences
+            if enabled:
+                await self.registry.start(name, self.context(name))
+            else:
+                await self.registry.stop(name)
+                if name in {"synthetic_schedule", "positive_ev", "paper_execution"}:
+                    self.risk.auto_trade = False
+                    await self.oms.cancel_all()
 
     async def start(self):
         await self.storage.open()
@@ -122,10 +161,12 @@ class Engine:
         from .plugins.external import register_external
         register_external(self.registry, self)
         self.registry.discover()
-        startup_order = self.registry.compatible_startup_order()
         for name, config in saved.get("plugin_configs", {}).items():
             if name in self.registry.records:
                 self.registry.configure(name, config)
+        self._restore_plugin_toggles(saved.get("plugin_enabled", {}))
+        # Restored flags cannot revive a missing/cyclic dependency tree.
+        startup_order = self.registry.compatible_startup_order()
         self.tasks = [
             asyncio.create_task(self._process(), name="normalization-strategy"),
             asyncio.create_task(self._risk_loop(), name="risk-routing"),

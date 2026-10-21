@@ -14,11 +14,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
 from pydantic import Field
 from websockets.asyncio.client import connect as ws_connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 from .common import (
     CredentialsMissing, NativeSettings, NativeTransport, SequenceTracker,
-    SequenceGap, VenueError, decimal_value, json_body,
+    SequenceGap, VenueError, VenueHTTPError, decimal_value, json_body,
 )
 
 
@@ -134,10 +134,14 @@ class KalshiClient(NativeTransport):
         self.book = KalshiBook()
         self.tickers: list[str] = []
         self._command_id = 0
+        self.authenticated = False
+        self.health_reason = "Kalshi is disconnected"
 
     def _load_key(self):
         if not self.settings.api_key_id or not self.settings.private_key_path:
             self.health = "credentials_missing"
+            self.authenticated = False
+            self.health_reason = "Kalshi requires an API key ID and local private key file"
             raise CredentialsMissing("Kalshi requires an API key ID and private key file")
         if self._key is None:
             self._key = serialization.load_pem_private_key(
@@ -158,12 +162,41 @@ class KalshiClient(NativeTransport):
         headers = self.headers(method, urlsplit(url).path) if authenticated else {}
         headers["Content-Type"] = "application/json"
         request = self.http.build_request(method, url, params=params, headers=headers, content=json_body(body))
-        return await self._request(request, mutation_id=mutation_id)
+        try:
+            result = await self._request(request, mutation_id=mutation_id)
+        except VenueHTTPError as exc:
+            if authenticated and exc.status_code in {401, 403, 451}:
+                self.authenticated = False
+                self.health, self.health_reason = {
+                    401: ("unauthorized", "Kalshi rejected authentication; check key, environment, signature and clock"),
+                    403: ("access_denied", "Kalshi denied this API permission; review the key scope in the official account"),
+                    451: ("geolocation_required", "Kalshi requires official location/eligibility verification"),
+                }[exc.status_code]
+            raise
+        if authenticated:
+            self.authenticated = True
+        return result
 
     async def connect(self) -> dict:
+        self.authenticated = False
         result = await self.request("GET", "/portfolio/balance")
         self.health = "authenticated"
+        self.health_reason = "Kalshi signed account read succeeded; streaming and trading permissions are separate"
         return result
+
+    async def disconnect(self) -> None:
+        self.authenticated = False
+        try:
+            await super().disconnect()
+        finally:
+            self._ws = None
+            self.health = "disconnected"
+            self.health_reason = "Kalshi is disconnected"
+
+    def health_check(self) -> dict:
+        return {**super().health_check(), "authenticated": self.authenticated and not self._closed,
+                "streaming": self.health == "streaming" and self._ws is not None and not self._closed,
+                "reason": self.health_reason}
 
     async def discover_events(self, **params) -> dict:
         return await self.request("GET", "/events", params=params, authenticated=False)
@@ -238,27 +271,56 @@ class KalshiClient(NativeTransport):
                 async with ws_connect(self.WS_HOSTS[self.settings.environment],
                                       additional_headers=self.headers("GET", "/trade-api/ws/v2"),
                                       ping_interval=20, max_size=8 * 1024 * 1024) as socket:
-                    self._ws, self.health = socket, "streaming"
+                    self.authenticated = True  # Successful signed WebSocket handshake.
+                    self._ws, self.health = socket, "subscribing"
+                    self.health_reason = "Kalshi WebSocket authenticated; waiting for subscription data"
                     await self._subscribe_current()
                     async for raw in socket:
                         frame = json.loads(raw, parse_float=Decimal)
                         if not isinstance(frame, dict):
                             raise ValueError("Kalshi frame must be an object")
                         self.last_message_time = time.time()
+                        if frame.get("type") == "error":
+                            self.error_count += 1
+                            self.book.reset()
+                            self.health = "subscription_rejected"
+                            self.health_reason = "Kalshi rejected a WebSocket command; review subscription scope and permissions"
+                            yield {"type": "transport_invalidated", "venue": self.venue_id,
+                                   "reason": "subscription_rejected", "all_books_invalid": True}
+                            return
                         self.book.apply(frame)
+                        if frame.get("type") in {"subscribed", "orderbook_snapshot", "orderbook_delta", "fill"}:
+                            self.health = "streaming"
+                            self.health_reason = "Kalshi authenticated subscription is receiving native messages"
                         failures = 0
                         yield frame
                     raise VenueError("Kalshi stream closed; reconcile and resubscribe")
-            except (OSError, ConnectionClosed, VenueError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            except (OSError, TimeoutError, ConnectionClosed, InvalidHandshake, VenueError, ValueError, KeyError, TypeError, AttributeError) as exc:
                 self.error_count += 1
                 self.book.reset()
+                status = exc.response.status_code if isinstance(exc, InvalidStatus) else None
+                if status in {401, 403, 451}:
+                    self.authenticated = False
+                    self.health, self.health_reason = {
+                        401: ("unauthorized", "Kalshi WebSocket authentication failed; check key, environment and clock"),
+                        403: ("access_denied", "Kalshi WebSocket permission denied; review the API key scope"),
+                        451: ("geolocation_required", "Kalshi requires official location/eligibility verification"),
+                    }[status]
+                else:
+                    self.health = "reconnecting"
+                    self.health_reason = "Kalshi WebSocket interrupted; snapshots must be recovered"
                 yield {"type": "transport_invalidated", "venue": self.venue_id,
-                       "reason": type(exc).__name__, "all_books_invalid": True}
+                       "reason": self.health, "all_books_invalid": True}
+                if status in {401, 403, 451}:
+                    return
                 if not self._closed:
                     await self._backoff(failures)
                     failures += 1
             finally:
                 self._ws = None
+                if self.health in {"streaming", "subscribing"}:
+                    self.health = "disconnected"
+                    self.health_reason = "Kalshi WebSocket disconnected"
 
     @staticmethod
     def get_manifest() -> dict:

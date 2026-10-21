@@ -6,15 +6,16 @@ It is **not a completed production autonomous trading release**.
 | Area | Shipped behavior | Remaining work |
 |---|---|---|
 | Core | Python 3.12 asyncio, typed immutable Pydantic contracts, versioned bus, plugin registry/DI, entry points, schema/config migrations | Process isolation for untrusted plugins; deployment-grade operational supervision |
-| Inputs | Parlay REST/WS, Oddize REST, Owls REST, OddsPapi v4 REST, generic REST/SSE template, deterministic simulation/replay; real Parlay and Oddize REST authentication and NBA observations verified | Parlay streaming entitlement; Owls/OddsPapi account connectivity; exhaustive catalog/page coverage; provider-specific new shapes |
+| Inputs | Parlay REST/WS, Oddize REST, Owls REST, OddsPapi v4 REST, generic REST/SSE template, deterministic simulation/replay; real Parlay/Oddize REST observations and Parlay Business NBA WebSocket game/prop updates verified | Reviewed real-market mappings; Owls/OddsPapi account connectivity; exhaustive catalog/page coverage; provider-specific new shapes |
 | Identity | Exact canonical identities, verified aliases and source signatures, quarantine, player/line/rule rejection | Reviewed mappings for real markets and official athlete/team IDs; no guessed alias dataset |
 | Pricing | Proportional and power devig, weights/requirements/age/disagreement, bookmaker dedup, best-offer EV and size curves | Calibrated real-market weights; validated push/different-line models; native live fee feeds |
 | Strategies | Positive EV, independent strategy interface, required input and market metadata | Arbitrage, cross-exchange multi-leg execution, middles, steam and ML strategies |
 | Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
 | Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger | Genuine sandbox lifecycle certification; supported venue settlement proof; no native orders have been sent |
-| Kalshi | Current native clients, fractional-contract accounting, normalized book adapter, authenticated account/inventory probe and cumulative cost/fee reconciliation | Account/sandbox testing, reviewed mappings/fees, authenticated private synchronization and settlement certification |
+| Kalshi | Current native clients, fractional-contract accounting, normalized book adapter, cumulative cost/fee reconciliation; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, authenticated private-state synchronization and settlement certification |
 | Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper book/private subscriptions verified | Account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
 | ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, bounded cancellation retries; production read-only subscriptions and market messages verified | Complete authenticated inventory and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
+| Polymarket US | Personal US retail read-only client; actual signed production balance read, bounded public discovery/book and authenticated market/private WebSocket messages verified | Monitor only: no canonical pricing, execution, cancellation, reconciled risk inventory or settlement support; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, actionable launch blockers and separate native order ledger | Broader browser/device QA; native arming remains an explicit backend operation behind preflight |
 | Analytics | Durable all-signal episodes and transitions even while paused; first-entry hypothetical grading from explicit results; origin-separated groups/calibration; processing/receipt/intent/ack/fill timings and paper positions/settlements | Automatic verified result ingestion, live slippage calibration, CLV from verified closing data, production returns and independently clustered uncertainty estimates |
 | Storage | Async batched WAL SQLite audit, configurations, orders and fill IDs | Retention/compaction policy for long unattended runs; database upgrade migrations beyond version 1 |
@@ -23,9 +24,18 @@ It is **not a completed production autonomous trading release**.
 ## Connection truth
 
 Parlay REST authentication, sport discovery, and NBA moneylines were verified
-against the real service. The replacement key reports Free and its WebSocket
-was refused with close code 4001; the support-enabled streaming trial has not
-been verified on that key. No real Parlay player-prop rows were observed.
+against the real service. On October 20, 2026 local time, the current paid
+WebSocket connection authenticated and the server reported `tier: business`,
+`push_mode: coalesced`, and `min_push_interval_s: 1.0`. NBA (`basketball_nba`)
+was ready with no pending snapshot and zero reported connection errors. Real
+game-line and player-prop offers continued arriving across successive checks.
+This supersedes the earlier entitlement refusal; current Business access is verified.
+
+The evidence is saved locally in `data/parlay-paid-access.json` (03:08:55–03:09:07
+UTC on October 21). All unreviewed real markets remained quarantined, with
+`mapped_quotes: 0`; automation was off, the kill switch was active, and native
+orders remained zero. The one-second setting describes the server's coalesced
+push cadence, not measured sportsbook-to-client latency or a fill-speed guarantee.
 
 Oddize's free Developer API authenticated account and catalog reads, and one
 real NBA snapshot returned 310 source offers across 17 books, including Pinnacle
@@ -44,9 +54,31 @@ signing, failure handling, and synthetic end-to-end behavior; they are not real
 exchange certification. Real observations without reviewed identity/settlement
 mappings remain quarantined and cannot become tradable reference signals.
 
-Public, unauthenticated Kalshi event/market discovery and book snapshots were
-successfully fetched from both sandbox and production REST hosts. This verifies
-only those public read operations; it does not validate private trading access.
+Public Kalshi discovery/books were verified on both sandbox and production REST
+hosts. A separate check of the primary personal production account succeeded on
+October 20, 2026 PDT: authenticated balance and API-key identity/scopes reads,
+orders/positions inventory reconciliation (both empty), and authenticated
+WebSocket `subscribed` plus `orderbook_snapshot` messages. Local evidence:
+`data/kalshi-connection.json`, checked at 20:18:55 PDT / October 21 03:18:55 UTC.
+
+The observed key scopes were `read` and `write::trade`, without transfer scope.
+The returned location attestation expires October 27, 2026 at 8:15:55 PM PDT;
+this is an expiring account observation, not an authorization to start this
+application's trading. No native orders or cancellations were sent, and the
+trade gate remained false. Authenticated private-state synchronization, genuine
+order lifecycle testing, reviewed mappings/fees and settlement certification
+still block a Kalshi launch.
+
+The personal Polymarket US retail connection also passed read-only production
+checks on October 20, 2026 at 20:19:57 PDT: signed balance access returned one
+row, public discovery returned 25 markets and a book, and authenticated market
+and private sockets delivered `marketData` and `orderSubscriptionSnapshot`.
+The observed stream reported zero errors and zero unknown messages. Local
+evidence is `data/polymarket-us-connection.json` (October 21, 03:19:57 UTC).
+This is the personal US API, not the international wallet/CLOB service. The
+client is monitor-only: `execution_supported: false`, `reconciled: false`, and
+zero native orders sent. Private stream delivery does not establish complete
+account-risk reconciliation or permission to trade through this application.
 
 Missing credentials never silently trigger mock data. The separately named
 synthetic plugin runs in demo/paper mode and all its prices/fills are labeled.

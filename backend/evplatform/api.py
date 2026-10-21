@@ -185,13 +185,10 @@ def create_app(settings=None):
     async def toggle(name: str, body: ToggleBody):
         if name not in engine.registry.records:
             raise HTTPException(404, "Unknown plugin")
-        if body.enabled:
-            await engine.registry.start(name, engine.context(name))
-        else:
-            await engine.registry.stop(name)
-            if name in {"synthetic_schedule", "positive_ev", "paper_execution"}:
-                engine.risk.auto_trade = False
-                await engine.oms.cancel_all()
+        try:
+            await engine.toggle_plugin(name, body.enabled)
+        except RuntimeError:
+            raise HTTPException(503, "Plugin startup preference could not be saved")
         return engine.state()
 
     @app.post("/api/plugins/{name}/config")

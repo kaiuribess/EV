@@ -208,7 +208,8 @@ class NativeMonitor(Plugin):
     async def _run(self):
         try:
             async for frame in self.client.stream_updates():
-                await self.engine.native.on_frame(self.manifest.name, self.client, frame)
+                if not self.manifest.capabilities.get("monitor_only"):
+                    await self.engine.native.on_frame(self.manifest.name, self.client, frame)
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
                 if frame.get("type") == "transport_invalidated":
@@ -221,7 +222,8 @@ class NativeMonitor(Plugin):
         except Exception as exc:
             await self.engine.notice("error", f"Native monitor stopped: {type(exc).__name__}", self.manifest.name)
         finally:
-            await self.engine.native.on_frame(self.manifest.name, self.client, {"type": "transport_invalidated"})
+            if not self.manifest.capabilities.get("monitor_only"):
+                await self.engine.native.on_frame(self.manifest.name, self.client, {"type": "transport_invalidated"})
 
     async def stop(self):
         if self.task:
@@ -250,6 +252,7 @@ class NativeMonitor(Plugin):
 def register_external(registry, engine):
     from ..integrations import PROVIDER_FACTORIES
     from ..venues import KalshiClient, KalshiSettings, NovigClient, NovigSettings, ProphetXClient, ProphetXSettings
+    from ..venues.polymarket_us import PolymarketUSClient, PolymarketUSSettings, PolymarketUSMonitorConfig
     registry.config_migrations["prophetx", 1] = migrate_prophetx_monitor_config
     for name, factory in PROVIDER_FACTORIES.items():
         registry.register(ProviderBridge(factory, engine))
@@ -258,6 +261,7 @@ def register_external(registry, engine):
         (KalshiClient, KalshiSettings, {"api_key_id": "KALSHI_API_KEY_ID", "private_key_path": "KALSHI_PRIVATE_KEY_PATH"}, NativeMonitorConfig),
         (NovigClient, NovigSettings, {"api_key": "NOVIG_API_KEY", "private_key_path": "NOVIG_PRIVATE_KEY_PATH"}, NativeMonitorConfig),
         (ProphetXClient, ProphetXSettings, {"api_key": "PROPHETX_API_KEY", "secret_key": "PROPHETX_SECRET_KEY"}, ProphetXMonitorConfig),
+        (PolymarketUSClient, PolymarketUSSettings, {"api_key_id": "POLYMARKET_US_API_KEY_ID", "secret_key": "POLYMARKET_US_SECRET_KEY"}, PolymarketUSMonitorConfig),
     ]:
         plugin = NativeMonitor(factory, settings_factory, credentials, engine, config_model=config_model)
         registry.register(plugin)

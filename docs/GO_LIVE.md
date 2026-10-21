@@ -244,9 +244,20 @@ not a substitute for verified actual settlement and fee accounting.
 
 Save it in the protected local backend `.env` or secret store, then configure
 only the matching plugin. Confirm the documented account tier and endpoint;
-local tier settings cannot grant server-side access. For Parlay, a replacement
-key's successful REST call does not prove Scale WebSocket entitlement. A 4001
-entitlement rejection must be resolved by Parlay before that stream qualifies.
+local tier settings cannot grant server-side access. For Parlay, the current paid
+Business connection was verified on October 20, 2026 local time: the server
+reported `tier: business`, `push_mode: coalesced`, and `min_push_interval_s: 1.0`.
+Authenticated NBA streaming was ready with zero reported errors, and actual game
+and player-prop offers continued arriving. The earlier entitlement refusal is
+resolved for that observed connection; a future key or connection must establish
+its own current access. The push interval is not measured source-to-client latency.
+
+This does not complete launch readiness. In `data/parlay-paid-access.json`,
+all unreviewed real markets remained quarantined and `mapped_quotes` was zero.
+Automation stayed off, the kill switch active, and native orders zero. Review
+exact source/native market equivalence and settlement rules before those real
+offers can become reference signals; verified fees, account permissions and
+genuine native lifecycle evidence remain separate requirements.
 
 Enable the input/monitor plugin and verify actual native/source messages,
 timestamps and supported scopes. Review the resulting exact mappings and fee

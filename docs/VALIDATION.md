@@ -8,8 +8,8 @@ Executed on this Windows PC with Python 3.12.0:
 .\run_tests.ps1
 ```
 
-**755 tests passed in 21.73 seconds with coverage enabled.** Backend statement
-coverage is **85.74%** (6,735 of 7,855 statements). TypeScript checking and the Vite
+**839 tests passed in 29.01 seconds with coverage enabled.** Backend statement
+coverage is **86.49%** (7,142 of 8,258 statements). TypeScript checking and the Vite
 production build passed. One upstream Starlette/httpx TestClient deprecation
 warning remains. Coverage measures executed statements, not exchange certification.
 
@@ -55,6 +55,15 @@ disabled automation control and
 active kill switch are visible. Screenshot: `artifacts/native-launch-readiness.png`.
 The dashboard is available at http://127.0.0.1:8001/.
 
+The final account-setup restart restored the enabled external feeds and native
+monitors without further toggle requests. Kalshi and Polymarket US authenticated
+and streamed again; Parlay Business streaming also resumed. The app remained in
+demo mode with automation off, its kill switch active, and zero native orders.
+The public dashboard state contained none of the configured API credentials.
+Local evidence: `data/accounts-before-restart.json` and
+`data/accounts-after-restart.json`. Startup preferences restore only inputs and
+native monitors; they cannot restore strategy or execution authorization.
+
 ## Measured local latency
 
 ```powershell
@@ -88,8 +97,52 @@ Earlier read-only checks established Kalshi public REST discovery/books, Novig
 sandbox signed discovery and private/book subscriptions, ProphetX production
 Talaria authentication/subscriptions/market messages, and Parlay/Oddize REST
 observations. Those facts do not prove current trading permissions or order
-lifecycle correctness. Parlay's replacement key still lacks verified streaming
-entitlement. See [current integration scope](IMPLEMENTATION_STATUS.md),
+lifecycle correctness.
+
+A new primary personal Kalshi production check succeeded on October 20, 2026
+at 20:18:55 PDT (October 21, 03:18:55 UTC). Authenticated balance and API-key
+identity/scopes reads succeeded. Read-only orders/positions reconciliation
+completed with zero open orders and zero positions. The market WebSocket
+returned `subscribed` and an authenticated `orderbook_snapshot`; a REST book
+was also received. Evidence is saved locally in `data/kalshi-connection.json`.
+
+The key reported `read` and `write::trade`, without transfer scope. Its observed
+location attestation expires October 27, 2026 at 8:15:55 PM PDT. These are
+expiring account-access facts, not application trading authorization. Only GET
+requests and read-only WebSocket subscriptions were used: no native order or
+cancellation was sent, and `trade_gate_enabled` remained false. Private-state
+synchronization and settlement certification remain blocked; this successful
+monitor check does not certify either capability.
+
+A separate personal Polymarket US retail production check succeeded on October
+20, 2026 at 20:19:57 PDT (October 21, 03:19:57 UTC). Signed
+`GET /v1/account/balances` authenticated and returned one row; unsigned public
+discovery returned 25 markets and a REST book. Authenticated market and private
+WebSockets delivered actual `marketData` and `orderSubscriptionSnapshot` frames,
+with zero reported errors and zero unknown messages. Evidence is local in
+`data/polymarket-us-connection.json`. This test used the personal US API, not the
+international wallet/CLOB service.
+
+The Polymarket US client remained monitor-only with `execution_supported: false`,
+`reconciled: false`, and zero native orders sent. This confirms those read-only
+requests and stream deliveries, not a reconciled account-risk inventory, order
+lifecycle, settlement, trading permission or launch authorization.
+
+Current Parlay paid WebSocket access was verified on October 20, 2026 local time
+(October 21, 03:08:55–03:09:07 UTC). The server reported `tier: business`,
+`push_mode: coalesced`, and `min_push_interval_s: 1.0`. Both checks showed
+authenticated streaming, `basketball_nba` ready, no pending snapshot, and zero
+reported connection errors. The received offer window changed and quarantine
+entries increased from 49 to 75. Observed raw markets included moneylines, totals,
+player points, assists, rebounds, and threes made. These were actual provider
+observations, not synthetic test fixtures. The local evidence is
+`data/parlay-paid-access.json`.
+
+All unreviewed real markets remained quarantined: `mapped_quotes` was zero,
+`auto_trade` false, `kill_switch` true, and native orders zero. The server's
+one-second coalescing interval is not measured sportsbook-to-client latency,
+execution delay, or a guarantee of every upstream price change. See
+[current integration scope](IMPLEMENTATION_STATUS.md), [provider protocols](PROVIDER_PROTOCOLS.md),
 [venue evidence](VENUE_PROTOCOLS.md) and [Oddize evidence](ODDIZE.md).
 
 Native order placement, cancellation, fills and settled cash have not been tested

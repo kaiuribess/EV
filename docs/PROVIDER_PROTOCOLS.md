@@ -3,9 +3,10 @@
 Checked against official documentation on 2026-10-20. The installed transports
 are real HTTPX/WebSocket implementations; automated tests use controlled responses.
 Parlay REST was separately authenticated against the real service: sport discovery
-and NBA moneylines from DraftKings, FanDuel, and Pinnacle succeeded. The recovered
-key's usage response reports Free, and its WebSocket was refused with close code
-4001. Streaming entitlement remains unverified; no live Parlay props were observed.
+and NBA moneylines from DraftKings, FanDuel, and Pinnacle succeeded. The current
+paid WebSocket connection was verified on October 20, 2026 local time: the server
+reported Business access, NBA became ready, and real game-line and player-prop
+offers continued arriving. This replaces the earlier entitlement-denied status.
 Synthetic demo data comes from the separate demo plugin, never these adapters.
 
 ## Implemented clients
@@ -17,7 +18,7 @@ Synthetic demo data comes from the separate demo plugin, never these adapters.
 | `owls_rest` | REST polling | Backend `OWLS_API_KEY`, Bearer header | e.g. `nba` |
 | `oddspapi_rest` | v4 REST polling | Backend `ODDSPAPI_API_KEY`, documented query auth | Numeric sport ID as a string |
 
-All plugins start disabled. A missing credential returns `missing_credentials`
+Plugins are disabled by default. A missing credential returns `missing_credentials`
 without opening a network connection. No credential is part of a public
 configuration model. Authentication refusals stop automatic requests; local
 budgets, observed quotas, bounded reconnect delay, and HTTP circuit breakers
@@ -40,8 +41,16 @@ a new initial state. [Official WebSocket reference](https://parlay-api.com/docs/
 
 The local `account_tier` setting never grants entitlement. Health separately
 reports the current server-provided tier and push settings, and clears them
-when that connection ends. The documented row limit is 1–1000. A support-enabled
-trial may differ from the dashboard's base plan; the server handshake is the
+when that connection ends. The observed current connection reported `tier: business`,
+`push_mode: coalesced`, and `min_push_interval_s: 1.0`, with authenticated streaming,
+`basketball_nba` ready, no pending snapshot, and zero reported errors. Successive
+checks received changing game and prop offers; source mappings remained
+unreviewed, so all such markets stayed quarantined and `mapped_quotes` stayed zero.
+Automation remained off, the kill switch active, and native orders zero. Local
+evidence: `data/parlay-paid-access.json`, October 20 local / October 21 UTC.
+The advertised push interval is not a measurement of source-to-client latency.
+
+The documented row limit is 1–1000. A support-enabled trial may differ from the dashboard's base plan; the server handshake is the
 authority. A trial ending in a streaming refusal does not cause an automatic
 plan purchase or a silent change to synthetic data.
 
@@ -125,6 +134,59 @@ Implementation limits: v5 B2B and native OddsPapi WebSocket are not implemented.
 Every returned bookmaker must be verified independently for live/prop coverage.
 This feed is a reference-data adapter, not an execution connector.
 
+## Authenticated Kalshi monitor check
+
+On October 20, 2026 PDT, the primary personal production account passed genuine
+read-only balance, API-key identity/scopes, orders and positions checks. Inventory
+reconciliation found no open orders or positions. The authenticated WebSocket
+then delivered `subscribed` and `orderbook_snapshot` messages. This extends the
+earlier public REST discovery/book checks; local evidence is
+`data/kalshi-connection.json` (October 21, 03:18:55 UTC).
+
+Observed scopes were `read` and `write::trade`, without transfer scope. The
+location attestation expires October 27, 2026 at 8:15:55 PM PDT; it must be
+rechecked when needed and does not authorize application automation. The trade
+gate remained false, and no native order or cancellation was submitted. A market
+book snapshot does not establish private order/fill synchronization, a tested
+order lifecycle, reviewed fee/rule mappings, or settlement readiness. Those
+launch requirements remain blocked. See [venue protocols](VENUE_PROTOCOLS.md)
+and [launch checks](GO_LIVE.md).
+
+## Polymarket US personal retail monitor
+
+The separate read-only client targets the personal US retail API. Public market
+discovery and books use `https://gateway.polymarket.us`; signed account reads
+and both WebSockets use `api.polymarket.us`. Authentication uses the personal
+US API key ID and Ed25519 signing secret in protected backend environment
+variables `POLYMARKET_US_API_KEY_ID` and `POLYMARKET_US_SECRET_KEY`. These are API
+credentials, not an international wallet private key. No international CLOB or
+institutional API compatibility is implied. [Official authentication](https://docs.polymarket.us/api-reference/authentication)
+
+Actual production checks succeeded on October 20, 2026 at 20:19:57 PDT. Signed
+`GET /v1/account/balances` returned one balance row; unsigned discovery returned
+25 markets and a REST book. Authenticated `/v1/ws/markets` delivered `marketData`,
+and `/v1/ws/private` delivered `orderSubscriptionSnapshot`. The inspected
+connection reported zero errors and zero unknown frames. Evidence is local in
+`data/polymarket-us-connection.json` (October 21, 03:19:57 UTC).
+
+Subscriptions use the official SDK/detail-page camelCase keys and string enums;
+actual returned envelopes used `requestId` and `subscriptionType`. The adapter
+also recognizes documented snake_case aliases but rejects conflicting aliases.
+A market subscription needs explicit discovered slugs; local configuration is
+limited to 50. Discovery is bounded and does not claim full catalog coverage.
+A market heartbeat never refreshes cached book observation times.
+[Market stream](https://docs.polymarket.us/api-reference/websocket/markets),
+[private stream](https://docs.polymarket.us/api-reference/websocket/private)
+
+This is an observer, not an execution venue. Its capability report explicitly
+sets `execution_supported: false` and `reconciled: false`. No order or
+cancellation was submitted. It does not publish canonical pricing signals or
+support central account-risk reconciliation, fee validation, settlement or
+native execution. A received private snapshot is delivery evidence only; it
+must not satisfy the launch gate's complete order/position reconciliation.
+No personal retail sandbox is assumed. Successful connection checks do not
+authorize automation, establish trading permissions, or demonstrate profit.
+
 ## Verified mapping files
 
 `VerifiedProviderMapper.from_file("data/verified_mappings.json")` loads:
@@ -177,7 +239,7 @@ provider = PROVIDER_FACTORIES["parlay_ws"]({
 # (Market, Quote) pairs to the normalized event bus.
 ```
 
-When the WebSocket key arrives, place it in backend `.env` as
+For a new or replacement WebSocket key, place it in backend `.env` as
 `PARLAY_API_KEY=...`, restart the backend so it reads the environment, and
 configure/enable `parlay_ws` in Provider Center. Select actual sport and market
 keys from discovery. For game lines plus props, include both `game` and `prop`

@@ -5,10 +5,19 @@ demo, simulated execution, a React dashboard, typed plugins, and native API
 transport implementations.
 
 **The demo and paper path is runnable now without credentials. Live unattended
-trading is not release-ready and remains blocked.** Native authentication,
-account access, market mappings, live fees, native accounting, and
-private execution reconciliation need account-backed validation. Supplying a key
+trading is not release-ready and remains blocked.** Reviewed market mappings,
+live fees, order lifecycle behavior, and private execution/settlement
+reconciliation still need validation. Supplying a key
 does not arm real-money trading. See [implementation status](docs/IMPLEMENTATION_STATUS.md).
+
+Personal Kalshi production account reads and order-book streaming, plus personal
+Polymarket US account and market streams, have passed actual connection checks.
+The Polymarket US plugin is monitoring only; automated orders and cancellations
+are unsupported. Credentials stay in the protected backend environment. See
+[connection evidence and limitations](docs/PROVIDER_PROTOCOLS.md).
+
+Provider Center remembers external feed and account-monitor enable settings
+across restarts. Trading activation remains separate and starts paused.
 
 ## Start on Windows
 

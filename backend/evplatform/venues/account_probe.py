@@ -8,7 +8,7 @@ alone is insufficient, and unknown external positions always block trading.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 from urllib.parse import quote
@@ -38,7 +38,9 @@ class NativeAccountSnapshot(BaseModel):
     order_sequence: int | None = None
     position_sequence: int | None = None
     reason: str = ""
-    # A read proves no write scope or geographic eligibility.
+    # Only explicit authenticated key metadata can establish these facts; a
+    # successful balance read alone proves neither write scope nor eligibility.
+    api_key_scopes: tuple[str, ...] = ()
     trading_permission_verified: bool = False
     geographic_attestation_expires_at: datetime | None = None
 
@@ -180,6 +182,22 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids):
     if len(matching) != 1:
         raise ReconciliationError("Authenticated key identity was not confirmed")
     key = matching[0]
+    scopes = key.get("scopes", [])
+    if (not isinstance(scopes, list) or
+            any(not isinstance(scope, str) or not scope.strip() for scope in scopes)):
+        raise ReconciliationError("Invalid authenticated Kalshi key scopes")
+    scopes = tuple(sorted(set(scopes)))
+    # Official GET /api_keys returns Unix seconds, not milliseconds. Preserve
+    # expired timestamps as expired evidence; absent/null is not verification.
+    expiry = response.get("api_key_region_expiration_ts")
+    if expiry is not None:
+        if isinstance(expiry, bool) or not isinstance(expiry, int) or expiry < 0:
+            raise ReconciliationError("Invalid Kalshi location attestation expiry")
+        try:
+            expiry = datetime.fromtimestamp(expiry, timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            raise ReconciliationError("Invalid Kalshi location attestation expiry") from None
+    trading_scope = "write::trade" in scopes or {"read", "write"}.issubset(scopes)
     subaccount = key.get("subaccount")
     # Unrestricted keys route to the primary account unless an explicit native
     # account option is supplied. This bridge currently routes primary only.
@@ -242,4 +260,6 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids):
         reasons.append("Unmanaged or netted Kalshi positions require review")
     return NativeAccountSnapshot(venue="kalshi", environment=environment, account_fingerprint=fingerprint,
         identity_verified=True, observed_at=utcnow(), balance_usd=cash, open_order_count=len(orders),
-        position_count=len(actual), reconciled=not reasons, reason="; ".join(dict.fromkeys(reasons)))
+        position_count=len(actual), reconciled=not reasons, reason="; ".join(dict.fromkeys(reasons)),
+        api_key_scopes=scopes, trading_permission_verified=trading_scope,
+        geographic_attestation_expires_at=expiry)
