@@ -1,0 +1,41 @@
+.launch-readiness { margin-top: 22px; overflow: hidden; }
+.launch-head { padding: 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.launch-title { display: flex; align-items: center; gap: 14px; }
+.launch-title h2 { margin-top: 7px; font-size: 18px; letter-spacing: -.3px; }
+.launch-title p { margin-top: 7px; color: var(--muted); font-size: 11px; }
+.launch-icon { width: 43px; height: 43px; display: grid; place-items: center; border-radius: 11px; color: var(--accent); background: #c5f6790c; border: 1px solid #c5f67920; }
+.launch-head-actions { display: flex; align-items: center; gap: 12px; }
+.launch-state { display: flex; align-items: center; gap: 7px; border: 1px solid #d9b87935; background: #d9b8790a; border-radius: 4px; padding: 7px 9px; color: var(--amber); font-size: 9px; letter-spacing: .7px; font-weight: 600; white-space: nowrap; }
+.launch-state > span { width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
+.launch-state.is-ready { color: var(--green); border-color: #a9dc7235; background: #a9dc720a; }
+.launch-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 0 24px 23px; gap: 16px; border-bottom: 1px solid var(--border); }
+.launch-summary > div { border-left: 1px solid var(--border); padding-left: 18px; }
+.launch-summary > div:first-child { border: 0; padding: 0; }
+.launch-summary strong { font-size: 14px; font-weight: 550; display: block; }
+.launch-summary span { margin-top: 7px; display: block; font-size: 10px; color: var(--muted); line-height: 1.5; }
+.launch-groups { padding: 6px 24px; }
+.launch-group { border-bottom: 1px solid var(--subtle-border); }
+.launch-group:last-child { border-bottom: 0; }
+.launch-group summary { list-style: none; display: flex; align-items: center; gap: 12px; padding: 18px 0; cursor: pointer; color: var(--muted); }
+.launch-group summary::-webkit-details-marker { display: none; }
+.launch-group summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.launch-group summary > div { flex: 1; }
+.launch-group summary strong { display: block; font-size: 12px; color: var(--text); font-weight: 550; }
+.launch-group summary small { display: block; margin-top: 5px; font-size: 10px; line-height: 1.5; }
+.launch-count { font-size: 10px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; white-space: nowrap; }
+.launch-pass { color: var(--green); }
+.launch-checks { padding: 0 0 16px 29px; }
+.launch-check { padding: 11px 0; display: flex; align-items: flex-start; gap: 10px; }
+.launch-check-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--amber); margin-top: 5px; flex-shrink: 0; }
+.launch-check strong { display: block; font-size: 11px; font-weight: 500; line-height: 1.6; }
+.launch-check p { font-size: 11px; line-height: 1.7; color: var(--muted); margin-top: 3px; }
+.launch-check small { display: inline-block; margin-top: 6px; font-size: 9px; color: var(--faint); overflow-wrap: anywhere; }
+.launch-clear, .launch-loading { font-size: 11px; line-height: 1.7; color: var(--muted); padding: 10px 0; }
+.launch-loading { padding: 24px; }
+.launch-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 16px; color: var(--faint); font-size: 10px; line-height: 1.7; }
+.launch-performance-note { padding: 0 24px 20px; color: var(--muted); font-size: 10px; line-height: 1.8; }
+.launch-error { margin: 0 24px 20px; padding: 12px; border-radius: 5px; display: flex; gap: 8px; color: var(--amber); background: #d9b87909; border: 1px solid #d9b87925; font-size: 11px; line-height: 1.7; }
+.launch-spin { animation: launch-rotate 1s linear infinite; }
+@keyframes launch-rotate { to { transform: rotate(360deg); } }
+@media (max-width: 700px) { .launch-head { align-items: flex-start; flex-direction: column; padding: 20px; } .launch-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0 20px 20px; row-gap: 20px; } .launch-summary > div:nth-child(3) { border: 0; padding: 0; } .launch-groups { padding: 4px 20px; } .launch-footer { flex-direction: column; gap: 4px; padding: 16px 20px; } .launch-performance-note { padding: 0 20px 20px; } }
+@media (prefers-reduced-motion: reduce) { .launch-spin { animation: none; } }

@@ -73,7 +73,9 @@ async def test_local_invalidation_is_not_counted_as_received_exchange_frame():
     async def updates():
         yield {"type": "transport_invalidated", "reason": "access_denied"}
 
-    engine = SimpleNamespace(metrics=SimpleNamespace(counters=Counter()))
+    from unittest.mock import AsyncMock
+    engine = SimpleNamespace(metrics=SimpleNamespace(counters=Counter()),
+                             native=SimpleNamespace(on_frame=AsyncMock()))
     monitor = NativeMonitor(NovigClient, NovigSettings, {}, engine)
     monitor.client = SimpleNamespace(stream_updates=updates)
     await monitor._run()

@@ -11,9 +11,12 @@ from websockets.http11 import Response
 
 import evplatform.venues.novig as novig_module
 from evplatform.venues.novig import NovigBook, NovigClient
+from evplatform.venues.common import VenueHTTPError
 
 
 PRIVATE_DETAIL = "private-server-detail-must-not-appear"
+MONITOR_OPEN = "11111111-1111-4111-8111-111111111111"
+MONITOR_SETTLED = "22222222-2222-4222-8222-222222222222"
 SUBSCRIBED = {"nonce": 1, "subscribed": {"private": ["orders", "positions"]},
               "snapshot": {}, "orders": {"seq": 0, "open": []},
               "positions": {"seq": 0, "positions": []}}
@@ -77,6 +80,100 @@ async def test_echo_authenticates_without_claiming_streaming(native):
     assert health["authenticated"] is True
     assert health["streaming"] is False
     assert not native.settings.gate.enabled
+
+
+async def test_monitor_skips_only_history_confirmed_settled_and_preserves_requested_config(native, monkeypatch):
+    config = {"environment": "sandbox", "market_ids": [MONITOR_OPEN, MONITOR_SETTLED]}
+    calls = []
+    async def request(method, path):
+        assert method == "GET"
+        calls.append(path)
+        if path == f"/v3/catalog/markets/{MONITOR_SETTLED}":
+            raise VenueHTTPError("novig", 404, "MARKET_NOT_FOUND")
+        return {"marketId": path.rsplit("/", 1)[1], "status": "SETTLED" if "/history/" in path else "OPEN"}
+    monkeypatch.setattr(native, "request", request)
+    socket = Socket([SUBSCRIBED])
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *a, **k: socket)
+    await native.configure_subscriptions(config)
+    updates = native.stream_updates()
+    try:
+        await anext(updates)
+        assert native.health_check()["streaming"]
+        assert native.health_check()["excluded_settled_markets"] == 1
+        assert native.health_check()["requested_monitor_markets"] == 2
+        assert socket.sent[0]["subscribe"] == {"private": ["orders", "positions"], "markets": {MONITOR_OPEN: "book"}}
+        assert config["market_ids"] == [MONITOR_OPEN, MONITOR_SETTLED]
+        assert len(calls) == 3 and not native.settings.gate.enabled
+    finally:
+        await updates.aclose()
+
+
+@pytest.mark.parametrize("history", ["OPEN", "CLOSED", "missing", "forbidden", "wrong_identity"])
+async def test_monitor_unknown_or_inaccessible_missing_market_never_silently_dropped(native, monkeypatch, history):
+    async def request(method, path):
+        if "/catalog/" in path: raise VenueHTTPError("novig", 404, "MARKET_NOT_FOUND")
+        if history == "missing": raise VenueHTTPError("novig", 404, "MARKET_NOT_FOUND")
+        if history == "forbidden": raise VenueHTTPError("novig", 403, "SCOPE_INSUFFICIENT")
+        return {"marketId": "foreign" if history == "wrong_identity" else MONITOR_SETTLED,
+                "status": "SETTLED" if history == "wrong_identity" else history}
+    monkeypatch.setattr(native, "request", request)
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *a, **k: pytest.fail("Unknown selection must not connect"))
+    await native.configure_subscriptions({"market_ids": [MONITOR_SETTLED]})
+    frames = [f async for f in native.stream_updates()]
+    assert len(frames) == 1 and frames[0]["reason"] == "subscription_rejected"
+    assert native.health_check()["excluded_settled_markets"] == 0
+    assert native.health_check()["requested_monitor_markets"] == 1
+    assert "markets" not in native.selection
+
+
+@pytest.mark.parametrize("status,code", [(403, "SCOPE_INSUFFICIENT"), (404, "OTHER_NOT_FOUND"), (500, "INTERNAL_ERROR")])
+async def test_monitor_inaccessible_catalog_is_not_expiry(native, monkeypatch, status, code):
+    calls = []
+    async def request(method, path):
+        calls.append(path)
+        raise VenueHTTPError("novig", status, code)
+    monkeypatch.setattr(native, "request", request)
+    await native.configure_subscriptions({"market_ids": [MONITOR_OPEN]})
+    frames = [f async for f in native.stream_updates()]
+    assert len(calls) == 1 and "/catalog/" in calls[0]
+    assert frames[0]["reason"] == "subscription_rejected"
+    assert native.health_check()["excluded_settled_markets"] == 0
+
+
+async def test_monitor_reconnect_revalidates_requested_market_that_has_since_settled(native, monkeypatch):
+    reads = 0
+    async def request(method, path):
+        nonlocal reads
+        reads += 1
+        if reads == 1: return {"marketId": MONITOR_OPEN, "status": "OPEN"}
+        if "/catalog/" in path: raise VenueHTTPError("novig", 404, "MARKET_NOT_FOUND")
+        return {"marketId": MONITOR_OPEN, "status": "SETTLED"}
+    monkeypatch.setattr(native, "request", request)
+    sessions = [Socket([SUBSCRIBED]), Socket([SUBSCRIBED])]
+    sockets = list(sessions)
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *a, **k: sessions.pop(0))
+    async def backoff(*args): pass
+    monkeypatch.setattr(native, "_backoff", backoff)
+    await native.configure_subscriptions({"market_ids": [MONITOR_OPEN]})
+    updates = native.stream_updates()
+    try:
+        await anext(updates)
+        assert sockets[0].sent[0]["subscribe"]["markets"] == {MONITOR_OPEN: "book"}
+        assert (await anext(updates))["type"] == "transport_invalidated"
+        await anext(updates)
+        assert sockets[1].sent[0]["subscribe"] == {"private": ["orders", "positions"], "markets": {}}
+        assert native.health_check()["excluded_settled_markets"] == 1
+        assert native._configured_market_ids == (MONITOR_OPEN,)
+    finally:
+        await updates.aclose()
+
+
+async def test_monitor_selection_is_bounded_and_uuid_validated_before_io(native):
+    with pytest.raises(ValueError, match="100"):
+        await native.configure_subscriptions({"market_ids": [MONITOR_OPEN]*101})
+    with pytest.raises(ValueError):
+        await native.configure_subscriptions({"market_ids": ["unverified-alias"]})
+    assert native.request_count == 0
 
 
 @pytest.mark.parametrize("status,state,authenticated", [

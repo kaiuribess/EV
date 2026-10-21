@@ -22,13 +22,17 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 
 from .common import (
     CredentialsMissing, NativeSettings, NativeTransport, SequenceGap,
-    SequenceTracker, UnknownOrderOutcome, VenueError, decimal_value, json_body,
+    SequenceTracker, UnknownOrderOutcome, VenueError, VenueHTTPError, decimal_value, json_body,
 )
 
 
 class NovigSettings(NativeSettings):
     api_key: str = Field(default="", repr=False)  # v3 key UUID, NOT a bearer token
     private_key_path: str = Field(default="", repr=False)
+
+
+class SubscriptionSelectionError(VenueError):
+    """Requested subscription identity could not be validated; never drop it."""
 
 
 def canonical_query(query: str) -> str:
@@ -191,6 +195,8 @@ class NovigClient(NativeTransport):
         self._nonce = 0
         self.book = NovigBook()
         self.selection: dict = {"private": ["orders", "positions"]}
+        self._configured_market_ids: tuple[str, ...] | None = None
+        self._excluded_settled_markets: set[str] = set()
         self._pending: dict[int, asyncio.Future] = {}
         self.authenticated = False
         self.health_reason = "Novig is disconnected"
@@ -242,6 +248,8 @@ class NovigClient(NativeTransport):
                 "orderbook_markets": len(self.book.books),
                 "orderbook_orders": sum(len(orders) for orders in self.book.books.values()),
                 "invalid_book_subjects": len(self.book.sequences.invalid),
+                "requested_monitor_markets": len(self._configured_market_ids or ()),
+                "excluded_settled_markets": len(self._excluded_settled_markets),
                 "reason": self.health_reason, "last_error_type": self.last_error_type,
                 "received_close_code": self.received_close_code, "sent_close_code": self.sent_close_code}
 
@@ -329,6 +337,51 @@ class NovigClient(NativeTransport):
         if self._ws:
             await self._command("subscribe", self.selection, wait=False)
 
+    async def configure_subscriptions(self, config: dict):
+        """Keep requested scope; only history-confirmed settled IDs are skipped.
+
+        Validation runs before every connection attempt, outside the pricing
+        path. We never discover replacement markets or alter persisted config.
+        """
+        requested = config.get("market_ids", [])
+        if not isinstance(requested, list) or len(requested) > 100:
+            raise ValueError("Novig monitor accepts at most 100 explicitly requested markets")
+        for market in requested:
+            if not isinstance(market, str):
+                raise ValueError("Novig monitor market IDs must be UUID strings")
+            UUID(market)
+        self._configured_market_ids = tuple(dict.fromkeys(requested))
+        self._excluded_settled_markets.clear()
+
+    async def _refresh_configured_subscriptions(self):
+        if self._configured_market_ids is None:
+            return
+        active, settled = {}, set()
+        try:
+            # Bounded request count, time and existing per-client quota pacing.
+            async with asyncio.timeout(60):
+                for market in self._configured_market_ids:
+                    try:
+                        row = await self.request("GET", f"/v3/catalog/markets/{quote(market, safe='')}")
+                    except VenueHTTPError as exc:
+                        if exc.status_code != 404 or exc.code != "MARKET_NOT_FOUND":
+                            raise
+                        row = await self.request("GET", f"/v3/history/markets/{quote(market, safe='')}")
+                        if row.get("marketId") == market and row.get("status") == "SETTLED":
+                            settled.add(market)
+                            continue
+                        raise SubscriptionSelectionError("Missing market is not confirmed settled")
+                    if row.get("marketId") != market or row.get("status") not in {"OPEN", "CLOSED"}:
+                        raise SubscriptionSelectionError("Catalog market identity/status is not verified")
+                    active[market] = "book"
+        except (VenueError, ValueError, TypeError, AttributeError, TimeoutError) as exc:
+            if isinstance(exc, VenueHTTPError) and exc.status_code == 401:
+                self.authenticated = False
+            # Preserve the complete previous selection on any uncertain read.
+            raise SubscriptionSelectionError("Novig requested markets could not be validated; no unknown IDs were removed") from None
+        self.selection["markets"] = active
+        self._excluded_settled_markets = settled
+
     async def unsubscribe(self, subjects: list[str]):
         for subject in subjects:
             if subject.startswith("market:"):
@@ -342,6 +395,7 @@ class NovigClient(NativeTransport):
             self.book.reset()
             self._nonce = 0
             try:
+                await self._refresh_configured_subscriptions()
                 url = self.HOSTS[self.settings.environment].replace("https://", "wss://") + "/v3/ws"
                 async with ws_connect(url, additional_headers=self.headers("GET", "/v3/ws"),
                                       ping_interval=15, max_size=16 * 1024 * 1024) as socket:
@@ -350,7 +404,7 @@ class NovigClient(NativeTransport):
                     self.health_reason = "Waiting for Novig WebSocket subscription acknowledgement"
                     subscription_nonce = await self._command("subscribe", self.selection, wait=False)
                     async for raw in socket:
-                        frame = json.loads(raw)
+                        frame = json.loads(raw, parse_float=Decimal)
                         if not isinstance(frame, dict):
                             raise ValueError("Novig frame must be an object")
                         self.last_message_time = time.time()
@@ -361,6 +415,11 @@ class NovigClient(NativeTransport):
                                 code = error.get("code") if isinstance(error, dict) else frame.get("code", error)
                                 if code == "RATE_LIMIT_EXCEEDED":
                                     raise VenueError("Novig subscription temporarily throttled")
+                                if code == "MARKET_NOT_FOUND" and self._configured_market_ids is not None:
+                                    before = dict(self.selection.get("markets", {}))
+                                    await self._refresh_configured_subscriptions()
+                                    if self.selection.get("markets", {}) != before:
+                                        raise VenueError("A requested market settled during subscription; reconnect with confirmed active scope")
                                 yield self._invalidate_stream(
                                     "subscription_rejected", "Novig rejected the WebSocket subscription; check requested channels and key permissions")
                                 return
@@ -378,6 +437,10 @@ class NovigClient(NativeTransport):
                         failures = 0
                         yield frame
                     raise VenueError("Novig stream closed; reconcile and resubscribe")
+            except SubscriptionSelectionError:
+                yield self._invalidate_stream("subscription_rejected",
+                    "Novig monitor validation failed; unknown or inaccessible requested markets need review")
+                return
             except (OSError, TimeoutError, ConnectionClosed, InvalidHandshake, VenueError,
                     ValueError, KeyError, TypeError, AttributeError) as exc:
                 self.last_error_type = type(exc).__name__

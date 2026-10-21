@@ -10,14 +10,15 @@ It is **not a completed production autonomous trading release**.
 | Identity | Exact canonical identities, verified aliases and source signatures, quarantine, player/line/rule rejection | Reviewed mappings for real markets and official athlete/team IDs; no guessed alias dataset |
 | Pricing | Proportional and power devig, weights/requirements/age/disagreement, bookmaker dedup, best-offer EV and size curves | Calibrated real-market weights; validated push/different-line models; native live fee feeds |
 | Strategies | Positive EV, independent strategy interface, required input and market metadata | Arbitrage, cross-exchange multi-leg execution, middles, steam and ML strategies |
-| Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position, native private fills, exchange-specific fee settlement and fractional units; coordinated multi-leg policies |
-| Kalshi | Current documented native clients and guarded common-interface bridge | Account/sandbox testing, verified mappings/fees, fractional fill handling, central native router |
-| Novig | v3 signed REST/WS, native order operations/private state, cent units; authenticated paper book/private subscriptions verified | Account-backed order lifecycle tests, cent-contract accounting and standardized private fills in common OMS |
-| ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel/private state helpers; production read-only subscriptions and market messages verified | Sandbox order lifecycle tests, USD-stake/odds accounting and asynchronous matching integration in common OMS |
-| Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events | Broader browser/device QA; no native-account order controls |
+| Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
+| Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger | Genuine sandbox lifecycle certification; supported venue settlement proof; no native orders have been sent |
+| Kalshi | Current native clients, fractional-contract accounting, normalized book adapter, authenticated account/inventory probe and cumulative cost/fee reconciliation | Account/sandbox testing, reviewed mappings/fees, authenticated private synchronization and settlement certification |
+| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper book/private subscriptions verified | Account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
+| ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, bounded cancellation retries; production read-only subscriptions and market messages verified | Complete authenticated inventory and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
+| Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, actionable launch blockers and separate native order ledger | Broader browser/device QA; native arming remains an explicit backend operation behind preflight |
 | Analytics | Durable all-signal episodes and transitions even while paused; first-entry hypothetical grading from explicit results; origin-separated groups/calibration; processing/receipt/intent/ack/fill timings and paper positions/settlements | Automatic verified result ingestion, live slippage calibration, CLV from verified closing data, production returns and independently clustered uncertainty estimates |
 | Storage | Async batched WAL SQLite audit, configurations, orders and fill IDs | Retention/compaction policy for long unattended runs; database upgrade migrations beyond version 1 |
-| Windows | Setup/demo/paper/test/stop PowerShell scripts, local built dashboard | Always-on operation requires an awake powered PC or a separately deployed host |
+| Windows | Setup/demo/paper/native/test/stop PowerShell scripts, separate native environment databases, local built dashboard | Always-on operation requires an awake powered PC or a separately deployed host |
 
 ## Connection truth
 
@@ -52,18 +53,19 @@ synthetic plugin runs in demo/paper mode and all its prices/fills are labeled.
 
 ## Measured local validation
 
-The latest Windows suite passed **444 tests**, with **85% backend statement
-coverage**. All automated provider/venue protocol exchanges use controlled
+The latest Windows suite passed **755 tests**, with **85.74% backend statement
+coverage**. The TypeScript/Vite build and actual paused native Windows startup
+also passed. All automated provider/venue protocol exchanges use controlled
 responses; real connection checks above were separate read-only observations.
 
-An isolated 15-second synthetic paper run with the new guards and ledger measured
-2,190 internal calculations: median **0.2018 ms**, p95 **0.3652 ms**, p99
-**0.4914 ms**. Receipt-to-calculation measured median **10.000 ms**, p95
-**18.094 ms**, p99 **21.999 ms**. Nine paper orders were routed; four had fills.
-Seven simulated fill events, including partial fills, had median submission-to-fill
-delay **571.848 ms**; that sample is too small for p95/p99. These are local
-synthetic measurements, not sportsbook-to-client latency, exchange acknowledgement
-time, native fill speed, or evidence of profitability.
+An isolated 15-second synthetic run measured 2,190 internal calculations:
+median **0.202 ms**, p95 **0.384 ms**, p99 **0.552 ms**. Local
+receipt-to-calculation measured median **10.998 ms**, p95 **19.001 ms**,
+p99 **23.000 ms**. Nine paper orders were routed; four had fills. Seven
+simulated fill events had median submission-to-fill delay **578.279 ms**;
+that sample is too small for p95/p99. These are local synthetic measurements,
+not sportsbook-to-client latency, native fill speed or evidence of profit.
+See [the validation record](VALIDATION.md).
 
 Signal history starts with this release. Past displayed decisions are not
 retroactively represented as a complete saved track record. No real verified
@@ -74,9 +76,11 @@ settlements or real profitable trading history have been established. See
 
 Live account permissions and geographic eligibility cannot be verified offline.
 The current native common-interface bridges require explicit account evidence,
-verified mapping/fees and one-use risk authorization. The shipped central router
-uses the paper execution plugin only. `EV_LIVE_ENABLED` is reserved configuration,
-not a bypass; the production route rejects attempts.
+verified mapping/fees and one-use risk authorization. The native strategy and
+router use a separate exact-decimal ledger and share the central position guards.
+`EV_LIVE_ENABLED` cannot bypass the launch profile, synchronized private account,
+explicit monetary limits or genuine account-bound lifecycle evidence. Native
+automation remains off at startup. See [GO_LIVE.md](GO_LIVE.md).
 
 The built-in reference model never treats unknown timestamps as current. A
 required stale reference produces NO SIGNAL. Execution rejects sequence gaps,

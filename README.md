@@ -6,7 +6,7 @@ transport implementations.
 
 **The demo and paper path is runnable now without credentials. Live unattended
 trading is not release-ready and remains blocked.** Native authentication,
-account access, market mappings, live fees, fractional quantity accounting, and
+account access, market mappings, live fees, native accounting, and
 private execution reconciliation need account-backed validation. Supplying a key
 does not arm real-money trading. See [implementation status](docs/IMPLEMENTATION_STATUS.md).
 
@@ -53,6 +53,20 @@ The hidden backend keeps running if the waiting PowerShell is interrupted.
 Use `stop_local.ps1` for graceful cancellation, audit drain, and shutdown.
 The script verifies the recorded executable and command before stopping a process.
 An existing listener is not overwritten or terminated.
+
+Native sandbox preparation starts in a separate database with automation off:
+
+```powershell
+.\start_native.ps1 -Environment sandbox -Port 8002
+.\.venv\Scripts\python.exe scripts\check_live_readiness.py --url http://127.0.0.1:8002
+```
+
+The Trading page shows the launch blockers and a separate native order ledger.
+The native route preserves fractional contracts, cent contracts, and USD stakes
+with exact decimal cash accounting. Shared risk controls reserve exposure before
+durable intent and never treat an acknowledgement as a fill. See
+[the launch guide](docs/GO_LIVE.md) and [native accounting](docs/NATIVE_ACCOUNTING.md).
+No startup script arms native trading.
 
 For frontend development, run `npm.cmd run dev` in `frontend/`; Vite proxies to
 8001. Set `EV_API_TARGET=http://127.0.0.1:8002` for another backend port.
@@ -139,6 +153,7 @@ documentation. Their exact scope and evidence are in:
 - [Native venue protocols and limitations](docs/VENUE_PROTOCOLS.md)
 - [Oddize free REST setup and actual validation](docs/ODDIZE.md)
 - [Signal history, grading and safety controls](docs/SIGNAL_TRACKING.md)
+- [Native launch checks and configuration](docs/GO_LIVE.md)
 
 Every live provider is disabled by default and independent of the demo. Enabling
 a provider with no credentials reports a blocked state rather than crashing or
@@ -183,7 +198,8 @@ For native venue keys, `.env.example` includes the extra signing key paths and
 ProphetX secret required by current documentation. Configure native monitors for
 the correct sandbox/production environment. **There is no one-click production
 trading switch in this release.** `EV_LIVE_ENABLED=true` alone does not bypass the
-missing normalized execution/reconciliation requirements.
+account-bound launch profile, reviewed mappings/fees, current synchronized feeds,
+explicit limits, or genuine lifecycle and settlement evidence.
 
 ## Data, replay, and recovery
 
@@ -214,7 +230,9 @@ Paper settlement accepts a typed `SettlementResult` through `POST
 /api/paper/settle` (with `X-EV-Control: local`). It is idempotent, requires complete
 outcome payouts and evidence, supports paper refunds/partial binary payouts, rejects
 unresolved orders, releases settled exposure, and persists realized P&L. It is not
-an automatic feed of real results. Native result/fee reconciliation is unfinished.
+an automatic feed of real results. Native accounting uses its own durable ledger;
+venue-specific settlement support and account-backed validation are listed in
+[the venue guide](docs/VENUE_PROTOCOLS.md).
 
 ## Operating the PC
 

@@ -99,18 +99,47 @@ def create_app(settings=None):
     @app.get("/api/readiness")
     async def readiness():
         summary = await engine.signal_ledger.summary(synthetic=False)
-        return {
-            "live_trading_ready": False,
+        report = engine.native.report()
+        return {**report.model_dump(mode="json"),
             "paper_position_conflicts_enforced": True,
             "signal_ledger": engine.signal_ledger.started,
             "real_signal_evidence": summary,
-            "blocking_items": [
-                "Native order routing, quantity accounting, fees and private reconciliation remain unvalidated",
-                "No automatic verified settlement feed or compatible closing-price feed is connected",
-                "Real market identity and settlement mappings require review",
-                "Synthetic paper results do not establish a profitable real strategy",
-            ],
+            "blocking_items": report.blocking_items,
+            "configuration_error": engine.native.profile_error,
         }
+
+    @app.get("/api/readiness/runtime")
+    async def runtime_readiness():
+        return engine.native.runtime_facts().model_dump(mode="json")
+
+    @app.get("/api/native/orders")
+    async def native_orders():
+        return {"orders": [o.model_dump(mode="json") for o in engine.risk.native_orders.values()],
+                "native_execution_enabled": engine.settings.live_enabled}
+
+    @app.get("/api/native/signals")
+    async def native_signals(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+        import json
+        rows = await (await engine.storage.connection.execute(
+            "SELECT data FROM events WHERE schema_name='native.signal' ORDER BY seq DESC LIMIT ? OFFSET ?",
+            (limit, offset))).fetchall()
+        return {"items": [json.loads(row[0]) for row in rows], "limit": limit, "offset": offset,
+                "note": "Native-unit observations; execution and settlement are tracked separately"}
+
+    @app.post("/api/native/orders/{order_id}/cancel")
+    async def native_cancel(order_id: str):
+        if order_id not in engine.risk.native_orders:
+            raise HTTPException(404, "Unknown native order")
+        return (await engine.native.manager.cancel(order_id)).model_dump(mode="json")
+
+    @app.post("/api/native/orders/{order_id}/reconcile")
+    async def native_reconcile(order_id: str):
+        if order_id not in engine.risk.native_orders:
+            raise HTTPException(404, "Unknown native order")
+        try:
+            return (await engine.native.manager.reconcile(order_id)).model_dump(mode="json")
+        except (ValueError, RuntimeError):
+            raise HTTPException(409, "Native order requires complete authenticated reconciliation")
 
     @app.post("/api/shutdown")
     async def shutdown():

@@ -241,7 +241,7 @@ class KalshiClient(NativeTransport):
                     self._ws, self.health = socket, "streaming"
                     await self._subscribe_current()
                     async for raw in socket:
-                        frame = json.loads(raw)
+                        frame = json.loads(raw, parse_float=Decimal)
                         if not isinstance(frame, dict):
                             raise ValueError("Kalshi frame must be an object")
                         self.last_message_time = time.time()

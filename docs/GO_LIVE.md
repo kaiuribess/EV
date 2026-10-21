@@ -1,0 +1,267 @@
+# Preparing a scoped native launch
+
+The readiness report is a release gate, not a promise of profit. Demo results,
+synthetic tests, a working login and a connected heartbeat do not establish live
+execution readiness. The gate evaluates the exact venue, environment, account,
+software build, strategy set, market set, mappings, prices and limits selected
+for launch. It never enables trading itself.
+
+## Start a paused native workspace on Windows
+
+Run these commands from the repository folder. The existing demo can keep
+running on port 8001. Use the native launcher for account testing:
+
+```powershell
+.\start_native.ps1 -Environment sandbox -Port 8002 -Background
+```
+
+This opens the dashboard at `http://127.0.0.1:8002` and starts with automatic
+trading paused. It uses `data/native-sandbox.db`, separate from demo history.
+For production monitoring, the corresponding command is:
+
+```powershell
+.\start_native.ps1 -Environment production -Port 8003 -Background
+```
+
+That workspace also starts paused and uses `data/native-production.db`.
+Neither command grants order authorization or turns on automation, including
+after a restart. Native launch artifacts currently share the paths below;
+the profile's environment must match the workspace. Keep one approved native
+environment/profile active at a time. Do not reuse the demo database as an
+account ledger.
+
+Stop a managed workspace safely with its actual port:
+
+```powershell
+.\stop_local.ps1 -Port 8002
+```
+
+## Read the actual blockers
+
+With the sandbox workspace running on port 8002:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_live_readiness.py --url http://127.0.0.1:8002
+```
+
+Use port 8003 for the production example above. The Trading page also shows the
+same live readiness checks and their next actions. Its readiness panel is
+read-only. A missing or stale response displays readiness as unconfirmed.
+
+The report includes machine-readable blocker codes and an action for each. Exit
+status 0 means `safe_to_arm`; 1 means blocked; 2 means the check could not be
+completed. `technical_ready` and `authorization_ready` are separate.
+`safe_to_arm` requires both. `live_trading_ready` additionally requires production
+mode, explicit enablement, automatic trading enabled and a cleared emergency
+stop. Sandbox readiness is reported separately. A report is a snapshot; normal
+risk, freshness and native authorization checks still apply to every order.
+
+The offline command without arguments intentionally reports missing evidence:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_live_readiness.py
+```
+
+For offline review, pass `--profile data/launch_profile.json --runtime
+data/readiness-runtime.json`. Runtime facts expire after five seconds. Files
+typed by an operator cannot prove that their claims are true. The running engine
+must independently establish the current facts and retain original evidence.
+Neither CLI reads `.env` nor submits orders. Never put API keys into these JSON
+files. Configuration error messages omit rejected values.
+
+The running engine reads these exact local files:
+
+| File | Purpose |
+| --- | --- |
+| `data/verified_mappings.json` | Reviewed source signatures, canonical markets and bookmaker outcome mappings. Loaded when an input plugin starts. |
+| `data/native_mappings.json` | Reviewed canonical-to-native instruments, explicit native units and expiring fee bounds. Loaded at backend startup. |
+| `data/launch_profile.json` | The exact target account/environment, limits, configuration digests and reviewed launch evidence. Loaded at backend startup. |
+
+These files are local runtime artifacts excluded from Git and must not contain secrets.
+Missing files leave markets quarantined and native execution blocked. After
+changing launch or native mapping artifacts, restart the paused native
+workspace and repeat the checks. An input mapping change requires restarting
+the affected input plugin or the workspace. A configuration change invalidates
+evidence bound to the previous profile/build; do not edit a passed certificate
+to make its digest match.
+
+## Review exact market mappings
+
+Provider mappings use the existing `MappingFile` contract: `version: 1` and a
+`mappings` list of `VerifiedOfferMapping` objects. A mapping binds the exact
+source signature to a canonical `Market`, a one-to-one outcome map, bookmaker,
+explicit verification and review evidence. Preserve original source IDs and
+review the actual event, player, statistic, threshold, period, overtime,
+participation, void and push rules. If any fact is unavailable, keep that source
+observation quarantined.
+
+The original whole-dollar Kalshi bridge's venue mapping bundle is:
+
+```json
+{
+  "schema_version": 1,
+  "venue": "kalshi",
+  "mappings": []
+}
+```
+
+Each row is `VerifiedVenueMapping`. Its `settlement_fingerprint` must equal
+`Market.identity()`, which binds the full event/player/line/outcome/rules
+identity, not just a hash of settlement text. Marking `verified: true` is a
+review assertion, not an automatic matcher. The empty example intentionally
+fails validation; no live mappings are invented.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/validate_market_mappings.py --provider data/verified_mappings.json --venue data/venue-mappings.json --min-reference-books 2
+```
+
+Repeat `--provider` or `--venue` for multiple files. The validator checks schema,
+canonical identity collisions, duplicate source signatures, exact native
+outcomes, full contract fingerprints, fees, independent reference counts and
+the original bridge's supported units. Multiple vendors supplying Pinnacle
+count as one bookmaker. An exit status of 0 proves these structural checks only;
+the operator must still verify external rules. Novig cent contracts, fractional
+contracts and ProphetX USD stakes require the extended native accounting
+instrument contract; do not disguise them as whole-dollar contracts to pass the
+legacy mapping checker.
+
+The extended native pipeline uses `NativeMappingFile` in
+`venues/book_normalization.py`: `schema_version: 1` and `mappings`, each containing
+the complete canonical `market`, verified native `instrument`, and an expiring
+verified `fee_bound` tied to that instrument's fingerprint. Novig requires the
+reviewed opposing outcome ID. ProphetX additionally requires exact source event
+and market IDs and, for props, the authorized sub-type. Numeric ProphetX
+`updated_at` units remain unknown until `source_timestamp_unit` and
+`timestamp_unit_evidence` explicitly document the actual source convention;
+unknown clocks cannot qualify execution.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/validate_market_mappings.py --provider data/verified_mappings.json --native data/native_mappings.json
+```
+
+This validates the extended unit/fee contract and compares its full market
+identity against the provider mappings. The result includes a separate
+`native_mapping_digest` matching `NativeBookMapper.mapping_digest`.
+The mapper preserves untouched price-level observation clocks across deltas,
+uses the oldest executable level as the book's conservative observation time,
+and suspends cached books on transport invalidation. It never substitutes
+receipt time for missing source timestamps. Native revision numbers remain
+monotonic across reconnects in the same process.
+
+## Explicit launch profile and evidence
+
+`core/readiness.py` defines the exact Pydantic contracts. A `LaunchProfile`
+requires all of the following; there is no default stake authorization:
+
+- The venue, sandbox or production environment, SHA-256 of the authenticated
+  account identity, and software build identity. Do not hash a credential.
+- Explicit canonical market IDs, enabled strategy IDs and required provider IDs.
+- Digests of the complete reviewed mapping configuration and pricing model.
+- Every monetary exposure limit, daily loss limit, order-count/rate limit,
+  minimum independent reference count and quote/book freshness limit.
+- Reviewed `LaunchEvidence` records bound to `LaunchProfile.digest()` and the
+  same build, venue and account. The digest excludes only the evidence list.
+
+`GET /api/readiness/runtime` exposes the current nonsecret build, mapping and
+pricing digests and runtime checks. Use actual authenticated account identity
+from the relevant native account probe. A successful REST response or a
+credential's presence does not prove write permission or geographical
+eligibility. No ready-to-trade profile is shipped with sample money limits.
+
+Evidence records contain the kind, actual environment/account, observation and
+expiry timestamps, reviewer, source class, original artifact SHA-256, passed
+result and performed checks. The following evidence is mandatory:
+
+| Kind | Required genuine evidence |
+| --- | --- |
+| `account_access` | An authenticated native read of the target account and its permissions. Maximum age 24 hours. |
+| `geographic_eligibility` | Official eligibility verification for the production account. Maximum age 24 hours; required only for production. |
+| `native_lifecycle` | Actual native acknowledgement, private fill, partial fill, cancellation race, unknown outcome, duplicate protection, exact fees/units and sequence-gap recovery. |
+| `restart_recovery` | Durable-intent restart, authoritative open-order reconciliation and position reconciliation. |
+| `settlement_reconciliation` | Native result, actual payout/fee accounting, position release and idempotency. |
+| `risk_authorization` | Explicit operator authorization of the exact profile and all limits. |
+
+Lifecycle/recovery/settlement/authorization evidence has a maximum age of seven
+days and may expire earlier. Later failed checks supersede earlier passes.
+Future timestamps, expired records, synthetic evidence, missing checks, wrong
+account/environment/build or configuration changes block release. Production
+access and geographic evidence must come from production. A sandbox lifecycle
+certificate can qualify the same build only when the actual sandbox account is
+explicitly named in `sandbox_account_fingerprint` and its certificate binds the
+reviewed production profile. It does not transfer production account access.
+
+Only collect native execution evidence in an authorized native sandbox or an
+explicitly authorized bounded production certification procedure. A unit test
+using mocked transport is valuable software validation and must never be
+relabeled as a native certificate. This module does not mint certificates.
+
+## Runtime checks that credentials alone cannot satisfy
+
+The running engine must establish central risk and opposing-position guards,
+durable intent persistence, healthy audit and signal writers, exact native
+routing/accounting, authenticated and synchronized private streams, healthy
+reconciliation, completed startup recovery, cancellation-race handling and
+verified settlement reconciliation. Unknown orders or reconciliation
+discrepancies block new orders until resolved.
+
+The new native settlement adapter is deliberately narrow: Novig ordinary
+WIN/LOSS results for one terminal, fully reconciled, taker-only managed order
+per account and native market. It compares actual position-history payout,
+cost, quantity and P&L against complete personal fill history and matching
+settlement timestamps. Shared/external/netted positions, maker credits,
+PUSH/FMV results, remediation/resettled grades, incomplete history and cash
+discrepancies remain unsupported and blocked. Kalshi and ProphetX automatic
+settlement allocation still require their own validated native adapters.
+
+This settlement adapter has offline protocol tests; no genuine native
+settlement has been certified. The default `settlement_policy: "full"` remains blocked. An operator may explicitly
+review and select `settlement_policy: "novig_ioc_win_loss_halt_on_exception"`
+for the narrow Novig IOC path. That capability admits only reviewed cent-contract
+mappings and one managed order per native market for the account, including
+historical settled orders. The order router blocks a second intent for that
+market. Exceptional results stop automation and retain exposure for audited
+cash reconciliation; they are never guessed or silently marked settled.
+Matching genuine account-specific lifecycle and settlement evidence is still
+required. Selecting the policy changes the profile digest and invalidates older
+evidence. It does not enable execution or certify the account. Adding a key cannot satisfy
+that requirement, and a public final score cannot release account exposure.
+
+Every required provider must have confirmed authentication, entitlement, quota,
+connection and synchronization. Every selected market must have verified source
+and native mappings, current fee information, supported native units, enough
+independent references, required books, active status, executable liquidity and
+a synchronized order book. Individual source clocks determine freshness;
+heartbeats and REST delivery times cannot refresh old prices. Synthetic markets
+never satisfy native readiness.
+
+The report keeps performance evidence separate. It may show counts of real
+signals, graded events, reconciled fills and verified settlements. Those counts
+do not certify profitability, and synthetic results never establish a real
+track record. Closing-line analysis is informative when contracts match; it is
+not a substitute for verified actual settlement and fee accounting.
+
+## When a remaining key or permission arrives
+
+Save it in the protected local backend `.env` or secret store, then configure
+only the matching plugin. Confirm the documented account tier and endpoint;
+local tier settings cannot grant server-side access. For Parlay, a replacement
+key's successful REST call does not prove Scale WebSocket entitlement. A 4001
+entitlement rejection must be resolved by Parlay before that stream qualifies.
+
+Enable the input/monitor plugin and verify actual native/source messages,
+timestamps and supported scopes. Review the resulting exact mappings and fee
+schedule, complete the genuine account-specific native checks, and rerun the
+readiness report. A newly supplied credential must never silently arm trading.
+The final switch remains explicit and only succeeds once all current blockers
+are resolved. Keep the first approved scope narrow enough that its mapping,
+fees, order lifecycle and settlement behavior have all been exercised.
+
+After genuine preflight and explicit stake/limit approval, the operator enables
+native execution with `EV_LIVE_ENABLED=true` in the protected backend
+configuration, restarts the matching paused native workspace, and verifies
+`safe_to_arm: true` from the current report. This setting alone does not start
+orders. Automatic activation uses the guarded local `POST /api/control` API
+with `X-EV-Control: local` and `{"auto_trade":true}`; it rejects unresolved
+launch checks. An active emergency stop must first have its cause resolved and
+be explicitly reset through that same control API. Never treat a saved report
+or an old passing response as permission to bypass the current gate.

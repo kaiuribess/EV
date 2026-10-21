@@ -39,6 +39,9 @@ class RiskEngine:
         self.daily_realized = Decimal(0)
         self.daily_date = utcnow().date()
         self.orders: dict[str, Order] = {}
+        # Native orders retain their own exact quantity and payout contracts.
+        # They still participate in every central USD exposure/position guard.
+        self.native_orders: dict = {}
         self.duplicates = {}
         self.settled: set[str] = set()
         self.authority = RiskAuthority()
@@ -52,13 +55,18 @@ class RiskEngine:
     def cost(self, order):
         if order.id in self.settled:
             return Decimal(0)
-        filled = order.average_fill_price * order.filled_quantity + order.fees
+        native_cost = getattr(order, "filled_cost_usd", None)
+        filled = (native_cost if native_cost is not None else
+                  order.average_fill_price * order.filled_quantity) + order.fees
         if order.status in {OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FILLED}:
             return filled
         return max(order.reserved_cost, filled)
 
     def exposures(self):
-        return sum((self.cost(o) for o in self.orders.values()), Decimal(0))
+        return sum((self.cost(o) for o in self.all_orders()), Decimal(0))
+
+    def all_orders(self):
+        return (*self.orders.values(), *self.native_orders.values())
 
     def check_enabled(self):
         if self.kill_switch:
@@ -68,6 +76,43 @@ class RiskEngine:
         self.roll_day()
         if self.daily_realized <= -self.config.daily_loss_limit:
             raise RiskRejected("Daily realized loss limit reached")
+
+    def check_native_reservation(self, order, *, reserved=False):
+        """Shared limits for an exact-unit order; caller holds the shared OMS lock."""
+        self.check_enabled()
+        if order.synthetic or order.mode not in {"sandbox", "production"}:
+            raise RiskRejected("Native execution requires an explicit native environment")
+        if not metadata_consistent(order):
+            raise RiskRejected("Native order has unverified canonical position metadata")
+        if self.config.live_max_order_stake is None:
+            raise RiskRejected("An explicit native maximum order stake is required")
+        cost = order.reserved_cost
+        if not cost.is_finite() or cost <= 0 or cost > min(self.config.max_order_stake, self.config.live_max_order_stake):
+            raise RiskRejected("Native order exceeds its explicit stake limit")
+        if reserved and self.native_orders.get(order.id) != order:
+            raise RiskRejected("Native durable reservation is missing or changed")
+        self.check_order_limits(exclude_order_id=order.id if reserved else None)
+        self.check_position_conflicts(order, order.market_snapshot, exclude_order_id=order.id if reserved else None)
+        others = [o for o in self.all_orders() if o.id != order.id]
+        if not reserved and any(o.client_order_id == order.client_order_id for o in self.all_orders()):
+            raise RiskRejected("Client order ID already reserved")
+        if not reserved and any(
+            o.market_fingerprint == order.market_fingerprint and o.outcome == order.outcome and
+            (o.created_at.tzinfo is None or (utcnow() - o.created_at).total_seconds() < self.config.duplicate_window_seconds)
+            for o in others
+        ):
+            raise RiskRejected("Duplicate native candidate cooldown")
+        limits = [
+            (others, self.config.max_total_exposure, "total"),
+            ([o for o in others if o.event_id == order.event_id], self.config.max_event_exposure, "event"),
+            ([o for o in others if o.venue == order.venue], self.config.max_venue_exposure, "venue"),
+            ([o for o in others if o.correlation_id == order.correlation_id], self.config.max_correlated_exposure, "correlated"),
+        ]
+        if order.player_id:
+            limits.append(([o for o in others if o.player_id == order.player_id], self.config.max_player_exposure, "player"))
+        for orders, limit, label in limits:
+            if sum((self.cost(o) for o in orders), Decimal(0)) + cost > limit:
+                raise RiskRejected(f"Native {label} exposure limit reached")
 
     def roll_day(self):
         if self.daily_date != utcnow().date():
@@ -80,7 +125,7 @@ class RiskEngine:
         rejected/cancelled intents. Rehydrated audit orders provide the same
         accounting after restart without a volatile counter reset.
         """
-        others = [order for order in self.orders.values() if order.id != exclude_order_id]
+        others = [order for order in self.all_orders() if order.id != exclude_order_id]
         if sum(order.status in UNRESOLVED and order.id not in self.settled
                for order in others) >= self.config.max_open_orders:
             raise RiskRejected("Maximum open order count reached")
@@ -119,15 +164,15 @@ class RiskEngine:
             raise RiskRejected("Current order stake limit is below its reservation")
         limits = [
             (self.exposures(), self.config.max_total_exposure, "total"),
-            (sum(self.cost(o) for o in self.orders.values() if o.event_id == order.event_id),
+            (sum(self.cost(o) for o in self.all_orders() if o.event_id == order.event_id),
              self.config.max_event_exposure, "event"),
-            (sum(self.cost(o) for o in self.orders.values() if o.venue == order.venue),
+            (sum(self.cost(o) for o in self.all_orders() if o.venue == order.venue),
              self.config.max_venue_exposure, "venue"),
-            (sum(self.cost(o) for o in self.orders.values() if o.correlation_id == order.correlation_id),
+            (sum(self.cost(o) for o in self.all_orders() if o.correlation_id == order.correlation_id),
              self.config.max_correlated_exposure, "correlated"),
         ]
         if order.player_id:
-            limits.append((sum(self.cost(o) for o in self.orders.values() if o.player_id == order.player_id),
+            limits.append((sum(self.cost(o) for o in self.all_orders() if o.player_id == order.player_id),
                            self.config.max_player_exposure, "player"))
         for exposure, limit, label in limits:
             if exposure > limit:
@@ -147,12 +192,12 @@ class RiskEngine:
             raise RiskRejected(str(exc)) from exc
         family = risk_family(market)
         fingerprint = market.identity()
-        own = self.orders.get(exclude_order_id) if exclude_order_id else None
+        own = (self.orders.get(exclude_order_id) or self.native_orders.get(exclude_order_id)) if exclude_order_id else None
         if own and (not metadata_consistent(own) or own.market_fingerprint != fingerprint or
                     (own.market_id, own.venue, own.outcome, own.strategy) !=
                     (candidate.market_id, candidate.venue, candidate.outcome, candidate.strategy)):
             raise RiskRejected("Reserved canonical market identity changed or is unverified")
-        for order in self.orders.values():
+        for order in self.all_orders():
             if order.id == exclude_order_id or not reserves_position(order, self.settled):
                 continue
             same_event = order.event_id == market.event_id
@@ -201,7 +246,7 @@ class RiskEngine:
         key = (fingerprint, candidate.outcome)
         last = self.duplicates.get(key)
         # Audit records preserve the global cooldown across a process restart.
-        matching_times = [o.created_at for o in self.orders.values()
+        matching_times = [o.created_at for o in self.all_orders()
                           if o.market_fingerprint == fingerprint and o.outcome == candidate.outcome]
         if last:
             matching_times.append(last)
@@ -219,15 +264,15 @@ class RiskEngine:
         cost = quantity * (candidate.price + per_fee)
         limits = [
             (self.exposures(), self.config.max_total_exposure, "total"),
-            (sum(self.cost(o) for o in self.orders.values() if o.event_id == market.event_id),
+            (sum(self.cost(o) for o in self.all_orders() if o.event_id == market.event_id),
              self.config.max_event_exposure, "event"),
-            (sum(self.cost(o) for o in self.orders.values() if o.venue == candidate.venue),
+            (sum(self.cost(o) for o in self.all_orders() if o.venue == candidate.venue),
              self.config.max_venue_exposure, "venue"),
-            (sum(self.cost(o) for o in self.orders.values() if o.correlation_id == market.event_id),
+            (sum(self.cost(o) for o in self.all_orders() if o.correlation_id == market.event_id),
              self.config.max_correlated_exposure, "correlated"),
         ]
         if market.player_id:
-            limits.append((sum(self.cost(o) for o in self.orders.values() if o.player_id == market.player_id),
+            limits.append((sum(self.cost(o) for o in self.all_orders() if o.player_id == market.player_id),
                            self.config.max_player_exposure, "player"))
         for exposure, limit, label in limits:
             if exposure + cost > limit:

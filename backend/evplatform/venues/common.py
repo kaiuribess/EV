@@ -194,7 +194,9 @@ class NativeTransport:
             if response.status_code == 204:
                 return {}
             try:
-                parsed = response.json()
+                # Native venues can encode cash as JSON numbers. Parse their
+                # original decimal text before any binary-float round trip.
+                parsed = response.json(parse_float=Decimal)
             except ValueError:
                 if mutation_id:
                     raise UnknownOrderOutcome(mutation_id) from None

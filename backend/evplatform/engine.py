@@ -16,6 +16,9 @@ from .core.models import (
 )
 from .core.normalization import MarketMatcher
 from .core.oms import OrderManager
+from .core.native_oms import NativeOrder, NativeSettlement
+from .core.native_pricing import NativeBook, NativeCandidate
+from .core.native_runtime import NativeRuntime, NativeSignalObservation
 from .core.plugins import PluginContext, PluginRegistry, StrategyPlugin
 from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, worst_fee
 from .core.risk import RiskEngine, RiskRejected
@@ -24,6 +27,7 @@ from .core.storage import Storage
 from .plugins.demo import DemoInput
 from .plugins.paper import PaperVenue
 from .plugins.positive_ev import PositiveEV
+from .plugins.native_positive_ev import NativePositiveEV
 
 
 class Notice(Contract):
@@ -44,6 +48,9 @@ class Engine:
             ("trade.settlement", SettlementResult),
             ("signal.observation", SignalObservation), ("signal.result", SignalResultImport),
             ("system.notice", Notice),
+            ("exchange.native_book", NativeBook), ("trade.native_candidate", NativeCandidate),
+            ("native.order", NativeOrder), ("native.settlement", NativeSettlement),
+            ("native.signal", NativeSignalObservation),
         ]:
             self.schemas.register(name, 1, model)
         self.bus = EventBus(self.schemas, self.risk.halt)
@@ -66,15 +73,18 @@ class Engine:
         self.paper = PaperVenue(self.risk.authority)
         self.registry.register(DemoInput(), enabled=self.settings.mode in {"demo", "paper"})
         self.registry.register(PositiveEV(), enabled=True)
+        self.registry.register(NativePositiveEV(), enabled=False)
         self.registry.register(self.paper, enabled=True)
         self.registry.configure("synthetic_schedule", {"interval": self.settings.demo_interval, "seed": self.settings.demo_seed})
         self.registry.configure("positive_ev", self.settings.pricing.model_dump(mode="json"))
         self.oms = OrderManager(self.risk, self.storage, self.bus, self.paper, self.book, self.revalidate, self.metrics)
+        self.native = NativeRuntime(self)
         self.tasks = []
         self.started_at = utcnow()
         self.process_queue = self.bus.subscribe("strategy-engine", ["sports.market", "odds.quote", "exchange.book",
+                                                                   "exchange.native_book",
                                                                    "sports.game_state", "player.projection"], critical=True)
-        self.risk_queue = self.bus.subscribe("central-risk", ["trade.candidate"], critical=True)
+        self.risk_queue = self.bus.subscribe("central-risk", ["trade.candidate", "trade.native_candidate"], critical=True)
         self.audit_queue = self.bus.subscribe("audit", critical=True)
         self.dashboard_queue = self.bus.subscribe("dashboard-events", ["trade.order", "trade.fill", "system.notice"])
         self.settlement_queue = self.bus.subscribe("settlement-accounting", ["trade.settlement"], critical=True)
@@ -104,6 +114,7 @@ class Engine:
         self.settlements = accounting.get("settlements", {})
         if accounting.get("daily_date") == utcnow().date().isoformat():
             self.risk.daily_realized = Decimal(accounting.get("daily_realized", "0"))
+        await self.native.start()
         if saved.get("kill_switch", False) or saved.get("unclean_shutdown", False):
             self.risk.halt("Persisted emergency stop; reset explicitly")
         await self.storage.save_config("unclean_shutdown", True)
@@ -123,6 +134,8 @@ class Engine:
             asyncio.create_task(self._maintenance(), name="freshness-fill-maintenance"),
             asyncio.create_task(self._settlement_loop(), name="settlement-accounting"),
             asyncio.create_task(self._signal_loop(), name="signal-ledger"),
+            asyncio.create_task(self.native.maintain(), name="native-reconciliation"),
+            asyncio.create_task(self.native.maintain_settlements(), name="native-settlement"),
         ]
         for task in self.tasks:
             task.add_done_callback(self._task_done)
@@ -130,15 +143,17 @@ class Engine:
             record = self.registry.records[name]
             if record.enabled:
                 await self.registry.start(name, self.context(name))
-        await self.notice("info", "SYNTHETIC mode active. Automatic trading is " +
+        mode_label = "SYNTHETIC mode active" if self.settings.mode in {"demo", "paper"} else f"Native {self.settings.mode} mode"
+        await self.notice("info", mode_label + ". Automatic trading is " +
                           ("enabled for paper fills." if self.risk.auto_trade else "disabled."), "engine")
 
     async def stop(self):
         self.stopping = True
         self.risk.auto_trade = False
+        await self.oms.cancel_all()
+        await self.native.manager.cancel_all()
         for name in list(self.registry.records):
             await self.registry.stop(name)
-        await self.oms.cancel_all()
         # Stop producers first, then finish pricing decisions and their ledger records.
         clean = True
         for queue, worker in [(self.process_queue, "normalization-strategy"),
@@ -293,6 +308,17 @@ class Engine:
             if old and payload.status != "active" and old.source_time and payload.source_time and payload.source_time < old.source_time:
                 payload = old.model_copy(update={"status": payload.status, "received_at": payload.received_at})
             self.quotes[market_id][key] = payload
+        elif isinstance(payload, NativeBook):
+            market_id = payload.instrument.canonical_market_id
+            market = self.markets.get(market_id)
+            if market is None or market.identity() != payload.market_fingerprint:
+                self.risk.halt("Native book canonical mapping changed")
+                return
+            key = (market_id, payload.instrument.venue, payload.instrument.outcome)
+            old = self.native.books.get(key)
+            if old and old.revision > payload.revision:
+                return
+            self.native.books[key] = payload
         elif isinstance(payload, OrderBook):
             if market_id not in self.markets:
                 self.matcher.quarantine.append({"reason": "Unknown book market", "market_id": market_id})
@@ -315,6 +341,7 @@ class Engine:
 
     async def recalculate(self, market_id, event=None):
         market = self.markets[market_id]
+        await self.native.recalculate(market_id, event)
         self.schedule_expiration(market_id)
         for key in [k for k, v in self.opportunities.items() if v.market_id == market_id]:
             del self.opportunities[key]
@@ -332,7 +359,7 @@ class Engine:
             return
         generated, reasons = [], []
         for name, strategy in self.registry.records.items():
-            if strategy.enabled and isinstance(strategy.plugin, StrategyPlugin):
+            if strategy.enabled and isinstance(strategy.plugin, StrategyPlugin) and not isinstance(strategy.plugin, NativePositiveEV):
                 manifest = strategy.plugin.manifest
                 if not any(s in manifest.sports for s in (market.sport, "*", "discoverable")):
                     continue
@@ -389,6 +416,8 @@ class Engine:
                  for q in self.quotes.get(market_id, {}).values() if q.source_time and q.status == "active"]
         times += [b.source_time.timestamp() + config.max_book_age_ms / 1000
                   for b in self.books.get(market_id, {}).values() if b.source_time and b.status == "active"]
+        times += [b.source_time.timestamp() + config.max_book_age_ms / 1000
+                  for key,b in self.native.books.items() if key[0] == market_id and b.source_time and b.status == "active"]
         future = [t for t in times if t > now]
         revision = self.expiration_revisions.get(market_id, 0) + 1
         self.expiration_revisions[market_id] = revision
@@ -452,7 +481,10 @@ class Engine:
             event = await self.risk_queue.get()
             try:
                 c = event.payload
-                await self.oms.execute(c, self.markets[c.market_id], self.book(c.market_id, c.venue, c.outcome), self.settings.mode)
+                if isinstance(c, NativeCandidate):
+                    await self.native.execute(c)
+                else:
+                    await self.oms.execute(c, self.markets[c.market_id], self.book(c.market_id, c.venue, c.outcome), self.settings.mode)
                 self.metrics.counters["orders_routed"] += 1
             except RiskRejected as exc:
                 self.metrics.counters["risk_rejections"] += 1
@@ -527,8 +559,9 @@ class Engine:
             settlements = {**self.settlements, result.market_id: {**result.model_dump(mode="json"), "realized_pnl": str(realized)}}
             daily_pnl = self.risk.daily_realized + realized
             await self.storage.save_config("accounting", {
-                "daily_date": self.risk.daily_date.isoformat(), "daily_realized": str(daily_pnl),
-                "settled_order_ids": sorted(settled_ids), "settlements": settlements,
+                "daily_date": self.risk.daily_date.isoformat(),
+                "daily_realized": str(daily_pnl-self.native.manager.realized_today()),
+                "settled_order_ids": sorted(settled_ids-set(self.risk.native_orders)), "settlements": settlements,
             })
             self.risk.settled, self.settlements, self.risk.daily_realized = settled_ids, settlements, daily_pnl
         if self.signal_ledger.started:
@@ -548,21 +581,26 @@ class Engine:
             self.risk.halt("Operator emergency stop")
             await self.storage.save_config("kill_switch", True)
             await self.oms.cancel_all()
+            await self.native.manager.cancel_all()
         elif kill_switch is False:
-            if any(o.status.value == "unknown" for o in self.risk.orders.values()):
+            if any(o.status.value == "unknown" for o in self.risk.all_orders()):
                 raise ValueError("Reconcile unknown orders before resetting")
+            if self.native.manager.invalidated_settlements:
+                raise ValueError("Repair invalidated native settlement accounting before resetting")
             self.risk.kill_switch, self.risk.kill_reason = False, ""
             self.halt_persisted = False
             await self.storage.save_config("kill_switch", False)
         if auto_trade is not None:
             if auto_trade and self.settings.mode not in {"demo", "paper"}:
-                raise ValueError("Native trading requires separate documented live preflight")
+                if not self.settings.live_enabled or not self.native.report().safe_to_arm:
+                    raise ValueError("Native execution requires explicit enablement and all launch checks passing")
             if auto_trade and self.risk.kill_switch:
                 raise ValueError("Reset kill switch first")
             self.risk.auto_trade = auto_trade
             if not auto_trade:
                 await self.oms.cancel_all()
-        await self.notice("info", f"Automatic paper trading: {self.risk.auto_trade}; kill switch: {self.risk.kill_switch}", "operator")
+                await self.native.manager.cancel_all()
+        await self.notice("info", f"Automatic {self.settings.mode} trading: {self.risk.auto_trade}; kill switch: {self.risk.kill_switch}", "operator")
 
     def candidate_public(self, candidate):
         market = self.markets[candidate.market_id]
@@ -610,6 +648,9 @@ class Engine:
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
             "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
             "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
+            "native_orders": [o.model_dump(mode="json") for o in list(self.risk.native_orders.values())[-200:]],
+            "native_signals": [o.model_dump(mode="json") for o in self.native.signals.values()],
+            "native_opportunities": [c.model_dump(mode="json") for c in self.native.candidates.values()],
             "positions": positions, "metrics": metrics,
             "risk": {**self.risk.config.model_dump(mode="json"), "total_exposure": str(self.risk.exposures()),
                      "daily_realized": str(self.risk.daily_realized), "position_conflicts_enforced": True},

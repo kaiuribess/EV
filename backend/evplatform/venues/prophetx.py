@@ -33,17 +33,17 @@ class ProphetXSettings(NativeSettings):
 
 
 def decode_talaria(raw: str | bytes | dict) -> dict:
-    frame = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+    frame = json.loads(raw, parse_float=Decimal) if isinstance(raw, (str, bytes)) else dict(raw)
     if not isinstance(frame, dict):
         raise ValueError("Talaria frame must be an object")
     data = frame.get("data")
     if isinstance(data, str):
-        data = json.loads(data)
+        data = json.loads(data, parse_float=Decimal)
     if isinstance(data, dict) and "payload" in data:
         encoded = data["payload"]
         if not isinstance(encoded, str):
             raise ValueError("Talaria payload must be base64 JSON")
-        payload = json.loads(base64.b64decode(encoded, validate=True))
+        payload = json.loads(base64.b64decode(encoded, validate=True), parse_float=Decimal)
         # Preserve provider publication time separately from per-level updated_at.
         frame["envelope"] = data
         frame["data"] = payload
@@ -105,6 +105,7 @@ class ProphetXClient(NativeTransport):
         self.authenticated = False
         self.reason = ""
         self._signin_confirmed = False
+        self._authenticated_user_id = ""  # Backend-only identity from signed registration, never a key.
         self._confirmed_channels: set[str] = set()
         self._market_frames = 0
         self._refresh_task: asyncio.Task | None = None
@@ -325,9 +326,26 @@ class ProphetXClient(NativeTransport):
             self.health, self.reason = "subscription_rejected", "ProphetX channel quota exceeded"
             raise VenueError("ProphetX channel quota exceeded")
         self.channels = {item["channel_name"]: item for item in data["authorized_channel"]}
+        self._authenticated_user_id = self.registration_user_id(data["authenticated"])
         self._confirmed_channels.clear()
         self.health = "authenticating_stream"
         await self._send_ws({"event": "pusher:signin", "data": data["authenticated"]})
+
+    @staticmethod
+    def registration_user_id(authenticated: dict) -> str:
+        """Read only the two explicitly documented sign-in identity forms."""
+        value = authenticated.get("user_data")
+        if not isinstance(value, str):
+            return ""
+        data = json.loads(value)
+        if not isinstance(data, dict):
+            raise ValueError("ProphetX sign-in user data must be an object")
+        identities = [data[k] for k in ("id", "user_id") if k in data]
+        if not identities:
+            return ""  # Market monitoring can continue; trading identity cannot.
+        if any(not isinstance(v, str) or not v.strip() for v in identities) or len(set(identities)) != 1:
+            raise ValueError("Conflicting ProphetX authenticated user identities")
+        return identities[0]
 
     async def _subscribe_authorized_channels(self):
         for channel in self.channels.values():
@@ -363,6 +381,7 @@ class ProphetXClient(NativeTransport):
         while not self._closed:
             self._last_sequences.clear()
             self._signin_confirmed = False
+            self._authenticated_user_id = ""
             self._confirmed_channels.clear()
             self.channels.clear()
             try:
@@ -422,11 +441,13 @@ class ProphetXClient(NativeTransport):
                     self._refresh_task = None
                 self._ws = None
                 self._signin_confirmed = False
+                self._authenticated_user_id = ""
                 self._confirmed_channels.clear()
 
     async def disconnect(self):
         await super().disconnect()
         self._signin_confirmed = False
+        self._authenticated_user_id = ""
         self._confirmed_channels.clear()
 
     @staticmethod

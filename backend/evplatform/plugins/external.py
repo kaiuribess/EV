@@ -208,6 +208,7 @@ class NativeMonitor(Plugin):
     async def _run(self):
         try:
             async for frame in self.client.stream_updates():
+                await self.engine.native.on_frame(self.manifest.name, self.client, frame)
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
                 if frame.get("type") == "transport_invalidated":
@@ -219,6 +220,8 @@ class NativeMonitor(Plugin):
             raise
         except Exception as exc:
             await self.engine.notice("error", f"Native monitor stopped: {type(exc).__name__}", self.manifest.name)
+        finally:
+            await self.engine.native.on_frame(self.manifest.name, self.client, {"type": "transport_invalidated"})
 
     async def stop(self):
         if self.task:

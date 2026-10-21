@@ -34,6 +34,15 @@ The active monitor reads `NOVIG_API_KEY` and `NOVIG_PRIVATE_KEY_PATH`. Locally p
 
 Native streaming uses `/v3/ws`. Book sequences are per market/channel; private sequences are per subaccount/channel. Gaps invalidate state and reconnect with new subscription snapshots. `place` and `cancel` use request nonces and wait for an acknowledgement; private events are still required. The implementation requests uncompressed frames. See [streaming](https://docs.novig.com/api/streaming/connection) and [private updates](https://docs.novig.com/api/streaming/private).
 
+At the latest restart, six of ten saved sandbox market IDs had settled and were
+no longer in the current catalog; including them caused the subscription to be
+rejected. The four remaining open subscriptions were retained and authenticated
+streaming resumed. Startup/reconnect now checks only the requested IDs and omits
+an ID only when authenticated catalog `MARKET_NOT_FOUND` and market-history
+`SETTLED` agree. Other failures block instead of silently changing scope. The
+requested and excluded counts are reported in health. No new market or trading
+permission is selected by this check.
+
 The paper feed was observed using `orderId` and `outcomeId` where the documentation's book examples use `order` and `outcome`. The parser accepts these specific aliases, validates their types, and rejects conflicting values. A live 46-second paper observation processed 30 books and 48 frames with zero invalidations or reconnects; this is transport evidence, not order-execution validation.
 
 **One Novig contract pays $0.01**, with probability prices and whole-contract quantities. A 110-contract fill at `0.665` costs $0.73150 before fees. The price grid is checked. A client ID is a correlation label, not exchange deduplication; never resend an uncertain placement. See [monetary units](https://docs.novig.com/api/concepts/money) and [placement](https://docs.novig.com/api-reference/execution/place-an-order).
@@ -63,11 +72,21 @@ The bridge requires:
 3. A one-use authorization from the central `RiskAuthority`. The OMS must have persisted the exact client order ID before issuing it.
 4. A supported quantity/payout mapping.
 
-The current core `Order`/`Fill` contract represents whole $1 units. The bridge therefore supports verified Kalshi $1 binary mappings, but **blocks Novig cent-contract and ProphetX USD-stake execution** rather than rounding their partial fills into the wrong unit. Fractional Kalshi fills remain `unknown` until a quantity-aware reconciliation extension is supplied. Raw transports support these native payloads for independent sandbox integration work. The application does not auto-route native trades.
+The legacy paper `Order`/`Fill` contract represents whole $1 units. Native routing now uses a separate `NativeOrderIntent`/`NativeOrder` contract, exact decimal cash and fee accounting, and the same central risk lock and position limits. It supports fractional Kalshi contracts, whole Novig cent contracts, and ProphetX USD stakes without converting them into paper contracts. `native_positive_ev` is disabled by default and consumes verified, source-clocked native books. The guarded native router persists intent and rechecks original executable limits before transmission. Its end-to-end tests are entirely offline.
 
-The bridge returns `acknowledged`, with reconciliation required, for accepted placement. Cancel acknowledgement returns `cancel_pending`; it never releases exposure before reconciling racing fills. Uncertain network outcomes remain unknown and are never retried automatically. Core/native acknowledgement and fill consumers must be integrated and tested before routing is enabled.
+The bridge returns `acknowledged`, with reconciliation required, for accepted placement. Cancel acknowledgement returns `cancel_pending`; it never releases exposure before reconciling racing fills. Uncertain network outcomes remain unknown and are never retried automatically. Restart restores these reservations and requires account reconciliation. Authoritative cumulative quantities, cost, payout and actual fees must agree before a position can settle; later contradictory evidence invalidates settlement durably and stops automation.
 
-Unsupported in this release: automatic account/geo certification, automatic fee-schedule verification, live cross-provider mapping verification, production preflight evidence acquisition, arbitrary fractional core fills, Novig/ProphetX automatic execution through the $1 strategy, native replacement/amend orchestration, RFQs/FIX, and autonomous production settlement. These require explicit extension work, not merely an API key.
+Authenticated read-only account probes bind account identity and inventory for Novig and Kalshi. The current private snapshot/sequence comparison supports Novig; other venues remain blocked until equivalent private-state evidence is implemented and validated. ProphetX identity/balance can be read, but incomplete inventory and actual fill-fee evidence block financial completion. Numeric ProphetX quote clocks require a reviewed unit declaration because the inspected official schema does not specify the unit.
+
+Unsupported in this release: automatic account/geo certification, automatic fee-schedule verification, live cross-provider mapping verification, production preflight evidence acquisition, native replacement/amend orchestration, RFQs/FIX, and general settlement across arbitrary/shared positions. These are visible launch blockers, not conditions bypassed by supplying an API key. See [the launch guide](GO_LIVE.md) for required evidence and configuration.
+
+### Restricted Novig settlement reconciliation
+
+The native Novig bridge explicitly submits IOC orders. Its read-only settlement adapter accepts an ordinary WIN/LOSS only when one fully reconciled terminal order owns the entire native market position. It verifies the authenticated wallet, full market fill history, taker-only fills, actual position quantity/cost/payout/P&L, actual execution fees, and matching market/position settlement timestamps. It never allocates one shared position across several local orders. Tests use documented offline responses, not actual cash settlement.
+
+PUSH, FMV, maker credits, external/netted positions, and remediation remain blocked for cash review. The [position history schema](https://docs.novig.com/api-reference/history/get-a-position-from-history) provides payout and cost but no separately attributed settlement fee/refund. The [transaction ledger](https://docs.novig.com/api-reference/accounts/list-transactions) identifies the other account in `ref`; it does not document an order/position link for allocating fee or adjustment rows. Therefore this restricted adapter does not satisfy the general unattended-settlement readiness check. A changed or unverifiable previously accepted settlement invalidates its accounting and halts automation.
+
+Novig's [v3 fee contract](https://docs.novig.com/api/concepts/fees) explicitly omits `fee` from an uncharged REST fill, which is normalized to zero only for that documented schema. Private fill messages carry no fee evidence and cannot establish a zero fee. Actual native numeric JSON values are parsed as decimals before normalization.
 
 ## When native credentials arrive
 
@@ -87,7 +106,7 @@ PROPHETX_SECRET_KEY=
 3. Run `connect()`, discovery, and read-only subscriptions. Inspect real native fixtures before approving aliases, player identity, lines, settlement rules, fees, and units.
 4. Use `stream_updates()` concurrently with any native WebSocket commands. Preserve per-level source timestamps; do not replace them with the reconnect time.
 5. Run account-authorized sandbox lifecycle checks for rejection, unknown transmission, cancel/fill races, partial fills, reconnect, and restart. Record actual exchange IDs and timestamps.
-6. Complete the missing bridge/OMS/unit/fee extensions described above. Production still requires venue eligibility, explicit application configuration, and a successful current preflight.
+6. Build the reviewed `data/native_mappings.json` and account-bound `data/launch_profile.json` described in [GO_LIVE.md](GO_LIVE.md). Check the dashboard's current blockers. Production still requires venue eligibility, real lifecycle/settlement evidence, explicit application configuration, and a successful current preflight.
 
 Neither adding a key nor starting demo mode sends a native order. The `.env` placeholders are not a claim that these clients have already connected.
 
