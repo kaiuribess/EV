@@ -40,8 +40,16 @@ export function providerFacts(health: Record<string, unknown>, now = Date.now())
   for (const [field, label] of [['frames', 'Received messages'], ['market_frames', 'Market payloads'],
     ['market_messages', 'Market messages'], ['mapped_quotes', 'Mapped quotes'],
     ['quarantined', 'Quarantined quotes'], ['monitored_books', 'Monitored books'],
-    ['orderbook_markets', 'Order-book markets']] as const) {
+    ['orderbook_markets', 'Order-book markets'], ['out_of_scope_prop_rows', 'Out-of-scope prop rows']] as const) {
     if (field in health) facts.push({ label, value: count(health[field]) })
+  }
+  for (const [field, label] of [['ready_sports', 'Ready sport streams'],
+    ['complete_baseline_sports', 'Complete game-board baselines']] as const) {
+    if (field in health) {
+      const value = health[field]
+      facts.push({ label, value: Array.isArray(value) && value.every(item => typeof item === 'string')
+        ? count(value.length) : 'Unavailable' })
+    }
   }
   return facts
 }

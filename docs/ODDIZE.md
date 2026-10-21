@@ -114,6 +114,13 @@ It cannot measure sportsbook-to-client latency from this schema.
 The extraction layer preserves provider IDs, book codes, exact player subjects,
 thresholds, and opposing spread points. Player, team, book, event and threshold
 identities must match before rows are paired. Different lines remain separate.
+The flat event-props endpoint can return unrelated offer types despite an
+explicit `prop_types` filter. The adapter counts and removes those rows before
+normalization; a malformed row within the requested type still fails closed.
+An observed October 21, 2026 MLB `pitcher_k` request returned 54 requested
+rows among 1,381 total, with 1,327 unrelated rows excluded. Five requested
+rows had both sides, from BetRivers and FanDuel only. This is one event at one
+time, not proof of general MLB strikeout coverage or a usable Circa quote.
 `team1` is the **away** team and `team2` is the **home** team in the official
 contract. Unknown identities, duplicate outcomes, invalid prices and uncertain
 settlement mappings are quarantined by `VerifiedProviderMapper`.

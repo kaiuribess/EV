@@ -47,3 +47,10 @@ test('market and book diagnostics remain separate from private traffic', () => {
     'Market messages': '0', 'Monitored books': '1', 'Order-book markets': '0',
   })
 })
+test('a connected sport stream is distinct from a provider-confirmed complete game board', () => {
+  assert.deepEqual(facts({ ready_sports: ['nba', 'nfl'], complete_baseline_sports: ['nba'],
+    quarantined: 20, out_of_scope_prop_rows: 4 }), {
+    'Quarantined quotes': '20', 'Out-of-scope prop rows': '4',
+    'Ready sport streams': '2', 'Complete game-board baselines': '1',
+  })
+})

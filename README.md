@@ -67,13 +67,24 @@ odds**, run this from PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\start_live_paper.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup_live_inputs.ps1
 ```
 
 The launcher stops a paused demo instance on port 8001, opens
 `data/live-paper.db`, and restores its enabled input and account-monitor
 plugins. It never copies synthetic trade history or trading authorization.
-It enables **simulated paper automation** after provider setup unless you pass
-`-Paused` or an emergency stop is active. Native execution stays off. The Provider Center shows
+The second command pauses paper automation and configures four priority sports
+across a broad Parlay prop stream, a separate game-line stream, and scheduled
+REST discovery. The game-line stream requests the provider's complete-board
+shape and records which sports actually receive a confirmed complete baseline.
+If the paper workspace still uses legacy equal weights, this command also
+loads the supplied four research profiles without authorizing execution.
+This configuration uses the backend-only Parlay key. It makes an estimated 24
+REST credits per 15-minute cycle when all four sports are subscribed; check
+the provider's actual usage headers and account balance in Provider Center.
+By itself, the launcher enables **simulated paper automation** unless you pass
+`-Paused` or an emergency stop is active; `setup_live_inputs.ps1` pauses it
+while updating feed scopes. Native execution stays off. The Provider Center shows
 which live messages arrived and which quotes remain quarantined. A connection
 or message is not evidence of a current, comparable quote. The current feeds
 have no reviewed sportsbook-to-market mappings, and the native exchange monitors
@@ -81,6 +92,10 @@ do not route orders into the paper simulator. This workspace therefore receives
 real data but cannot yet produce live-input paper trades. The synthetic demo
 remains available separately for end-to-end paper order testing.
 Running the launcher again retains its separate provider settings.
+For an explicitly paused start, use `start_live_paper.ps1 -Paused` before
+`setup_live_inputs.ps1`. A complete provider game board is only a scoped
+baseline; it does not verify each retained price is still offered or that an
+exchange contract has equivalent settlement rules.
 
 Useful commands:
 

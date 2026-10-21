@@ -188,6 +188,35 @@ async def test_event_id_literal_slashes_and_explicit_prop_types():
         assert provider.quota.billable_requests == 2
 
 
+async def test_event_props_keep_only_requested_market_when_server_returns_unrelated_rows():
+    wanted = props_row(subject="Example Player", side="Over")
+    unrelated = {**wanted, "offer_type": "alt_s", "subject": None, "side": "HOME"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"event_id": "event-1", "sport": "nba",
+                                                  "props": [wanted, unrelated]})
+    )) as client:
+        provider = OddizeRest({"enabled": True}, client=client, credential="offline-secret")
+        result = await provider.fetch_event_props("nba", "event-1", prop_types=["player_pts"])
+        assert result.metadata["out_of_scope_prop_rows"] == 1
+        assert result.metadata["requested_prop_types"] == ["player_pts"]
+        offers = extract_offers(result)
+        assert len(offers) == 1
+        assert offers[0].market_key == "player_pts"
+        assert (await provider.health_check())["out_of_scope_prop_rows"] == 1
+
+
+async def test_requested_oddize_prop_with_missing_player_remains_invalid():
+    invalid = props_row(subject=None)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"event_id": "event-1", "sport": "nba",
+                                                  "props": [invalid]})
+    )) as client:
+        provider = OddizeRest({"enabled": True}, client=client, credential="offline-secret")
+        result = await provider.fetch_event_props("nba", "event-1", prop_types=["player_pts"])
+        with pytest.raises(ValueError, match="subject identity missing"):
+            extract_offers(result)
+
+
 async def test_delta_is_not_a_complete_baseline():
     async with httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, json={"sport": "nba", "events": []})

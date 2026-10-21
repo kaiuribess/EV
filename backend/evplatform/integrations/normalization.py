@@ -532,7 +532,7 @@ def _oddize_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
 def extract_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
     if envelope.kind not in {"snapshot", "props_snapshot", "initial_state", "odds_update"}:
         return []
-    if envelope.provider_id == "parlay_ws":
+    if envelope.provider_id in {"parlay_ws", "parlay_game_ws"}:
         return _parlay_rows(envelope, envelope.payload.get("data", []))
     if envelope.provider_id == "parlay_rest":
         if envelope.kind == "props_snapshot":

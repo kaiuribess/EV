@@ -18,7 +18,7 @@ import httpx
 from pydantic import Field, field_validator
 
 from .base import (
-    Backoff, ProviderConfig, ProviderDisabled, ProviderEnvelope, ProviderError,
+    Backoff, ProtocolError, ProviderConfig, ProviderDisabled, ProviderEnvelope, ProviderError,
     ProviderState, QuotaExceeded, QuotaGuard, RestProvider, UnsupportedOperation, parse_timestamp,
     provider_manifest, safe_component,
 )
@@ -115,6 +115,7 @@ class OddizeRest(RestProvider):
         self.sport_catalog: list[dict] = []
         self.book_catalog: list[dict] = []
         self.market_catalog: list[dict] = []
+        self.out_of_scope_prop_rows = 0
 
     def auth(self) -> tuple[dict[str, str], dict[str, str]]:
         return {"X-API-Key": self._credential}, {}
@@ -195,8 +196,21 @@ class OddizeRest(RestProvider):
         if not prop_types:
             raise UnsupportedOperation("Choose discovered prop_types explicitly; the endpoint defaults to team totals")
         result = await self.request(_event_path(sport, event_id) + "/props", params={"prop_types": prop_types}, cost=2)
-        return replace(result, kind="props_snapshot", metadata={**result.metadata, "sport": sport,
-                                                                "event_id": event_id, "odds_format": "american"})
+        body = result.payload
+        rows = body.get("props") if isinstance(body, dict) else None
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ProtocolError("Oddize event props response has no valid flat row array")
+        # The live API can return other offer types despite a prop_types filter.
+        # Never reclassify a team spread or unrelated prop as the requested
+        # player market. Record the mismatch; normalize only exact requested IDs.
+        requested = set(prop_types)
+        selected = [row for row in rows if row.get("offer_type") in requested]
+        excluded = len(rows) - len(selected)
+        self.out_of_scope_prop_rows += excluded
+        return replace(result, kind="props_snapshot", payload={**body, "props": selected},
+                       metadata={**result.metadata, "sport": sport, "event_id": event_id,
+                                 "odds_format": "american", "requested_prop_types": list(prop_types),
+                                 "out_of_scope_prop_rows": excluded})
 
     async def discover_prop_events(self, sport: str, *, prop_type: str, limit: int = 50) -> ProviderEnvelope:
         """Read the documented grouped discovery view, without guessing its odds shape.
@@ -282,6 +296,7 @@ class OddizeRest(RestProvider):
                 "discovered_sports": [row.get("sport") for row in self.sport_catalog if isinstance(row, dict)],
                 "discovered_books": [row.get("code") for row in self.book_catalog if isinstance(row, dict)],
                 "last_credits_cost": self.quota.last_cost,
+                "out_of_scope_prop_rows": self.out_of_scope_prop_rows,
                 "source_clock": "Oddize observation time; sportsbook-origin latency is unknown"}
 
 

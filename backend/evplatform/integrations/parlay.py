@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlencode
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
@@ -27,8 +27,28 @@ class ParlayConfig(ProviderConfig):
     stream_kinds: list[Literal["game", "prop"]] = Field(default_factory=list)
     max_age_seconds: int = Field(default=30, ge=1, le=3600)
     stream_limit: int = Field(default=1000, ge=1, le=1000)
+    props_limit: int = Field(default=1000, ge=1, le=10000)
     watchdog_seconds: float = Field(default=90, ge=10, le=180)
     account_tier: Literal["unknown", "free", "starter", "pro", "business", "enterprise", "scale"] = "unknown"
+
+
+class ParlayGameBoardConfig(ParlayConfig):
+    """The provider's documented complete-baseline request shape."""
+    bookmakers: list[str] = Field(default_factory=lambda: [
+        "pinnacle", "fanduel", "draftkings", "caesars", "betonline", "bet365",
+    ])
+    markets: list[str] = Field(default_factory=lambda: ["h2h", "spreads", "totals"])
+    stream_kinds: list[Literal["game", "prop"]] = Field(default_factory=lambda: ["game"])
+    include_props: bool = False
+
+    @model_validator(mode="after")
+    def complete_board_filters(self):
+        if (not self.bookmakers or len(set(self.bookmakers)) != len(self.bookmakers)
+                or any(not book or book != book.strip() for book in self.bookmakers)
+                or set(self.markets) != {"h2h", "spreads", "totals"}
+                or len(self.markets) != 3 or self.stream_kinds != ["game"] or self.include_props):
+            raise ValueError("Complete game board needs named books and full-game h2h, spreads, totals only")
+        return self
 
 
 class ParlayRest(RestProvider):
@@ -71,7 +91,7 @@ class ParlayRest(RestProvider):
         return replace(result, metadata={**result.metadata, "sport": sport, "odds_format": "decimal"})
 
     async def fetch_props(self, sport: str, **filters: Any) -> ProviderEnvelope:
-        params: dict[str, Any] = {"maxAgeSec": self.config.max_age_seconds, "limit": 1000}
+        params: dict[str, Any] = {"maxAgeSec": self.config.max_age_seconds, "limit": self.config.props_limit}
         if self.config.bookmakers:
             params["bookmakers"] = ",".join(self.config.bookmakers)
         params.update(filters)
@@ -96,6 +116,7 @@ class ParlayWebSocket(ParlayRest):
         self._queue: asyncio.Queue[ProviderEnvelope] | None = None
         self._server_connections: dict[str, dict[str, Any]] = {}
         self._ready_sports: set[str] = set()
+        self._complete_baseline_sports: set[str] = set()
         self.reconnects = 0
 
     async def connect(self) -> bool:
@@ -110,6 +131,7 @@ class ParlayWebSocket(ParlayRest):
     def _record_connection(self, sport: str, payload: dict[str, Any]) -> None:
         # Health exposes only documented non-secret connection fields.
         self._ready_sports.discard(sport)
+        self._complete_baseline_sports.discard(sport)
         details: dict[str, Any] = {}
         tier = payload.get("tier")
         if isinstance(tier, str) and tier in {"free", "starter", "pro", "business", "enterprise", "scale"}:
@@ -131,6 +153,7 @@ class ParlayWebSocket(ParlayRest):
             "authenticated": bool(authenticated_sports),
             "streaming": bool(ready_sports),
             "ready_sports": sorted(ready_sports),
+            "complete_baseline_sports": sorted(self._complete_baseline_sports.intersection(ready_sports)),
             "awaiting_snapshot_sports": sorted(authenticated_sports - ready_sports),
             "configured_account_tier": self.config.account_tier,
             "server_connections": {sport: dict(details) for sport, details in self._server_connections.items()},
@@ -249,6 +272,10 @@ class ParlayWebSocket(ParlayRest):
                             has_snapshot = True
                             if sport in self._server_connections:
                                 self._ready_sports.add(sport)
+                            if envelope.snapshot_complete:
+                                self._complete_baseline_sports.add(sport)
+                            else:
+                                self._complete_baseline_sports.discard(sport)
                             backoff.reset()
                             self.state, self.reason = ProviderState.CONNECTED, "Receiving authenticated stream"
                             if event_id := self._event_filters.get(sport):
@@ -272,6 +299,7 @@ class ParlayWebSocket(ParlayRest):
                 self._sockets.pop(sport, None)
                 self._server_connections.pop(sport, None)
                 self._ready_sports.discard(sport)
+                self._complete_baseline_sports.discard(sport)
             await queue.put(ProviderEnvelope(
                 self.provider_id, "feed_invalidated", {"sport": sport, "reason": self.reason},
                 datetime.now(UTC), time.perf_counter_ns(),
@@ -311,9 +339,16 @@ class ParlayWebSocket(ParlayRest):
         self._closed = True
         self._server_connections.clear()
         self._ready_sports.clear()
+        self._complete_baseline_sports.clear()
         for socket in list(self._sockets.values()):
             await socket.close()
         await super().disconnect()
+
+
+class ParlayGameBoardWebSocket(ParlayWebSocket):
+    """Independent game-line stream; prop coverage remains on parlay_ws."""
+    provider_id = "parlay_game_ws"
+    config_class = ParlayGameBoardConfig
 
 
 ParlayRest.manifest = provider_manifest(
@@ -326,4 +361,12 @@ ParlayWebSocket.manifest = provider_manifest(
     config=ParlayConfig, docs=["https://parlay-api.com/docs/websocket", "https://parlay-api.com/v1/asyncapi.json"],
     limitations=["Business tier or higher; 4001 disables the stream.", "No documented lossless sequence/replay cursor.",
                  "A recent_rows snapshot is incomplete; frame timestamps are provider send clocks."],
+)
+ParlayGameBoardWebSocket.manifest = provider_manifest(
+    "parlay_game_ws", "ParlayAPI complete game board WebSocket", transports=["websocket"],
+    env="PARLAY_API_KEY", config=ParlayGameBoardConfig,
+    docs=["https://parlay-api.com/docs/websocket", "https://parlay-api.com/v1/asyncapi.json"],
+    limitations=["Business tier or higher; 4001 disables the stream.",
+                 "The baseline is complete only when the server confirms its scope, completeness and no truncation.",
+                 "A complete board does not prove each retained quote is currently active upstream."],
 )
