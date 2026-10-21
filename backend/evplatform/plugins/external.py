@@ -60,6 +60,12 @@ class ProviderBridge(InputPlugin):
                     source=self.manifest.name, payload=ProviderFrame(
                         provider_id="parlay_game_ws", kind="feed_invalidated",
                         payload={"sport": sport}, received_at=now, metadata={"sport": sport})))
+        oddize_paper = self.engine.registry.records.get("oddize_paper_input")
+        if self.manifest.name == "oddize_rest" and oddize_paper and oddize_paper.enabled:
+            await self.context.bus.publish(Envelope(schema_name="provider.frame",
+                source=self.manifest.name, payload=ProviderFrame(
+                    provider_id="oddize_rest", kind="feed_invalidated", payload={},
+                    received_at=utcnow())))
         for values in self.engine.quotes.values():
             for quote in list(values.values()):
                 if quote.provider == self.manifest.name:
@@ -75,6 +81,14 @@ class ProviderBridge(InputPlugin):
                 # hit account connection limits and split snapshot state.
                 paper = self.engine.registry.records.get("parlay_paper_input")
                 if (self.manifest.name == "parlay_game_ws" and paper and paper.enabled):
+                    await self.context.bus.publish(Envelope(schema_name="provider.frame",
+                        source=self.manifest.name, payload=ProviderFrame(
+                            provider_id=raw.provider_id, kind=raw.kind, payload=raw.payload,
+                            received_at=raw.received_at, published_at=raw.published_at,
+                            snapshot_complete=raw.snapshot_complete, metadata=raw.metadata)))
+                oddize_paper = self.engine.registry.records.get("oddize_paper_input")
+                if (self.manifest.name == "oddize_rest" and oddize_paper and oddize_paper.enabled
+                        and raw.kind in {"snapshot", "feed_invalidated"}):
                     await self.context.bus.publish(Envelope(schema_name="provider.frame",
                         source=self.manifest.name, payload=ProviderFrame(
                             provider_id=raw.provider_id, kind=raw.kind, payload=raw.payload,

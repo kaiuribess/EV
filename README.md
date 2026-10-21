@@ -92,6 +92,14 @@ distinct sportsbooks. It excludes the quoted target book from its own fair
 estimate, requires Pinnacle plus another fresh book, checks both power and
 proportional devigging, and records positive and negative paper signals. A
 qualifying signal passes the central risk engine into the local simulator.
+The same live-paper workspace also enables the metered Oddize NBA moneyline
+feed as a supplemental reference. A paper-only matcher links exact known team
+codes and a unique game within a 15-minute scheduled-start difference to the
+Parlay board. It preserves Oddize's source observation time, deduplicates the
+same sportsbook across vendors, and excludes quotes older than 10 minutes
+from paper EV. Matched but old quotes remain visible with their age in Market
+Detail. Oddize's Developer allowance paces this REST feed to roughly hourly
+NBA snapshots; it is not a live stream or verified native trading evidence.
 For this paper experiment the complete Parlay game board may retain a price
 whose `last_update` is up to 10 minutes old. Its source timestamp stays intact.
 Opposing moneyline sides must have price-change clocks within 30 seconds of

@@ -30,6 +30,7 @@ from .plugins.paper import PaperVenue
 from .plugins.positive_ev import PositiveEV
 from .plugins.native_positive_ev import NativePositiveEV
 from .plugins.parlay_paper import ParlayPaperEV, ParlayPaperInput
+from .plugins.oddize_paper import OddizePaperInput
 
 
 class Notice(Contract):
@@ -82,6 +83,7 @@ class Engine:
         self.registry.register(ParlayPaperEV(), enabled=(self.settings.mode == "paper"
             and not self.settings.sample_feed_enabled))
         self.registry.register(ParlayPaperInput(self), enabled=False)
+        self.registry.register(OddizePaperInput(self), enabled=False)
         self.registry.register(self.paper, enabled=True)
         self.registry.configure("synthetic_schedule", {"interval": self.settings.demo_interval, "seed": self.settings.demo_seed})
         self.registry.configure("positive_ev", self.settings.pricing.model_dump(mode="json"))
@@ -757,8 +759,14 @@ class Engine:
         market = self.markets.get(quote.market_id)
         strict = self.settings.pricing.reference_profile_mode == "strict"
         eligible, reasons, age = quote_eligibility(self.settings.pricing, market, quote, utcnow()) if market else (False, ("Unknown market",), None)
+        paper_age = quote.age_ms()
+        paper_usable = (bool(market and market.extensions.get("paper_only"))
+            and quote.provider in {"parlay_paper_input", "oddize_paper_input"}
+            and quote.status == "active" and quote.quality == 1.0
+            and paper_age is not None and 0 <= paper_age <= 600000)
         return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": age,
                 "execution_freshness_reasons": reasons if strict else (),
+                "paper_comparison_usable": paper_usable,
                 "fresh": quote.status == "active" and (eligible if strict else quote.fresh(self.settings.pricing.max_quote_age_ms))}
 
     def market_detail(self, market_id):

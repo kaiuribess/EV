@@ -96,6 +96,27 @@ a **scheduling budget**, not a persistent accounting ledger across restarts or
 manual diagnostic calls. The server's actual remaining balance and the local
 session credit cap are independently enforced before requests.
 
+## Live-paper comparison with Parlay
+
+`setup_live_inputs.ps1` enables `oddize_rest` for NBA moneylines and the
+`oddize_paper_input` consumer in sample-free paper mode. The consumer reuses
+authenticated REST snapshots already fetched by `oddize_rest`; it makes no
+independent Oddize requests. Its NBA team codes were checked against the
+account's free `/api/v1/sports/nba/teams` catalog. A quote is attached only
+to one Parlay paper game with the same home/away teams and a start time no
+more than 15 minutes apart. Unknown teams, ambiguous games, incomplete or
+timestamp-mismatched sides, and non-moneyline prices are not paper-priced.
+
+The paper strategy uses Oddize's source **observation** timestamp, not HTTP
+receipt, and requires it to be at most 10 minutes old. Both API copies of
+one book count as one independent reference; equally timed conflicting copies
+block the comparison. A matched stale Circa quote can be inspected but has
+zero paper pricing weight. The Developer plan's hourly REST cadence means
+many returned quotes will be stale even when the API is healthy. This scope
+currently covers NBA pregame moneylines only. No Oddize player props or other
+sports are paper-matched, and no Oddize data is treated as verified native
+execution evidence. Paper offers, depth, and fills are simulated.
+
 All metadata reads cost zero credits but still count toward the request rate.
 The plugin observes `X-Credits-Cost`, `X-Credits-Remaining`,
 `X-RateLimit-Limit`, and `X-RateLimit-Remaining`; a cache hit still costs credits.

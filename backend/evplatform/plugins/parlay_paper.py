@@ -418,8 +418,18 @@ class ParlayPaperEV(StrategyPlugin):
         if (age_ms < 0 or age_ms > settings.max_quote_age_ms or book.outcome not in target_quote.decimal_odds
                 or not book.asks or book.asks[0].price != Decimal(1) / target_quote.decimal_odds[book.outcome]):
             raise NoSignal("Target sportsbook quote is expired or differs from the assumed paper offer")
-        independent = [q for q in quotes if q.provider == "parlay_paper_input"
+        independent = [q for q in quotes if q.provider in {"parlay_paper_input", "oddize_paper_input"}
                        and q.bookmaker != target and q.quality == 1.0]
+        # Multiple vendors carrying the same bookmaker are one reference. If
+        # they disagree at the identical source observation clock, neither
+        # receipt order nor the more favorable price may choose the winner.
+        by_book_clock = {}
+        for reference in independent:
+            key = reference.bookmaker, reference.source_time
+            previous = by_book_clock.get(key)
+            if previous is not None and previous.decimal_odds != reference.decimal_odds:
+                raise NoSignal("Conflicting same-clock sportsbook copies")
+            by_book_clock[key] = reference
         primary_config, profile_name = self._config(market, target, shared, devig="power")
         sensitivity_config, _ = self._config(market, target, shared, devig="proportional")
         primary = fair_value(market, independent, primary_config)

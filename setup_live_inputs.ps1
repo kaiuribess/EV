@@ -10,6 +10,8 @@ $books = @('pinnacle', 'fanduel', 'draftkings', 'caesars', 'betonline', 'bet365'
 
 $state = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 $native = Invoke-RestMethod -Uri "$baseUrl/api/native/orders" -TimeoutSec 10
+$oddizePaperWasEnabled = @($state.plugins | Where-Object { $_.manifest.name -eq 'oddize_paper_input' -and $_.enabled }).Count -eq 1
+$oddizeRestWasEnabled = @($state.plugins | Where-Object { $_.manifest.name -eq 'oddize_rest' -and $_.enabled }).Count -eq 1
 $isPaper = $state.mode -eq 'paper' -and $state.sample_feed_enabled -eq $false -and
     $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0
 $isNative = $state.mode -in @('sandbox', 'production') -and $state.sample_feed_enabled -eq $false -and
@@ -72,7 +74,19 @@ if ($isPaper) {
         max_age_seconds = 600; max_poll_age_seconds = 180;
         include_props = $false; account_tier = 'unknown'
     }
+    Configure-Input 'oddize_paper_input' @{
+        sports = @('nba'); max_observation_age_seconds = 600;
+        max_start_difference_minutes = 15
+    }
     Configure-Input 'parlay_paper_ev' @{ max_quote_age_ms = 600000; min_references = 2 }
+}
+# Start the consumer before the REST source on a fresh paper workspace, so
+# its first metered snapshot need not be fetched twice.
+Configure-Input 'oddize_rest' @{
+    sports = @('nba'); bookmakers = @('pin', 'circa', 'dk', 'fd'); markets = @('ml');
+    poll_interval_seconds = [double]3600; session_request_budget = 30;
+    monthly_credit_budget = 1200; include_past = $false;
+    use_delta_polling = $false; include_props = $false
 }
 # REST is scheduled discovery. Four sports × (3 game-market credits + 3 prop
 # credits) per 15-minute cycle is an estimated 24 Parlay credits/cycle;
@@ -137,6 +151,14 @@ if ($isPaper) {
         -ContentType 'application/json' -Body '{"enabled":false}' -TimeoutSec 30 | Out-Null
     Invoke-RestMethod -Uri "$baseUrl/api/plugins/parlay_game_ws/toggle" -Method Post -Headers $headers `
         -ContentType 'application/json' -Body '{"enabled":true}' -TimeoutSec 30 | Out-Null
+    if ($oddizeRestWasEnabled -and -not $oddizePaperWasEnabled) {
+        # The newly enabled consumer missed the older source snapshot. Fetch
+        # one new metered snapshot; subsequent setup runs keep the poll timer.
+        Invoke-RestMethod -Uri "$baseUrl/api/plugins/oddize_rest/toggle" -Method Post -Headers $headers `
+            -ContentType 'application/json' -Body '{"enabled":false}' -TimeoutSec 30 | Out-Null
+        Invoke-RestMethod -Uri "$baseUrl/api/plugins/oddize_rest/toggle" -Method Post -Headers $headers `
+            -ContentType 'application/json' -Body '{"enabled":true}' -TimeoutSec 30 | Out-Null
+    }
 }
 
 $result = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
@@ -157,12 +179,12 @@ if ($EnablePaperAutomation) {
     $result = Invoke-RestMethod -Uri "$baseUrl/api/control" -Method Post -Headers $headers `
         -ContentType 'application/json' -Body '{"auto_trade":true}' -TimeoutSec 10
 }
-Write-Host 'Configured shared Parlay prop stream, complete game-board stream, and 15-minute REST discovery.' -ForegroundColor Green
+Write-Host 'Configured Parlay streaming/discovery and hourly Oddize NBA REST references.' -ForegroundColor Green
 Write-Host 'The same research profiles and weights are configured for paper and native workspaces.'
 Write-Host "Workspace: $($result.mode). Automatic orders: $($result.auto_trade). Dashboard: $baseUrl"
 Write-Host 'Source feeds may need several seconds to authenticate and publish a snapshot. Check Provider Center.'
 if ($isPaper) {
-    Write-Host 'Paper comparison: live Parlay prices; hypothetical offers, capacity and fills; $5 simulated stake cap.'
+    Write-Host 'Paper comparison: Parlay targets plus matched Oddize NBA references; hypothetical offers, capacity and fills; $5 simulated stake cap.'
 } else {
     Write-Host 'Native risk draft: quarter-Kelly, $5 reporting unit, verified available cash required; real stake authorization remains off.'
 }
