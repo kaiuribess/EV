@@ -94,6 +94,20 @@ backend rechecks the gate before changing the emergency stop, and again after
 the persistence wait. A rejected combined enable/reset cannot silently clear
 the previous stop. A missing or stale response displays readiness as unconfirmed.
 
+For Novig, check the configured production trading key and wallet without
+placing an order or moving money:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/setup_novig.py verify-trading
+```
+
+This signed, read-only check compares the locally configured private signer to
+Novig's registered trading-key fingerprint, confirms the key has `trading`
+scope and a live subaccount, and compares management and personal balance reads.
+The management key is used only by this short-lived command, not loaded into the
+trading runtime. A passing result does not verify order-time location eligibility,
+spendable cash semantics, a real fill or the sportsbook/native market match.
+
 ### Review and place one native order manually
 
 The Trading desk has a separate **Place one trade manually** panel in a paused

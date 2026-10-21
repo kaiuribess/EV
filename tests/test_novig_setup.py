@@ -190,6 +190,54 @@ async def test_status_is_only_read_only_and_never_exposes_private_key(setup_case
     assert "PRIVATE KEY" not in encoded and "Novig-Signature" not in encoded
 
 
+async def test_configured_trading_key_verification_is_read_only(setup_case):
+    helper, exchange, confirmation, _ = setup_case
+    journal = await helper.prepare("OFFLINE wallet")
+    await helper.open_wallet(journal)
+    state = json.loads(journal.read_text())
+    exchange.wallet_balance = "25.00000"
+    exchange.wallets[0]["balance"] = "25.00000"
+    exchange.requests.clear()
+    confirmation.requests.clear()
+
+    result = await helper.verify_trading(state["trading_key_id"], state["private_key_path"])
+
+    assert result["trading_key_verified"] and result["signer_matches_registered_key"]
+    assert result["live_wallet_verified"] and result["balance_usd"] == "25.00000"
+    assert not result["location_eligibility_verified"] and not result["order_placement_tested"]
+    assert not result["trading_enabled"]
+    assert exchange.requests and all(request.method == "GET" for request in exchange.requests)
+    assert not confirmation.requests
+    assert "PRIVATE KEY" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("mutation", ["wrong_signer", "read_scope", "missing_wallet", "balance_mismatch"])
+async def test_trading_key_verification_rejects_identity_or_inventory_mismatch(setup_case, mutation):
+    helper, exchange, _, tmp_path = setup_case
+    journal = await helper.prepare("OFFLINE wallet")
+    await helper.open_wallet(journal)
+    state = json.loads(journal.read_text())
+    signer_path = state["private_key_path"]
+    if mutation == "wrong_signer":
+        wrong = Ed25519PrivateKey.generate()
+        replacement = tmp_path / "wrong-offline.pem"
+        replacement.write_bytes(wrong.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        signer_path = str(replacement)
+    elif mutation == "read_scope":
+        exchange.keys[WALLET_ID]["scope"] = "trading::read"
+    elif mutation == "missing_wallet":
+        exchange.wallets.clear()
+    else:
+        exchange.wallets[0]["balance"] = "24.00000"
+    exchange.requests.clear()
+
+    with pytest.raises(SetupError):
+        await helper.verify_trading(state["trading_key_id"], signer_path)
+
+    assert exchange.requests and all(request.method == "GET" for request in exchange.requests)
+
+
 async def test_prepare_does_not_open_or_fund_and_open_intent_is_durable_before_post(setup_case):
     helper, exchange, confirmation, _ = setup_case
     journal = await helper.prepare("OFFLINE wallet")

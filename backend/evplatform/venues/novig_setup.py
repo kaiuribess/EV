@@ -349,6 +349,42 @@ class NovigSetup:
             "live_trading_keys": sum(row["scope"] == "trading" for row in keys), "live_subaccounts": len(wallets),
             "subaccount_balances_usd": [row["balance"] for row in wallets], "trading_enabled": False}
 
+    async def verify_trading(self, key_id: str, private_key_path: str):
+        """Compare one configured production signer and wallet using GETs only.
+
+        This is an operator diagnostic, not an execution or location attestation.
+        Keep the management credential out of the long-running trading process.
+        """
+        key_id = _uuid(key_id)
+        if not private_key_path:
+            raise SetupError("production_trading_credentials_missing")
+        await self._management()
+        row = _key(await self.transport.request("GET", f"/v3/keys/{key_id}"))
+        personal = NovigSetupTransport(NovigSettings(environment="production", api_key=key_id,
+            private_key_path=private_key_path), http=self.transport.http)
+        try:
+            signer = personal.client._load_key()
+        except (ValueError, OSError, TypeError):
+            raise SetupError("trading_signer_unavailable") from None
+        algorithm = "Ed25519" if isinstance(signer, ed25519.Ed25519PrivateKey) else "P-256" if (
+            isinstance(signer, ec.EllipticCurvePrivateKey) and isinstance(signer.curve, ec.SECP256R1)) else None
+        if (row["keyId"] != key_id or row["scope"] != "trading" or row["fingerprint"] != _fingerprint(signer)
+                or row["algorithm"] != algorithm or row["restriction"] is None):
+            raise SetupError("trading_key_identity_or_scope_mismatch")
+        wallets = _rows(await self.transport.request("GET", "/v3/account/subaccounts"), _wallet)
+        matches = [wallet for wallet in wallets if wallet["keyId"] == key_id]
+        if len(matches) != 1:
+            raise SetupError("trading_key_has_no_live_wallet")
+        endpoint = f"/v3/account/subaccounts/{key_id}/balance"
+        management_balance = _balance(await self.transport.request("GET", endpoint), key_id)
+        personal_balance = _balance(await personal.request("GET", endpoint), key_id)
+        if not (matches[0]["balance"] == management_balance == personal_balance):
+            raise SetupError("wallet_changed_during_verification")
+        return {"environment": "production", "trading_key_verified": True,
+            "signer_matches_registered_key": True, "live_wallet_verified": True,
+            "balance_usd": personal_balance, "location_eligibility_verified": False,
+            "order_placement_tested": False, "trading_enabled": False}
+
     async def prepare(self, label: str) -> Path:
         if not isinstance(label, str) or not label.strip() or len(label) > 64 or any(ord(c) < 32 for c in label):
             raise SetupError("label_must_be_one_to_64_printable_characters")

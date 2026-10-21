@@ -21,4 +21,5 @@ artifacts/
 .pytest-*/
 .pytest_tmp*/
 .pytest_native_*/
+.pytest_*/
 

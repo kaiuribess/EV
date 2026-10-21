@@ -28,6 +28,12 @@ async def run(args):
     try:
         if args.command in {None, "status"}:
             result = await setup.status()
+        elif args.command == "verify-trading":
+            trading_key = values.get("NOVIG_PRODUCTION_TRADING_API_KEY", "")
+            trading_private = values.get("NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH", "")
+            if not trading_key or not trading_private:
+                raise SetupError("production_trading_credentials_missing")
+            result = await setup.verify_trading(trading_key, trading_private)
         elif args.command == "prepare":
             journal = await setup.prepare(args.label)
             result = {"prepared": True, "journal": str(journal), "remote_wallet_created": False, "trading_enabled": False}
@@ -52,6 +58,7 @@ def main():
     parser.add_argument("--setup-dir", default="data/novig_setup")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("status", help="Read management identity, cash and existing wallets")
+    sub.add_parser("verify-trading", help="Read-only verification of configured trading signer, scope and wallet")
     prepare = sub.add_parser("prepare", help="Prepare a protected local signer and journal; no remote mutation")
     prepare.add_argument("--label", required=True)
     for name in ("open", "reconcile", "fund", "recover-funding", "export"):
