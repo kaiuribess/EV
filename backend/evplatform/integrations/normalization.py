@@ -263,6 +263,21 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
         has_totals = any(row.get(f"{side}_price") is not None for side in ("over", "under"))
         has_moneyline = any(row.get(f"{side}_ml") is not None for side in ("home", "away", "draw"))
         has_outcome = any(row.get(key) is not None for key in ("price", "price_american", "price_decimal"))
+        # Observed Parlay game/h2h transport variant: a named outcome's
+        # documented American `price` is duplicated in `over_price` by the
+        # source row container. It is NOT a separate over/under selection.
+        # Accept only an exact alias in this narrow shape; preserve all other
+        # conflicting-shape checks and never synthesize the opposing side.
+        if (has_totals and has_outcome and not has_moneyline
+                and row.get("kind") == "game" and row.get("market_key") == "h2h"
+                and isinstance(row.get("team"), str) and row["team"].strip()
+                and row.get("price") is not None and row.get("over_price") is not None
+                and row.get("under_price") is None and row.get("line") is None
+                and row.get("total") is None and row.get("player") is None
+                and row.get("outcome", row["team"]) == row["team"]):
+            if _parlay_american_price(row["over_price"]) != _parlay_outcome_price(row):
+                raise ValueError("Conflicting Parlay moneyline price alias")
+            has_totals = False
         if sum((has_totals, has_moneyline, has_outcome)) > 1:
             raise ValueError("Conflicting Parlay row shapes")
         if has_totals:

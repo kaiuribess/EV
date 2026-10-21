@@ -117,6 +117,35 @@ def test_conflicting_row_shapes_are_not_silently_prioritized(extra):
         extract_offers(envelope(documented_prop(**extra)))
 
 
+def observed_moneyline_alias(**updates):
+    # Shape observed on the authenticated stream October 21, 2026. Event and
+    # participant below are fixture identities, not a live tradable selection.
+    return {"event_id": "offline-alias", "bookmaker": "draftkings", "kind": "game",
+        "market_key": "h2h", "market": "Moneyline", "team": "Fixture Team",
+        "price": -180, "over_price": -180, "under_price": None, "line": None, **updates}
+
+
+@pytest.mark.parametrize("price", [-180, 150, -130, 110, 124])
+def test_observed_game_moneyline_duplicate_price_is_one_named_outcome(price):
+    row = observed_moneyline_alias(price=price, over_price=price)
+    offer, = extract_offers(envelope(row))
+    assert offer.prices == {"Fixture Team": 1 + (Decimal(price)/100 if price > 0 else Decimal(100)/abs(price))}
+    assert offer.outcome_points == {"Fixture Team": None}
+    assert not offer.observation_verified and not offer.market_status_verified
+    assert VerifiedProviderMapper()(envelope(row)) == []
+
+
+@pytest.mark.parametrize("change", [
+    {"over_price": -181}, {"under_price": 150}, {"kind": "prop"},
+    {"market_key": "player_points"}, {"line": 1.5}, {"total": 100},
+    {"player": "Fixture Player"}, {"outcome": "Different Team"},
+    {"home_ml": -180}, {"price_decimal": "3"}, {"team": ""},
+])
+def test_duplicate_alias_exception_never_hides_a_conflicting_market_or_price(change):
+    with pytest.raises(ValueError, match="Conflicting Parlay"):
+        extract_offers(envelope(observed_moneyline_alias(**change)))
+
+
 @pytest.mark.parametrize("source_time,expected", [
     ("2026-05-13T23:24:18Z", SOURCE),
     ("2026-05-13T16:24:18-07:00", SOURCE),

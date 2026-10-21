@@ -62,3 +62,11 @@ Parlay: For Business NBA Pinnacle/FanDuel/DraftKings game moneylines and ordinar
 Oddize: For NBA Pinnacle moneylines, what establishes that each retained price is still available now, rather than merely the last stored `ts`/`timestamp` observation? Which field or endpoint reports suspensions/withdrawals? How are unchanged quotes reverified and opposing-side observations synchronized? Please document source cadence and actual status semantics; delivery latency cannot substitute for observation age.
 
 These questions are prepared for review and have not been sent to either provider.
+
+## Moneyline retest and parser correction, October 21 at 00:23–00:26 Pacific
+
+The repeated NBA `h2h` test did receive moneyline rows. Two initial 30-second windows extracted 14 and 13 FanDuel observations, respectively, but rejected batches containing a named-outcome game row with the same American price in both `price` and `over_price`. The generic mixed-shape check in our adapter was too strict for this observed source container. This was an application parsing issue; the earlier empty bounded sample was not proof that Parlay lacked moneylines.
+
+The parser now accepts that duplicate only for an explicit `kind=game`, `market_key=h2h`, named team, matching exact price, absent opposing `under_price`, absent line/total/player, and no conflicting moneyline/outcome fields. It preserves one named outcome, never invents the other side, and leaves observation/status verification false. Other mixed shapes or conflicting prices are still rejected. The documented named-outcome `team`/American-`price` representation is described in [Parlay's OddsRow schema](https://parlay-api.com/v1/asyncapi.json); the duplicate field was observed directly in the authenticated feed.
+
+The post-fix 30-second capture (`data/parlay-retest-game-30-20261021T072607.json`) extracted **45 observations: 23 FanDuel and 22 DraftKings, zero extraction errors**. These are delivered observations, not 45 independent markets or bets. No Pinnacle row was observed in that window. The capture retained the same 30-second server age filter and made no Oddize calls. No validated quote-status guarantee, canonical mapping or trading authorization was added. 197 relevant offline regression tests passed. Any support draft describing moneylines as wholly unavailable should be updated with this finding.
