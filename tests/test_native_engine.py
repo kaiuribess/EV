@@ -75,7 +75,7 @@ def bind_offline_launch(engine, market, monkeypatch):
     original_facts = engine.native.runtime_facts
     # The fake adapter supplies settlement/reconciliation fixtures. It cannot
     # satisfy the real native adapter capability and account-evidence checks.
-    monkeypatch.setattr(engine.native, "runtime_facts", lambda: original_facts().model_copy(
+    monkeypatch.setattr(engine.native, "runtime_facts", lambda venue=None: original_facts(venue).model_copy(
         update={"settlement_reconciliation_supported": True}))
     return client
 
@@ -132,8 +132,9 @@ async def test_offline_native_engine_stream_risk_fill_audit_and_restart(tmp_path
         await asyncio.wait_for(engine.audit_queue.join(), 2)
         await asyncio.wait_for(engine.storage.queue.join(), 2)
         rows = await (await engine.storage.connection.execute("SELECT data FROM events WHERE schema_name='native.signal'")).fetchall()
-        assert any('NEGATIVE EV' in row[0] for row in rows)
-        assert any('POSITIVE EV' in row[0] for row in rows)
+        audit_text = [await engine.storage.decode_event_data(row[0]) for row in rows]
+        assert any('NEGATIVE EV' in data for data in audit_text)
+        assert any('POSITIVE EV' in data for data in audit_text)
         assert engine.state()["native_orders"][0]["filled_quantity"] == "50"
     finally:
         await engine.stop()

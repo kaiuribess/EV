@@ -113,11 +113,15 @@ def create_app(settings=None):
             "real_signal_evidence": summary,
             "blocking_items": report.blocking_items,
             "configuration_error": engine.native.profile_error,
+            "accounts": {venue: item.model_dump(mode="json") for venue, item in engine.native.reports().items()},
         }
 
     @app.get("/api/readiness/runtime")
-    async def runtime_readiness():
-        return engine.native.runtime_facts().model_dump(mode="json")
+    async def runtime_readiness(venue: str | None = None):
+        if venue is not None and engine.native.profile_for(venue) is None:
+            raise HTTPException(404, "No reviewed launch profile for this venue")
+        return {**engine.native.runtime_facts(venue).model_dump(mode="json"),
+            "accounts": {key: facts.model_dump(mode="json") for key, facts in engine.native.runtime_facts_by_venue().items()}}
 
     @app.get("/api/market-review")
     async def market_review(provider: str | None = None, offset: int = Query(0, ge=0),
@@ -139,7 +143,7 @@ def create_app(settings=None):
         rows = await (await engine.storage.connection.execute(
             "SELECT data FROM events WHERE schema_name='native.signal' ORDER BY seq DESC LIMIT ? OFFSET ?",
             (limit, offset))).fetchall()
-        return {"items": [json.loads(row[0]) for row in rows], "limit": limit, "offset": offset,
+        return {"items": [json.loads(await engine.storage.decode_event_data(row[0])) for row in rows], "limit": limit, "offset": offset,
                 "note": "Native-unit observations; execution and settlement are tracked separately"}
 
     @app.post("/api/native/orders/{order_id}/cancel")

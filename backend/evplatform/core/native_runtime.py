@@ -19,8 +19,9 @@ from .native_oms import NativeOrder, NativeOrderManager
 from .pricing import NoSignal, fair_value
 from .readiness import (
     FeedReadiness, LaunchProfile, LiveLimits, MarketReadiness,
-    RuntimeReadiness, digest_json, evaluate_readiness,
+    ReadinessBlocker, ReadinessReport, RuntimeReadiness, digest_json, evaluate_readiness,
 )
+from .portfolio import LaunchPortfolio
 from .risk import RiskRejected
 
 
@@ -37,6 +38,7 @@ class NativeRuntime:
     def __init__(self, engine):
         self.engine = engine
         self.profile = None
+        self.portfolio = None
         self.profile_error = ""
         self.build_id = ""
         self.mapper = None
@@ -46,6 +48,7 @@ class NativeRuntime:
         self.account_snapshots = {}
         self.dirty_venues = set()
         self.last_account_probe = 0.0
+        self._last_account_probes = {}
         self.last_settlement_probe = 0.0
         self.execution_lease = None
         self._account_generations = {}
@@ -59,14 +62,24 @@ class NativeRuntime:
     async def start(self):
         self.build_id = await asyncio.to_thread(build_fingerprint)
         profile_path = Path("data/launch_profile.json")
-        if profile_path.exists():
+        portfolio_path = Path("data/launch_portfolio.json")
+        if profile_path.exists() and portfolio_path.exists():
+            self.profile_error = "Choose a portfolio or a legacy profile; conflicting launch files are blocked"
+        elif portfolio_path.exists():
+            try:
+                self.portfolio = await asyncio.to_thread(lambda: LaunchPortfolio.model_validate_json(portfolio_path.read_text(encoding="utf-8")))
+            except (ValueError, OSError):
+                self.profile_error = "Launch portfolio is invalid; review its accounts and shared limits"
+        elif profile_path.exists():
             try:
                 self.profile = await asyncio.to_thread(lambda: LaunchProfile.model_validate_json(profile_path.read_text(encoding="utf-8")))
             except (ValueError, OSError):
                 self.profile_error = "Launch profile is invalid; validate it before native execution"
-        if self.profile and self.profile.environment == self.engine.settings.mode:
+        profiles = self.profiles_by_venue()
+        primary = next(iter(profiles.values()), None)
+        if primary and primary.environment == self.engine.settings.mode:
             from .execution_lease import ExecutionLease
-            self.execution_lease = ExecutionLease(self.profile.venue, self.profile.environment,
+            self.execution_lease = ExecutionLease("portfolio" if self.portfolio else primary.venue, primary.environment,
                                                   ledger_path=Path(self.engine.settings.database_path))
             try:
                 acquired = await asyncio.to_thread(self.execution_lease.acquire)
@@ -76,7 +89,7 @@ class NativeRuntime:
                 self.profile_error = "Native execution is owned by another local workspace/ledger, or its lock is unavailable"
             # Native money limits have no implicit defaults: only an explicitly
             # written profile selects them. This does not grant write access.
-            values = self.profile.limits.model_dump()
+            values = primary.limits.model_dump()
             limits = {key.removesuffix("_usd"): value for key,value in values.items()}
             limits["live_max_order_stake"] = limits["max_order_stake"]
             self.engine.risk.config = type(self.engine.risk.config).model_validate({
@@ -95,8 +108,18 @@ class NativeRuntime:
 
     def owns_execution_lease(self):
         lease = getattr(self, "execution_lease", None)
-        return bool(self.profile and lease and lease.held
-                    and lease.scope == (self.profile.venue, self.profile.environment))
+        primary = next(iter(self.profiles_by_venue().values()), None)
+        return bool(primary and lease and lease.held
+                    and lease.scope == ("portfolio" if getattr(self, "portfolio", None) else primary.venue, primary.environment))
+
+    def profiles_by_venue(self):
+        if getattr(self, "portfolio", None):
+            return {p.venue: p for p in self.portfolio.profiles}
+        return {self.profile.venue: self.profile} if self.profile else {}
+
+    def profile_for(self, venue=None):
+        profiles = self.profiles_by_venue()
+        return profiles.get(venue) if venue is not None else next(iter(profiles.values()), None)
 
     def invalidate_account(self, venue):
         """Fence every in-flight read before removing an obsolete account view."""
@@ -104,6 +127,7 @@ class NativeRuntime:
         self.account_snapshots.pop(venue, None)
         self._account_snapshot_fences.pop(venue, None)
         self.last_account_probe = 0.0
+        self._last_account_probes.pop(venue, None)
 
     def _ledger_fence(self):
         # Reporting is a slow path. Capture values, not mutable object identity,
@@ -123,7 +147,7 @@ class NativeRuntime:
         report = self.report()
         if not (report.live_trading_ready or report.sandbox_trading_ready):
             raise RiskRejected("Native release gate has unresolved checks")
-        p = self.profile
+        p = self.profile_for(order.venue)
         if (p is None or order.venue != p.venue or order.mode != p.environment or
                 order.account_fingerprint != p.account_fingerprint or order.market_id not in p.market_ids or
                 order.strategy not in p.strategy_ids):
@@ -190,7 +214,8 @@ class NativeRuntime:
         self.engine.risk.check_native_reservation(order, reserved=True)
 
     async def execute(self, candidate):
-        if not self.profile:
+        p = self.profile_for(candidate.venue)
+        if not p:
             raise RiskRejected("Native launch profile required")
         market = self.engine.markets[candidate.market_id]
         book = self.books.get((market.id, candidate.venue, candidate.outcome))
@@ -199,7 +224,7 @@ class NativeRuntime:
                 age > self.engine.risk.config.max_candidate_age_ms or not candidate.qualified):
             raise RiskRejected("Native candidate or order book changed")
         order = NativeOrder(intent=candidate.intent, candidate_id=candidate.id,
-            strategy=candidate.strategy, account_fingerprint=self.profile.account_fingerprint,
+            strategy=candidate.strategy, account_fingerprint=p.account_fingerprint,
             market_snapshot=market, market_fingerprint=market.identity(), risk_family_id=risk_family(market),
             reviewed_correlation_groups=reviewed_correlations(market))
         try:
@@ -243,7 +268,7 @@ class NativeRuntime:
 
     def bind_client(self, venue, client):
         """Bind before the first private frame so its snapshot cannot be lost."""
-        p = self.profile
+        p = self.profile_for(venue)
         if (not p or not self.mapper or venue != p.venue or client.settings.environment != p.environment
                 or not self.owns_execution_lease()):
             return None
@@ -310,7 +335,7 @@ class NativeRuntime:
             return
         # Private evidence is kept in the backend. Authoritative reconciliation
         # fetches actual cash fees; private acknowledgements are never fills.
-        if ("orders" in frame or "positions" in frame
+        if ("orders" in frame or "positions" in frame or frame.get("private_event_type") == "orders"
                 or frame.get("event") in {"orders", "v2.orders", "fill", "user_orders"}
                 or frame.get("type") in {"fill", "user_order", "market_position"}):
             if self.engine.risk.native_orders:
@@ -321,7 +346,7 @@ class NativeRuntime:
                 await self.engine.bus.publish(Envelope(schema_name="sports.market", source=venue, payload=market))
                 await self.engine.bus.publish(Envelope(schema_name="exchange.native_book", source=venue, payload=book))
 
-    def runtime_facts(self):
+    def runtime_facts(self, venue=None):
         from decimal import Decimal
         from .native_pricing import instrument_fingerprint
         from ..venues.settlement import supports_settlement_scope
@@ -329,7 +354,8 @@ class NativeRuntime:
         engine = self.engine
         # Loaded profiles are validated in start(); an invalid/absent artifact
         # must never be replaced by inferred defaults in a readiness report.
-        p = self.profile if isinstance(self.profile, LaunchProfile) else None
+        selected = self.profile_for(venue)
+        p = selected if isinstance(selected, LaunchProfile) else None
         now = utcnow()
         venue = p.venue if p else ""
         record = engine.registry.records.get(venue)
@@ -485,8 +511,34 @@ class NativeRuntime:
             feeds=tuple(feeds), markets=tuple(markets), live_enabled=engine.settings.live_enabled,
             auto_trade=engine.risk.auto_trade, kill_switch=engine.risk.kill_switch)
 
-    def report(self):
-        return evaluate_readiness(self.profile, self.runtime_facts())
+    def reports(self):
+        return {venue: evaluate_readiness(p, self.runtime_facts(venue))
+                for venue, p in self.profiles_by_venue().items()}
+
+    def runtime_facts_by_venue(self):
+        return {venue: self.runtime_facts(venue) for venue in self.profiles_by_venue()}
+
+    def report(self, venue=None):
+        if not getattr(self, "portfolio", None) or venue is not None:
+            report = evaluate_readiness(self.profile_for(venue), self.runtime_facts(venue))
+        else:
+            reports = self.reports()
+            report = ReadinessReport(evaluated_at=utcnow(), environment=self.engine.settings.mode,
+                venue="portfolio", profile_digest=self.portfolio.digest(),
+                technical_ready=all(r.technical_ready for r in reports.values()),
+                authorization_ready=all(r.authorization_ready for r in reports.values()),
+                safe_to_arm=all(r.safe_to_arm for r in reports.values()),
+                live_trading_ready=all(r.live_trading_ready for r in reports.values()),
+                sandbox_trading_ready=all(r.sandbox_trading_ready for r in reports.values()),
+                blockers=tuple(b.model_copy(update={"scope": f"{v}/{b.scope}"})
+                    for v, r in reports.items() for b in r.blockers),
+                performance=next(iter(reports.values())).performance)
+        if self.profile_error:
+            report = report.model_copy(update={"technical_ready": False, "safe_to_arm": False,
+                "live_trading_ready": False, "sandbox_trading_ready": False,
+                "blockers": (*report.blockers, ReadinessBlocker(code="profile.invalid", category="technical",
+                    scope="configuration", message=self.profile_error, action="Correct the launch files and restart paused"))})
+        return report
 
     def private_synchronized(self, record, snapshot):
         if (record is None or not record.enabled or snapshot is None or not snapshot.identity_verified or not snapshot.reconciled
@@ -507,6 +559,9 @@ class NativeRuntime:
         if getattr(client, "venue_id", None) == "kalshi":
             from ..venues.kalshi import KalshiClient
             return isinstance(client, KalshiClient) and client.private.matches(snapshot)
+        if getattr(client, "venue_id", None) == "prophetx":
+            from ..venues.prophetx import ProphetXClient
+            return isinstance(client, ProphetXClient) and client.private.matches(snapshot, client=client)
         if getattr(client, "venue_id", None) == "polymarket_us":
             from ..venues.polymarket_us_execution import PolymarketUSExecutionVenue
             adapter = self.manager.adapters.get("polymarket_us")
@@ -531,7 +586,7 @@ class NativeRuntime:
         # local changes temporarily block new orders without declaring an
         # ordinary acknowledgement to be an unexplained inventory mismatch.
         await self.refresh_account()
-        reconciled = False
+        reconciled_venues = set()
         for venue in list(self.dirty_venues):
             self.dirty_venues.discard(venue)
             for order in list(self.engine.risk.native_orders.values()):
@@ -539,11 +594,12 @@ class NativeRuntime:
                     continue
                 try:
                     await asyncio.wait_for(self.manager.reconcile(order.id), timeout=20)
-                    reconciled = True
+                    reconciled_venues.add(venue)
                 except Exception:
                     self.engine.risk.halt("Native order reconciliation failed")
-        if reconciled:
-            self.last_account_probe = 0.0
+        if reconciled_venues:
+            for venue in reconciled_venues:
+                self.invalidate_account(venue)
             await self.refresh_account()
         # Recheck standing orders against fresh references and original limits.
         # Racing fills remain reserved until authoritative reconciliation.
@@ -563,8 +619,12 @@ class NativeRuntime:
             await asyncio.sleep(30)
             await self.reconcile_settlements()
 
-    async def reconcile_settlements(self, *, force=False, venue=None, order_ids=None, halt_unverified=True):
-        if self._settlement_probe_lock.locked() or (not force and time.monotonic()-self.last_settlement_probe < 30):
+    async def reconcile_settlements(self, *, force=False, venue=None, order_ids=None, halt_unverified=True) -> int | None:
+        # None means a forced check was deferred, never a completed check with
+        # no payment. Concurrent portfolio probes share this coordinator.
+        if self._settlement_probe_lock.locked():
+            return None if force else 0
+        if not force and time.monotonic()-self.last_settlement_probe < 30:
             return 0
         async with self._settlement_probe_lock:
             return await self._reconcile_settlements(force=force, venue=venue, order_ids=order_ids,
@@ -603,10 +663,14 @@ class NativeRuntime:
                     await self.manager.settle(result)
                     if not accepted:
                         completed += 1
-            except Exception:
+            except Exception as exc:
                 self.invalidate_account(order.venue)
                 if accepted:
                     await self.manager.invalidate_settlement(order.id, "Accepted native settlement could not be reverified")
+                elif force and not halt_unverified and isinstance(exc, TimeoutError):
+                    # No result arrived: keep its exposure and retry without
+                    # treating the elapsed deadline as contrary cash evidence.
+                    return None
                 elif halt_unverified:
                     self.engine.risk.halt("Native settlement requires complete attributable cash evidence")
         return completed
@@ -614,13 +678,16 @@ class NativeRuntime:
     async def refresh_account(self):
         # Only one read owns installation. Neither a concurrent private frame
         # nor a newer ledger may be overwritten by an earlier in-flight probe.
-        if self._account_probe_lock.locked() or not self.profile or not self.mapper:
+        if self._account_probe_lock.locked() or not self.profiles_by_venue() or not self.mapper:
             return
         async with self._account_probe_lock:
-            await self._refresh_account()
+            if self.portfolio:
+                await asyncio.gather(*(self._refresh_account(p) for p in self.portfolio.profiles))
+            else:
+                await self._refresh_account()
 
-    async def _refresh_account(self):
-        p = self.profile
+    async def _refresh_account(self, p=None):
+        p = p or self.profile
         record = self.engine.registry.records.get(p.venue)
         client = getattr(record.plugin, "client", None) if record else None
         if client is None or client.settings.environment != p.environment:
@@ -628,13 +695,15 @@ class NativeRuntime:
         adapter = self.bind_client(p.venue, client)
         if adapter is None:
             return
-        if time.monotonic()-self.last_account_probe < 5:
+        last_probe = self._last_account_probes.get(p.venue, 0) if self.portfolio else self.last_account_probe
+        if time.monotonic()-last_probe < 5:
             return
         from ..venues.account_probe import probe_native_account
         async def read_account():
             async with self.manager.lock:
                 self.invalidate_account(p.venue)
                 self.last_account_probe = time.monotonic()
+                self._last_account_probes[p.venue] = self.last_account_probe
                 token = (self._account_generations[p.venue], self._ledger_fence())
                 inventory = tuple(self.engine.risk.native_orders.values())
                 settled = frozenset(self.engine.risk.settled)
@@ -645,7 +714,7 @@ class NativeRuntime:
 
         def unchanged(token):
             current = self.engine.registry.records.get(p.venue)
-            return (self.profile is p and current and getattr(current.plugin, "client", None) is client
+            return (self.profile_for(p.venue) is p and current and getattr(current.plugin, "client", None) is client
                     and self.manager.adapters.get(p.venue) is adapter
                     and token == (self._account_generations.get(p.venue, 0), self._ledger_fence()))
 
@@ -655,6 +724,7 @@ class NativeRuntime:
             async with self.manager.lock:
                 if not unchanged(token):
                     self.last_account_probe = 0.0
+                    self._last_account_probes.pop(p.venue, None)
                     return
                 pending = any(o.venue == p.venue and (not o.reconciliation_complete or o.status == OrderStatus.UNKNOWN)
                               for o in self.engine.risk.native_orders.values())
@@ -668,14 +738,21 @@ class NativeRuntime:
                 # One bounded actual-cash attempt precedes an unexplained-
                 # inventory halt; no order is excluded merely for disappearing.
                 try:
-                    await asyncio.wait_for(self.reconcile_settlements(force=True, venue=p.venue,
+                    completed = await asyncio.wait_for(self.reconcile_settlements(force=True, venue=p.venue,
                         order_ids=set(sorted(possible_settlements)[:20]), halt_unverified=False), timeout=20)
                 except TimeoutError:
-                    pass
+                    completed = None
+                if completed is None:
+                    # Busy coordinators and deadlines leave the account
+                    # unverified. A later maintenance pass retries immediately;
+                    # neither old cash nor the incomplete probe can authorize.
+                    self.invalidate_account(p.venue)
+                    return
                 snapshot, token = await read_account()
             async with self.manager.lock:
                 if not unchanged(token):
                     self.last_account_probe = 0.0
+                    self._last_account_probes.pop(p.venue, None)
                     return
                 self.account_snapshots[p.venue] = snapshot
                 self._account_snapshot_fences[p.venue] = token[1]

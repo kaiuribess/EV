@@ -152,10 +152,14 @@ def test_dead_writer_and_full_critical_queue_block(runtime):
 
 @pytest.mark.parametrize("change", [
     {"environment": "production"}, {"venue": "other"}, {"account_fingerprint": "e"*64},
-    {"observed_at": utcnow()-timedelta(seconds=31)}, {"observed_at": utcnow()+timedelta(seconds=20)},
-    {"observed_at": utcnow().replace(tzinfo=None)}, {"identity_verified": False},
+    {"observed_at": lambda: utcnow()-timedelta(seconds=31)},
+    {"observed_at": lambda: utcnow()+timedelta(seconds=20)},
+    {"observed_at": lambda: utcnow().replace(tzinfo=None)}, {"identity_verified": False},
 ])
 def test_foreign_or_stale_inventory_does_not_authorize(runtime, change):
+    # Derive clock faults when the case runs, not during collection: a long
+    # full-suite run must not turn the future timestamp into a valid past one.
+    change = {key: value() if callable(value) else value for key, value in change.items()}
     runtime.account_snapshots["novig"] = runtime.account_snapshots["novig"].model_copy(update=change)
     facts = runtime.runtime_facts()
     assert not facts.account_identity_verified and not facts.native_routing_supported

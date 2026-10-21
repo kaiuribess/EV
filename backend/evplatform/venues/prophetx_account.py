@@ -39,11 +39,12 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
     user, fingerprint = authenticated_identity(client)
     base = dict(venue="prophetx", environment=client.settings.environment,
                 account_fingerprint=fingerprint, identity_verified=True, observed_at=now)
+    private = getattr(client, "private", None)
+    captured_fence = private.begin_probe(client=client) if private is not None else None
     before = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow())
     if review is None:
         return NativeAccountSnapshot(**base, balance_usd=before[0], reason=
             "Account inception and funded-cash-only review is required for complete ProphetX inventory")
-    sequence = dict(client._last_sequences)
     history = await complete_order_history(client, review, observed_at=observed_at)
     relevant = [o for o in managed_orders if o.venue == "prophetx" and o.mode == client.settings.environment
                 and o.id not in settled_order_ids and o.status != OrderStatus.REJECTED]
@@ -103,9 +104,22 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
     after = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow())
     if before != after or before[1:] != (matched_stake, unmatched_stake):
         reasons.append("ProphetX wallet exposure differs or changed during inventory reads")
-    if sequence != client._last_sequences or authenticated_identity(client) != (user, fingerprint):
+    if (authenticated_identity(client) != (user, fingerprint) or
+            (private is not None and private.fence(client=client) != captured_fence)):
         reasons.append("ProphetX private account changed during inventory reads")
+    private_as_of = None
+    if private is None or captured_fence is None:
+        reasons.append("Confirmed private orders binding and recent private heartbeat are required")
+    elif not reasons:
+        try:
+            private_as_of = private.reconcile_history(history, started_at=now,
+                captured_fence=captured_fence, client=client, observed_at=observed_at or utcnow())
+        except (ReconciliationError, ValueError, ArithmeticError):
+            reasons.append("ProphetX private history watermark, order facts, or account fence did not reconcile")
     return NativeAccountSnapshot(**{**base, "observed_at": observed_at or utcnow()}, balance_usd=after[0],
         open_order_count=len(resting), position_count=len(positions), reconciled=not reasons,
         cash_available_verified=not reasons,
+        private_connection_generation=captured_fence[0] if private_as_of is not None else None,
+        private_revision=captured_fence[1] if private_as_of is not None else None,
+        private_as_of=private_as_of,
         reason="; ".join(dict.fromkeys(reasons)))

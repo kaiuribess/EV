@@ -18,7 +18,7 @@ It is **not a completed production autonomous trading release**.
 | Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; earlier actual signed production read/stream checks passed | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, actionable launch blockers and separate native order ledger | Broader browser/device QA; native arming remains an explicit backend operation behind preflight |
 | Analytics | Durable all-signal episodes and transitions even while paused; first-entry hypothetical grading from explicit results; origin-separated groups/calibration; processing/receipt/intent/ack/fill timings and paper positions/settlements | Automatic verified result ingestion, live slippage calibration, CLV from verified closing data, production returns and independently clustered uncertainty estimates |
-| Storage | Async batched WAL SQLite audit, configurations, orders and fill IDs | Retention/compaction policy for long unattended runs; database upgrade migrations beyond version 1 |
+| Storage | Async batched WAL SQLite audit, lossless large-event compression off the event loop, configurations, orders and fill IDs; legacy TEXT and compressed events both readable | Retention/compaction policy for long unattended runs; existing history is not rewritten or deleted |
 | Windows | Setup/demo/paper/native/test/stop PowerShell scripts, separate native environment databases, local built dashboard | Always-on operation requires an awake powered PC or a separately deployed host |
 
 ## Connection truth
@@ -88,9 +88,28 @@ synthetic plugin runs in demo/paper mode and all its prices/fills are labeled.
 
 The saved operator policy is up to $5 per bet including fees, no daily-loss stop,
 and one active/unsettled event or player across accounts. Native cash-only caps
-require verified spendable cash for that exact account. The launch profile still
-selects one account at a time, with a cross-venue process lock and durable shared
-risk ledger. See [operator limits](OPERATOR_LIMITS.md) for configuration and scope.
+require verified spendable cash for that exact account. A reviewed launch portfolio
+now supports one account per venue, with a cross-venue process lock and one durable
+risk ledger. Every selected account must pass its own release checks, while cash
+cannot be pooled between accounts. See [operator limits](OPERATOR_LIMITS.md).
+
+The October 20 21:22 PDT read-only account check confirmed production Kalshi cash
+and ProphetX's reported balance. Polymarket US returned a balance but omitted its
+source-change clock; available-cash/account certification remains incomplete.
+The saved Novig key returned production HTTP401 and sandbox success. Its funded
+production account was subsequently accessed with a newly created management
+key: signed production reads verified $25.00 primary-wallet cash, zero trading
+subaccounts and zero production trading keys. The website's $75.00 portfolio
+total is not assumed to be spendable API cash. Production trading still needs a
+separate trading wallet/key and account-bound validation; the sandbox runtime
+credentials remain unchanged. No account is labelled unfunded merely because
+its sandbox is empty. `scripts/check_accounts.py` repeats
+these explicit environment checks without sending orders or transferring money.
+
+ProphetX now has local private connection/revision fencing, heartbeat-gap
+invalidation and exact comparison with complete REST history. Its reporting
+watermark must cover the start of the account probe; a heartbeat alone cannot
+establish inventory. This path has offline tests, not a native lifecycle certificate.
 
 ## Measured local validation
 

@@ -10,6 +10,7 @@ type Report = {
   evaluated_at: string; venue: string; environment: string;
   technical_ready: boolean; authorization_ready: boolean; safe_to_arm: boolean;
   live_trading_ready: boolean; sandbox_trading_ready: boolean; blockers: Blocker[];
+  accounts?: Record<string, Report>;
 }
 const groups: { key: Category; title: string; description: string }[] = [
   { key: 'technical', title: 'Connections & execution', description: 'Current data, exact markets, fees and order recovery.' },
@@ -24,6 +25,13 @@ function parseReport(value: unknown): Report {
     || value.blockers.some(item => !isRecord(item) || !['technical', 'authorization', 'arming'].includes(String(item.category))
       || ['code', 'scope', 'message', 'action'].some(key => typeof item[key] !== 'string'))) {
     throw new Error('The readiness response is incomplete. Trading readiness is unconfirmed.')
+  }
+  if (value.accounts !== undefined) {
+    if (!isRecord(value.accounts) || Object.keys(value.accounts).length > 32) throw new Error('Account readiness is incomplete.')
+    for (const account of Object.values(value.accounts)) {
+      if (!isRecord(account) || account.accounts !== undefined) throw new Error('Account readiness is incomplete.')
+      parseReport(account)
+    }
   }
   return value as Report
 }
@@ -89,6 +97,12 @@ export function LaunchReadiness() {
       <div><strong>{report ? blockedCount.toLocaleString() : '—'}</strong><span>Checks to resolve</span></div>
       <div><strong>Not established</strong><span>Profitable live track record</span></div>
     </div>
+    {report?.accounts && Object.keys(report.accounts).length > 0 && <div className="launch-summary" aria-label="Account launch readiness">
+      {Object.entries(report.accounts).map(([venue, account]) => <div key={venue}>
+        <strong>{venue.replaceAll('_', ' ')}</strong>
+        <span>{!current ? 'Unconfirmed' : account.safe_to_arm ? 'Checks passed' : `${account.blockers.filter(b => b.category !== 'arming').length} checks pending`}</span>
+      </div>)}
+    </div>}
     {!report && <div className="launch-loading">{loading ? 'Checking the local engine…' : 'Current readiness evidence is unavailable.'}</div>}
     {report && <div className="launch-groups">{groups.map(group => {
       const blockers = report.blockers.filter(item => item.category === group.key)

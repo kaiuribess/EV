@@ -51,9 +51,16 @@ async def test_account_reprobed_after_order_reconciliation(system, market):
     placed = await manager.execute(order(market))
     adapter.report = report(placed)
     runtime.dirty_venues.add("novig")
+    runtime._last_account_probes.update(novig=100, kalshi=200)
+    runtime.account_snapshots["novig"] = object()
+    runtime._account_snapshot_fences["novig"] = runtime._ledger_fence()
     checks = []
     async def account():
         checks.append(risk.native_orders[placed.id].reconciliation_complete)
+        if len(checks) == 2:
+            assert runtime._last_account_probes == {"kalshi": 200}
+            assert "novig" not in runtime.account_snapshots
+            assert "novig" not in runtime._account_snapshot_fences
     runtime.refresh_account = account
     runtime.require_preflight = lambda _: None
     runtime.revalidate_order = lambda _: None

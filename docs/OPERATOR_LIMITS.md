@@ -48,8 +48,15 @@ cancelled remainder does not release the filled part. Verified settlement is
 required to release that reservation. This is intentionally broader than merely
 blocking the two opposite sides of one market.
 
-The current launch profile selects one venue/account at a time. One operating
-system user may run only one native execution controller per environment,
+`data/launch_portfolio.json` can select one reviewed account per venue in one
+controller. Every member has its own identity, market scope, fees and genuine
+launch evidence. All members must share the same explicit limits, environment,
+build, mapping/pricing configuration and strategy set. Cash is checked separately;
+event/player reservations and the order-count/rate caps are shared. Every selected
+account must pass readiness before any portfolio order is dispatched. A legacy
+`data/launch_profile.json` still selects one account; supplying both files is blocked.
+
+One operating system user may run only one native execution controller per environment,
 across all venues. An OS lock enforces this and binds that environment to its
 durable database path. Starting a second process or switching to an empty
 database cannot bypass the shared risk ledger. An abrupt process exit releases
@@ -59,6 +66,5 @@ The lock is local to this Windows user and computer. It cannot coordinate
 manual bets, separate computers or another Windows account. External inventory
 detected by account reconciliation blocks trading for review. Do not delete
 the lock metadata or replace the ledger to clear a blocked account; resolve
-the inventory with its original records. Multi-account concurrent dispatch
-requires an explicitly implemented central account router; separate uncoordinated
-venue processes are not a supported substitute.
+the inventory with its original records. Separate uncoordinated venue processes
+are not a supported substitute for the shared portfolio controller.

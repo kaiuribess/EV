@@ -8,13 +8,43 @@ Executed on this Windows PC with Python 3.12.0:
 .\run_tests.ps1
 ```
 
-**1,162 tests passed in 32.58 seconds with coverage enabled.** Backend statement
-coverage is **87.24%** (8,739 of 10,017 statements). TypeScript checking and the Vite
+**1,261 tests passed in 39.19 seconds with coverage enabled.** Backend statement
+coverage is **87.66%** (9,180 of 10,472 statements). TypeScript checking and the Vite
 production build passed. One upstream Starlette/httpx TestClient deprecation
 warning remains. Coverage measures executed statements, not exchange certification.
 
 All order, cancellation, fill, account and settlement exchanges in automated tests
 use controlled offline responses. No test submitted a real native order.
+
+The latest release adds a reviewed multi-venue launch portfolio with separate
+account cash checks and shared event/player exposure guards. Focused regressions
+cover concurrent cross-venue reservation, wrong-account cash, busy or timed-out
+settlement recovery, and immediate safe retry. Incomplete settlement checks retain
+exposure and invalidate cash verification. They cannot authorize new orders.
+ProphetX private-heartbeat/history fences and lossless audit compression also have
+offline fault tests. An import-time clock in a readiness test was corrected to
+create its future timestamp when the case executes; the full suite then passed.
+
+Large audit records are compressed on a worker thread without sampling or
+discarding events. A 1,000-record sample shrank from 3,694,524 to 1,273,086 bytes
+(65.54%), with exact roundtrips for every record. Legacy TEXT and new BLOB audit
+rows are both readable; bounded decoding rejects corruption. Existing historical
+database space is not reclaimed. Order intents share the writer queue and may
+wait behind an audit batch; dispatch checks freshness again after persistence.
+
+A separate latest 15-second synthetic rehearsal generated nine markets, 18
+positive and nine negative offers, nine paper orders and four orders with fills.
+Across 2,190 calculations, internal processing was median 0.232 ms, p95 0.529 ms,
+p99 0.720 ms. Receipt-to-calculation was median 11.187 ms, p95 25.998 ms, p99
+36.001 ms (1,800 samples). Nine durable intents had median 4.287 ms; seven
+simulated fill events had median 2,124.501 ms. Those small samples do not support
+p95/p99 and do not measure live fills or profitability. There were no bus drops.
+
+The updated Windows application then restarted successfully on port 8001 with
+13 registered plugins, demo mode, automation off, kill switch on, zero native
+orders and failed live readiness. All 200 latest audit rows decoded successfully,
+including 127 compressed records. Local evidence:
+`data/portfolio-paused-restart.json`.
 
 The full offline engine rehearsal covers a source event, exact native book,
 pricing, central risk approval, durable intent, acknowledgement without an assumed
@@ -141,6 +171,18 @@ by Git, as are databases, account state and local credentials.
 
 ## Genuine connection evidence and remaining work
 
+On October 21 at 04:42–04:43 UTC (October 20 PDT), the newly created production
+Novig management key passed signed GET-only identity/signer and wallet checks.
+The primary cash wallet returned $25.00; the account had zero trading subaccounts
+and zero production trading keys. The web portfolio total was $75.00, which is
+not assumed to be available API cash. Novig's portfolio definition can include
+open positions and trade credits; the unexplained $50 was not classified.
+Evidence: ignored `data/novig-production-management-diagnostic.json`. The key is
+stored outside Git, with Windows permissions restricted to the current user.
+The active sandbox trading credentials remain unchanged. Creating a management
+key does not create/fund a trading wallet or certify order lifecycle behavior.
+The browser separately reported blocked location permission; it was not bypassed.
+
 Earlier read-only checks established Kalshi public REST discovery/books, Novig
 sandbox signed discovery and private/book subscriptions, ProphetX production
 Talaria authentication/subscriptions/market messages, and Parlay/Oddize REST
@@ -158,9 +200,10 @@ The key reported `read` and `write::trade`, without transfer scope. Its observed
 location attestation expires October 27, 2026 at 8:15:55 PM PDT. These are
 expiring account-access facts, not application trading authorization. Only GET
 requests and read-only WebSocket subscriptions were used: no native order or
-cancellation was sent, and `trade_gate_enabled` remained false. Private-state
-synchronization and settlement certification remain blocked; this successful
-monitor check does not certify either capability.
+cancellation was sent, and `trade_gate_enabled` remained false. That initial
+monitor check did not certify private-state synchronization or settlement. The
+later read-only private synchronization check above succeeded; actual settlement
+and order lifecycle certification remain outstanding.
 
 A separate personal Polymarket US retail production check succeeded on October
 20, 2026 at 20:19:57 PDT (October 21, 03:19:57 UTC). Signed
@@ -197,8 +240,10 @@ Native order placement, cancellation, fills and settled cash have not been teste
 against a real account. Reviewed live mappings, fees, account permissions,
 geographic eligibility and actual sandbox lifecycle evidence remain required.
 Novig's narrow ordinary WIN/LOSS settlement path is implemented offline; pushes,
-FMV, remediation and shared-position cash allocation remain unsupported. Full settlement coverage, Kalshi private synchronization and ProphetX complete
-inventory/actual fees remain unsupported. An explicitly reviewed narrow Novig
+FMV, remediation and shared-position cash allocation remain unsupported. Kalshi private
+synchronization is implemented and has a genuine read-only check recorded above.
+ProphetX full-history/actual-fee readers and private fences are implemented with
+offline tests; account-specific validation is outstanding. An explicitly reviewed narrow Novig
 IOC settlement policy can satisfy capability admission; it still requires genuine
 account-bound lifecycle and settlement evidence, and stops on exceptional results. Supplying keys alone cannot
 satisfy these requirements. See [GO_LIVE.md](GO_LIVE.md).

@@ -75,7 +75,8 @@ The running engine reads these exact local files:
 | --- | --- |
 | `data/verified_mappings.json` | Reviewed source signatures, canonical markets and bookmaker outcome mappings. Loaded when an input plugin starts. |
 | `data/native_mappings.json` | Reviewed canonical-to-native instruments, explicit native units and expiring fee bounds. Loaded at backend startup. |
-| `data/launch_profile.json` | The exact target account/environment, limits, configuration digests and reviewed launch evidence. Loaded at backend startup. |
+| `data/launch_profile.json` | Legacy single account/environment, limits, configuration digests and reviewed launch evidence. Loaded at backend startup. |
+| `data/launch_portfolio.json` | Multiple reviewed account profiles under one shared ledger; mutually exclusive with the legacy file. |
 
 These files are local runtime artifacts excluded from Git and must not contain secrets.
 Missing files leave markets quarantined and native execution blocked. After
@@ -84,6 +85,31 @@ workspace and repeat the checks. An input mapping change requires restarting
 the affected input plugin or the workspace. A configuration change invalidates
 evidence bound to the previous profile/build; do not edit a passed certificate
 to make its digest match.
+
+For multiple venues, the portfolio JSON contains `schema_version: 1` and
+`profiles: [...]`, with each item a complete `LaunchProfile` as described below.
+The portfolio supports one account per distinct venue. Accounts must share the
+environment, build/configuration digests, strategies and explicit global limits;
+market and provider scopes and account evidence stay individual. Startup applies
+limits once, recovers one durable ledger, and binds one process lock across all
+venues. Every selected account must pass preflight before any new order. Unknown
+orders and overlap reservations remain global; authenticated cash remains local
+to each account. No ready portfolio is generated from diagnostic balances.
+
+`GET /api/readiness` includes individual `accounts` reports plus aggregate gate
+results. `GET /api/readiness/runtime?venue=kalshi` selects a reviewed account's
+facts; `accounts` includes every selected venue. The old no-query single-account
+fields remain for compatibility. No endpoint creates launch evidence or arms trading.
+
+Check actual account access without placing orders:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_accounts.py --help
+```
+
+The read-only diagnostic distinguishes production from sandbox and writes only
+allowlisted results. A sandbox key is never silently retried against production
+as a trading fallback. It does not certify order lifecycle or settlement.
 
 ## Review exact market mappings
 
@@ -215,8 +241,9 @@ per account and native market. It compares actual position-history payout,
 cost, quantity and P&L against complete personal fill history and matching
 settlement timestamps. Shared/external/netted positions, maker credits,
 PUSH/FMV results, remediation/resettled grades, incomplete history and cash
-discrepancies remain unsupported and blocked. Kalshi and ProphetX automatic
-settlement allocation still require their own validated native adapters.
+discrepancies remain unsupported and blocked. Kalshi and ProphetX have their own
+restricted settlement readers, with offline tests; each still requires actual
+account-specific lifecycle and settlement validation.
 
 This settlement adapter has offline protocol tests; no genuine native
 settlement has been certified. The default `settlement_policy: "full"` remains blocked. An operator may explicitly
@@ -246,6 +273,28 @@ track record. Closing-line analysis is informative when contracts match; it is
 not a substitute for verified actual settlement and fee accounting.
 
 ## When a remaining key or permission arrives
+
+Novig production and paper keys are separate. The website's
+[Profile → Settings → Novig API](https://docs.novig.com/api/api-keys) creates a
+management key, which cannot place orders or connect to the trading stream.
+Keep that pair in `NOVIG_PRODUCTION_MANAGEMENT_API_KEY` and
+`NOVIG_PRODUCTION_MANAGEMENT_PRIVATE_KEY_PATH` for operator setup diagnostics;
+those variables do not enable the runtime. The separate trading pair belongs in
+`NOVIG_API_KEY` and `NOVIG_PRIVATE_KEY_PATH` only after its correct environment
+and account have been verified.
+
+The production management check on October 20 PDT verified the key and $25.00
+primary-wallet cash, but found no trading wallet or production trading key.
+Novig documents [opening a trading subaccount](https://docs.novig.com/api/subaccounts/manage)
+and [funding it](https://docs.novig.com/api/subaccounts/funding) as separate API
+operations. These are operator-performed financial actions, not read-only setup.
+The management key cannot substitute for the resulting trading key. A transfer
+acknowledgement is pending until its status is `Applied` and the new wallet is
+reconciled. The $75.00 website portfolio total is not an API cash limit: Novig's
+[portfolio definition](https://support.novig.com/en/articles/16205700-how-portfolio-balance-works)
+also includes positions and trade credits. No unexplained balance is assumed
+spendable. Browser location permission must be resolved through actual device
+verification; neither keys nor local settings bypass that requirement.
 
 Save it in the protected local backend `.env` or secret store, then configure
 only the matching plugin. Confirm the documented account tier and endpoint;

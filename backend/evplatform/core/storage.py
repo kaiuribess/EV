@@ -5,11 +5,24 @@ barrier is measured independently from internal pricing latency.
 """
 import asyncio
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
 
 from .models import Envelope, Order
+from .audit_codec import decode_audit_data, encode_audit_data
+
+
+@dataclass(frozen=True)
+class _PendingAuditData:
+    text: str
+
+
+def _prepare_audit_batch(batch):
+    """CPU work runs in a worker thread before opening the SQLite transaction."""
+    return [(sql, tuple(encode_audit_data(value.text) if isinstance(value, _PendingAuditData) else value
+                        for value in params), future) for sql, params, future in batch]
 
 
 class Storage:
@@ -56,8 +69,13 @@ class Storage:
             while len(batch) < 256 and not self.queue.empty():
                 batch.append(self.queue.get_nowait())
             try:
+                if any(any(isinstance(value, _PendingAuditData) for value in params)
+                       for _, params, _ in batch):
+                    prepared = await asyncio.to_thread(_prepare_audit_batch, batch)
+                else:
+                    prepared = batch
                 await self.connection.execute("BEGIN IMMEDIATE")
-                for sql, params, future in batch:
+                for sql, params, future in prepared:
                     if isinstance(sql, list):
                         for statement, values in sql:
                             await self.connection.execute(statement, values)
@@ -89,7 +107,12 @@ class Storage:
 
     async def event(self, event: Envelope):
         await self.write("INSERT OR IGNORE INTO events VALUES(NULL,?,?,?,?)",
-                         (event.id, event.schema_name, event.emitted_at.isoformat(), event.model_dump_json()))
+                         (event.id, event.schema_name, event.emitted_at.isoformat(), _PendingAuditData(event.model_dump_json())))
+
+    @staticmethod
+    async def decode_event_data(data: str | bytes) -> str:
+        """Read both old JSON TEXT and new compressed audit BLOB rows losslessly."""
+        return await asyncio.to_thread(decode_audit_data, data)
 
     async def save_order(self, order: Order):
         await self.write("INSERT INTO orders VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,data=excluded.data",

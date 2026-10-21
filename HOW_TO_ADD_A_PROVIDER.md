@@ -231,3 +231,46 @@ Test:
 Run `.\run_tests.ps1`. Report mocked tests as offline protocol tests. Only a
 successful authorized account-backed operation establishes real connectivity.
 
+## 10. Review live identity and settlement evidence
+
+Run the read-only review against the local app before authoring mappings:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\review_market_readiness.py --url http://127.0.0.1:8001 --output data\market-review.json
+```
+
+The output file must be new. The command only issues local GET requests, reports
+original source timestamps, suspensions, missing opposing prices and missing
+identity/settlement facts, and never changes mappings or trading permissions.
+Use `--snapshot saved-quarantine.json` for offline review, `--max-source-age 5`
+for the review threshold, and `--max-rows 3000` to bound collection. The quarantine
+is a bounded, changing window; a multi-page collection is explicitly non-atomic.
+Old quotes do not become current because the report or provider response is new.
+
+Optional `--comparisons contracts.json` accepts `{"version":1,"comparisons":[
+{"left":{...},"right":{...}}]}` with explicit `ContractReview` records from
+`core/market_review.py`. Unknown facts stay null. Compare period, line, overtime,
+postponement, voids, and payout conditions using current official contract
+documents. A structurally equal comparison is still not external verification.
+The report never infers team aliases, independent bookmaker counts or approval.
+
+REST discovery preserves a supplied `commence_time` in observation context as
+`scheduled_start`; a changed supplied start time changes the review signature.
+Do not reuse an old signature or silently treat a postponed event as equivalent.
+
+## 11. Read audit history through the storage decoder
+
+New audit JSON records of at least 4 KiB use lossless zlib compression when it
+reduces their size. Small records and existing records stay plain JSON TEXT.
+Compressed records are SQLite BLOBs with an `EVPAUDIT` version marker, original
+byte length and SHA-256 checksum. Every event ID, timestamp and payload remains
+intact. Orders, fills and configuration tables retain their existing encoding.
+
+Use `await storage.decode_event_data(row[0])` before parsing `events.data`.
+This reads old TEXT and new BLOB records; it rejects unknown versions, corrupt
+checksums, oversized expansion and trailing compressed streams. Compression and
+decompression run in worker threads. The maximum compressed source size is
+16 MiB; larger records remain unmodified TEXT rather than being truncated.
+Existing database content is not rewritten or removed. Compression reduces
+future growth but does not impose retention or reclaim existing disk space.
+

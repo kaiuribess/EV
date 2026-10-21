@@ -120,6 +120,14 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
     for event in events:
         if not isinstance(event, dict):
             continue
+        # Preserve supplied discovery evidence. A quote's event identity is not
+        # its scheduled time; neither field supplies period/settlement rules.
+        event_context = {"event_sport": event.get("sport_key") or event.get("sport"),
+                         "participants": [event.get("home_team"), event.get("away_team")]}
+        if "commence_time" in event:
+            event_context["scheduled_start"] = event["commence_time"]
+        if "id" in event and "eventId" in event:
+            event_context["provider_event_ids"] = {"id": event["id"], "eventId": event["eventId"]}
         for book in event.get("bookmakers", []):
             for market in book.get("markets", []):
                 outcomes = market.get("outcomes", [])
@@ -141,8 +149,7 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                     envelope.provider_id, str(book["key"]), str(event.get("eventId") or event.get("id")),
                     str(market["key"]), None, None, market.get("period"), points, prices,
                     observed, envelope.published_at, status,
-                    {**_row_context(market), "event_sport": event.get("sport_key") or event.get("sport"),
-                     "participants": [event.get("home_team"), event.get("away_team")]},
+                    {**_row_context(market), **event_context},
                 ))
                 # Alternate lines are separate source identities. Missing sides never
                 # inherit prices or timestamps from a primary rung.
@@ -158,8 +165,7 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                         envelope.provider_id, str(book["key"]), str(event.get("eventId") or event.get("id")),
                         str(market["key"]), None, None, market.get("period"), alt_points, alt_prices,
                         _oldest([parse_timestamp(o.get("last_update")) for o in group]), envelope.published_at,
-                        "active", {**_row_context(market), "alternate": True,
-                                   "participants": [event.get("home_team"), event.get("away_team")]},
+                        "active", {**_row_context(market), **event_context, "alternate": True},
                     ))
     return result
 

@@ -144,7 +144,7 @@ async def test_disappearing_filled_position_gets_actual_settlement_then_reprobe(
     assert row == (filled.id,)
 
 
-@pytest.mark.parametrize("settlement", ["missing", "error", "timeout"])
+@pytest.mark.parametrize("settlement", ["missing", "error"])
 async def test_unproven_disappearance_reprobes_once_then_halts_without_releasing(system, market, monkeypatch, settlement):
     manager, risk, _, _ = system
     runtime = prepare(system)
@@ -153,13 +153,62 @@ async def test_unproven_disappearance_reprobes_once_then_halts_without_releasing
     monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account", probe)
     reconcile = AsyncMock(return_value=None)
     if settlement == "error": reconcile.side_effect = ValueError("OFFLINE incompatible payment")
-    if settlement == "timeout": reconcile.side_effect = TimeoutError("OFFLINE bounded deadline")
     monkeypatch.setattr("evplatform.venues.settlement.reconcile_novig_settlement", reconcile)
     await runtime.refresh_account()
     assert probe.await_count == 2 and reconcile.await_count == 1
     assert risk.kill_switch and filled.id not in risk.settled
     assert not manager.settlements and risk.exposures() > 0
     assert not runtime.account_snapshots["novig"].reconciled
+
+
+@pytest.mark.parametrize("deferred", ["coordinator_busy", "inner_timeout", "outer_timeout"])
+async def test_deferred_portfolio_settlement_keeps_exposure_and_retries_without_false_halt(system, market, monkeypatch, deferred):
+    manager, risk, storage, _ = system
+    runtime = prepare(system)
+    runtime.portfolio = SimpleNamespace(profiles=(runtime.profile,))
+    runtime.execution_lease.scope = ("portfolio", "sandbox")
+    filled = await filled_order(system, market)
+    exposure = risk.exposures()
+    runtime.account_snapshots["novig"] = snapshot()
+    runtime._account_snapshot_fences["novig"] = runtime._ledger_fence()
+
+    async def account_probe(client, *, managed_orders, settled_order_ids):
+        return snapshot(reconciled=filled.id in settled_order_ids)
+
+    probe = AsyncMock(side_effect=account_probe)
+    settlement = AsyncMock(return_value=cash_result(filled))
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account", probe)
+    monkeypatch.setattr("evplatform.venues.settlement.reconcile_novig_settlement", settlement)
+    original_reconcile = runtime.reconcile_settlements
+    if deferred == "coordinator_busy":
+        await runtime._settlement_probe_lock.acquire()
+    elif deferred == "inner_timeout":
+        settlement.side_effect = TimeoutError("OFFLINE bounded venue deadline")
+    else:
+        runtime.reconcile_settlements = AsyncMock(side_effect=TimeoutError("OFFLINE bounded recovery deadline"))
+    try:
+        await runtime.refresh_account()
+    finally:
+        if deferred == "coordinator_busy":
+            runtime._settlement_probe_lock.release()
+
+    assert probe.await_count == 1  # An incomplete check is not a second inventory verdict.
+    assert not risk.kill_switch and risk.exposures() == exposure > 0
+    assert filled.id not in risk.settled and not manager.settlements
+    assert not runtime.account_snapshots and not runtime._account_snapshot_fences
+    assert not runtime._account_probes and "novig" not in runtime._last_account_probes
+    assert runtime.last_account_probe == 0
+    row = await (await storage.connection.execute("SELECT COUNT(*) FROM native_settlements")).fetchone()
+    assert row == (0,)
+
+    # No clock advance: clearing the per-venue timer allows the next maintenance
+    # pass to obtain actual payment evidence and then verify available cash.
+    settlement.side_effect = None
+    runtime.reconcile_settlements = original_reconcile
+    await runtime.refresh_account()
+    assert probe.await_count == 3 and filled.id in manager.settlements
+    assert runtime.account_snapshots["novig"].reconciled and not risk.kill_switch
+    assert risk.exposures() == 0
 
 
 async def test_successful_payment_cannot_hide_unrelated_remaining_mismatch(system, market, monkeypatch):
@@ -199,9 +248,11 @@ async def test_settlement_acceptance_invalidates_preexisting_available_cash(syst
     filled = await filled_order(system, market)
     runtime.account_snapshots["novig"] = snapshot()
     runtime._account_snapshot_fences["novig"] = runtime._ledger_fence()
+    runtime._last_account_probes.update(novig=100, kalshi=200)
     monkeypatch.setattr("evplatform.venues.settlement.reconcile_novig_settlement", AsyncMock(return_value=cash_result(filled)))
     assert await runtime.reconcile_settlements() == 1
     assert not runtime.account_snapshots and not runtime._account_snapshot_fences
+    assert runtime._last_account_probes == {"kalshi": 200}
     assert filled.id in manager.settlements
 
 

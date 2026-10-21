@@ -110,6 +110,8 @@ class ProphetXClient(NativeTransport):
         self._confirmed_channels: set[str] = set()
         self._market_frames = 0
         self._refresh_task: asyncio.Task | None = None
+        from .prophetx_private import ProphetXPrivateState
+        self.private = ProphetXPrivateState()
 
     def _http_failure(self, error: VenueHTTPError):
         if error.code == "exceed_subscription_count":
@@ -319,6 +321,8 @@ class ProphetXClient(NativeTransport):
 
     async def unsubscribe(self, channel_names: list[str]):
         for channel in channel_names:
+            if channel in self.private.bindings:
+                self.private.reset()
             await self._send_ws({"event": "pusher:unsubscribe", "data": {"channel": channel}})
             self.channels.pop(channel, None)
             self._confirmed_channels.discard(channel)
@@ -347,6 +351,8 @@ class ProphetXClient(NativeTransport):
             raise VenueError("ProphetX channel quota exceeded")
         self.channels = {item["channel_name"]: item for item in data["authorized_channel"]}
         self._authenticated_user_id = self.registration_user_id(data["authenticated"])
+        self.private.register(data["authorized_channel"], user=self._authenticated_user_id,
+                              environment=self.settings.environment)
         self._confirmed_channels.clear()
         self.health = "authenticating_stream"
         await self._send_ws({"event": "pusher:signin", "data": data["authenticated"]})
@@ -377,6 +383,8 @@ class ProphetXClient(NativeTransport):
         channel = frame.get("channel", "")
         if channel not in self.channels:
             return frame.get("event", "").startswith("pusher")
+        if channel in self.private.bindings:
+            return self.private.observe(frame, client=self)
         frame["scope"] = self.channels[channel].get("scope")
         permitted = {x["name"] for x in self.channels[channel].get("binding_events", [])}
         if frame.get("event") not in permitted:
@@ -399,6 +407,7 @@ class ProphetXClient(NativeTransport):
         self._require_credentials()
         failures = 0
         while not self._closed:
+            self.private.reset()
             self._last_sequences.clear()
             self._signin_confirmed = False
             self._authenticated_user_id = ""
@@ -442,6 +451,7 @@ class ProphetXClient(NativeTransport):
                         failures = 0
                     raise VenueError("Talaria stream closed; reconcile and resubscribe")
             except (OSError, ConnectionClosed, InvalidStatus, ValueError, VenueError, KeyError, TypeError, AttributeError) as exc:
+                self.private.reset()
                 self.error_count += 1
                 if isinstance(exc, InvalidStatus):
                     self._http_failure(VenueHTTPError(self.venue_id, exc.response.status_code))
@@ -455,6 +465,7 @@ class ProphetXClient(NativeTransport):
                     await self._backoff(failures)
                     failures += 1
             finally:
+                self.private.reset()
                 if self._refresh_task:
                     self._refresh_task.cancel()
                     await asyncio.gather(self._refresh_task, return_exceptions=True)
@@ -465,6 +476,7 @@ class ProphetXClient(NativeTransport):
                 self._confirmed_channels.clear()
 
     async def disconnect(self):
+        self.private.reset()
         await super().disconnect()
         self._signin_confirmed = False
         self._authenticated_user_id = ""

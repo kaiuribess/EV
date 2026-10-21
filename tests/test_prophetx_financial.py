@@ -17,6 +17,7 @@ from evplatform.venues.prophetx_financial import (
     source_time, validate_wallet_rows,
 )
 from evplatform.venues.prophetx_settlement import reconcile_prophetx_settlement
+from evplatform.venues.prophetx_private import ProphetXPrivateState
 from evplatform.venues.reconciliation import ReconciliationError
 
 NOW = datetime(2026, 10, 21, 2, tzinfo=timezone.utc)
@@ -39,6 +40,13 @@ class Client:
         self._last_sequences = {"private": 12}
         self.calls = []
         self.overrides = {}
+        self._ws = object()
+        self.channels = {"fixture-private": {"channel_name": "fixture-private", "binding_events": [
+            {"name": "orders", "type": "orders"}, {"name": "health_check", "type": "private_system_signal"}]}}
+        self._confirmed_channels = {"fixture-private"}
+        self.private = ProphetXPrivateState()
+        self.private.register(list(self.channels.values()), user=USER, environment="sandbox")
+        self.private.observe({"channel": "fixture-private", "event": "health_check", "data": {}}, client=self)
 
     def health_check(self):
         return {"authenticated": True}
@@ -255,6 +263,7 @@ async def test_inventory_external_position_missing_managed_order_and_private_cha
     original = client.fetch_balance
     async def changed_balance():
         client._last_sequences["private"] += 1
+        client.private._change()
         return await original()
     client.fetch_balance = changed_balance
     result = await probe_prophetx_account(client, [order], review=review, observed_at=NOW)
