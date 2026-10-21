@@ -4,7 +4,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 from .config import RiskConfig
-from .models import Candidate, Market, Order, OrderStatus, utcnow
+from .conflicts import UNRESOLVED, metadata_consistent, reserves_position, reviewed_correlations, risk_family
+from .models import Candidate, Market, Order, OrderBook, OrderStatus, utcnow
 from .pricing import worst_fee
 
 
@@ -72,6 +73,109 @@ class RiskEngine:
         if self.daily_date != utcnow().date():
             self.daily_realized, self.daily_date = Decimal(0), utcnow().date()
 
+    def check_order_limits(self, exclude_order_id: str | None = None):
+        """Check submission caps under the OMS lock, including durable intents.
+
+        All reserved attempts count toward the rolling burst limit, including
+        rejected/cancelled intents. Rehydrated audit orders provide the same
+        accounting after restart without a volatile counter reset.
+        """
+        others = [order for order in self.orders.values() if order.id != exclude_order_id]
+        if sum(order.status in UNRESOLVED and order.id not in self.settled
+               for order in others) >= self.config.max_open_orders:
+            raise RiskRejected("Maximum open order count reached")
+        now = utcnow()
+        recent = 0
+        for order in others:
+            # Missing clock zone is legacy uncertainty, not permission to reset
+            # a burst budget. Future clocks likewise conservatively count.
+            if order.created_at.tzinfo is None or (now - order.created_at).total_seconds() < 60:
+                recent += 1
+        if recent >= self.config.max_orders_per_minute:
+            raise RiskRejected("Rolling orders per minute limit reached")
+
+    def check_reserved_limits(self, order: Order, current_book: OrderBook | None):
+        """Recheck current budgets and fee bounds after every durable barrier.
+
+        Reservations cannot silently expand when fees change. Actual fills stay
+        accounted; rejecting this check prevents transmission or cancels only
+        the remaining standing quantity. Caller owns the OMS lock.
+        """
+        if order.id not in self.orders:
+            raise RiskRejected("Order has no central risk reservation")
+        if (current_book is None or current_book.market_id != order.market_id or
+                current_book.venue != order.venue or current_book.outcome != order.outcome):
+            raise RiskRejected("Reserved order fee book does not match its identity")
+        try:
+            per_fee = worst_fee(current_book.fee, order.price, 1)
+        except ValueError as exc:
+            raise RiskRejected("Current fee schedule is not verified") from exc
+        filled_cost = order.average_fill_price * order.filled_quantity + order.fees
+        residual = max(0, order.quantity - order.filled_quantity)
+        required = filled_cost + residual * (order.price + per_fee)
+        if required > order.reserved_cost:
+            raise RiskRejected("Current fees or fills exceed the approved order reservation")
+        if max(required, order.reserved_cost) > self.config.max_order_stake:
+            raise RiskRejected("Current order stake limit is below its reservation")
+        limits = [
+            (self.exposures(), self.config.max_total_exposure, "total"),
+            (sum(self.cost(o) for o in self.orders.values() if o.event_id == order.event_id),
+             self.config.max_event_exposure, "event"),
+            (sum(self.cost(o) for o in self.orders.values() if o.venue == order.venue),
+             self.config.max_venue_exposure, "venue"),
+            (sum(self.cost(o) for o in self.orders.values() if o.correlation_id == order.correlation_id),
+             self.config.max_correlated_exposure, "correlated"),
+        ]
+        if order.player_id:
+            limits.append((sum(self.cost(o) for o in self.orders.values() if o.player_id == order.player_id),
+                           self.config.max_player_exposure, "player"))
+        for exposure, limit, label in limits:
+            if exposure > limit:
+                raise RiskRejected(f"Current {label} exposure limit is below reserved exposure")
+
+    def check_position_conflicts(self, candidate, market: Market, exclude_order_id: str | None = None):
+        """Block conflicting positions across every strategy and execution venue.
+
+        This synchronous check must be called inside the OMS lock before intent
+        reservation and after each awaitable durability barrier. Family blocks
+        are deliberately conservative; they do not net different settlement
+        terms, alternates, or player props into a fabricated hedge.
+        """
+        try:
+            groups = set(reviewed_correlations(market))
+        except ValueError as exc:
+            raise RiskRejected(str(exc)) from exc
+        family = risk_family(market)
+        fingerprint = market.identity()
+        own = self.orders.get(exclude_order_id) if exclude_order_id else None
+        if own and (not metadata_consistent(own) or own.market_fingerprint != fingerprint or
+                    (own.market_id, own.venue, own.outcome, own.strategy) !=
+                    (candidate.market_id, candidate.venue, candidate.outcome, candidate.strategy)):
+            raise RiskRejected("Reserved canonical market identity changed or is unverified")
+        for order in self.orders.values():
+            if order.id == exclude_order_id or not reserves_position(order, self.settled):
+                continue
+            same_event = order.event_id == market.event_id
+            same_market = order.market_id == market.id
+            # All built-in and reviewed families are event scoped. Avoid
+            # repeatedly hashing unrelated event snapshots in the hot path.
+            if not same_event and not same_market:
+                continue
+            if not metadata_consistent(order):
+                if same_event or same_market:
+                    raise RiskRejected("Unverified legacy position metadata blocks this event")
+                continue
+            if same_market and order.market_fingerprint != fingerprint:
+                raise RiskRejected("Canonical market ID conflicts with an existing position")
+            if order.market_fingerprint == fingerprint:
+                if order.outcome != candidate.outcome:
+                    raise RiskRejected("Opposing position already reserved across strategies or venues")
+                raise RiskRejected("Duplicate position already reserved across strategies or venues")
+            if order.risk_family_id == family:
+                raise RiskRejected("Market family already reserved; alternate-line stacking is blocked")
+            if groups.intersection(order.reviewed_correlation_groups):
+                raise RiskRejected("Reviewed correlated position already reserved")
+
     def reserve(self, candidate: Candidate, market: Market, book, mode: str) -> Order:
         self.check_enabled()
         if (book is None or candidate.market_id != market.id or book.market_id != market.id or
@@ -92,16 +196,19 @@ class RiskEngine:
         age = (utcnow() - candidate.calculated_at).total_seconds() * 1000
         if age < 0 or age > self.config.max_candidate_age_ms:
             raise RiskRejected("Expired candidate")
-        key = (candidate.strategy, candidate.market_id, candidate.venue, candidate.outcome)
+        self.check_order_limits()
+        fingerprint = market.identity()
+        key = (fingerprint, candidate.outcome)
         last = self.duplicates.get(key)
-        if last and (utcnow() - last).total_seconds() < self.config.duplicate_window_seconds:
+        # Audit records preserve the global cooldown across a process restart.
+        matching_times = [o.created_at for o in self.orders.values()
+                          if o.market_fingerprint == fingerprint and o.outcome == candidate.outcome]
+        if last:
+            matching_times.append(last)
+        if any(t.tzinfo is None or (utcnow() - t).total_seconds() < self.config.duplicate_window_seconds
+               for t in matching_times):
             raise RiskRejected("Duplicate candidate cooldown")
-        if any(o.market_id == candidate.market_id and o.venue == candidate.venue and
-               o.outcome == candidate.outcome and o.status in {
-                   OrderStatus.INTENT, OrderStatus.SUBMITTING, OrderStatus.OPEN,
-                   OrderStatus.PARTIAL, OrderStatus.CANCEL_PENDING, OrderStatus.UNKNOWN}
-               for o in self.orders.values()):
-            raise RiskRejected("An unresolved order already exists")
+        self.check_position_conflicts(candidate, market)
         executable_depth = sum(level.quantity for level in book.asks if level.price <= candidate.price)
         quantity = min(candidate.max_quantity, executable_depth, int(self.config.max_order_stake / candidate.price))
         # Reserve for maximum potential fees including per-partial rounding.
@@ -133,6 +240,9 @@ class RiskEngine:
             correlation_id=market.event_id, venue=candidate.venue, outcome=candidate.outcome,
             price=candidate.price, quantity=quantity, reserved_cost=cost,
             synthetic=True, mode=mode,
+            market_snapshot=market, market_fingerprint=fingerprint,
+            risk_family_id=risk_family(market),
+            reviewed_correlation_groups=reviewed_correlations(market),
         )
         self.orders[order.id] = order
         self.duplicates[key] = utcnow()

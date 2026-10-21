@@ -1,6 +1,7 @@
 """Built-in provider transports. Importing this module never starts network IO."""
 from .base import ProviderEnvelope
 from .oddspapi import OddsPapiRest
+from .oddize import OddizeRest
 from .owls import OwlsRest
 from .parlay import ParlayRest, ParlayWebSocket
 
@@ -9,6 +10,7 @@ PROVIDER_FACTORIES = {
     "parlay_ws": ParlayWebSocket,
     "owls_rest": OwlsRest,
     "oddspapi_rest": OddsPapiRest,
+    "oddize_rest": OddizeRest,
 }
 PROVIDER_MANIFESTS = {name: factory.manifest for name, factory in PROVIDER_FACTORIES.items()}
 

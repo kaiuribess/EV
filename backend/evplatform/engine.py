@@ -19,6 +19,7 @@ from .core.oms import OrderManager
 from .core.plugins import PluginContext, PluginRegistry, StrategyPlugin
 from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, worst_fee
 from .core.risk import RiskEngine, RiskRejected
+from .core.signals import ResultProvenance, SignalLedger, SignalObservation, SignalResultImport
 from .core.storage import Storage
 from .plugins.demo import DemoInput
 from .plugins.paper import PaperVenue
@@ -41,6 +42,7 @@ class Engine:
             ("sports.game_state", GameState), ("player.projection", PlayerProjection),
             ("trade.candidate", Candidate), ("trade.order", Order), ("trade.fill", Fill),
             ("trade.settlement", SettlementResult),
+            ("signal.observation", SignalObservation), ("signal.result", SignalResultImport),
             ("system.notice", Notice),
         ]:
             self.schemas.register(name, 1, model)
@@ -48,6 +50,7 @@ class Engine:
         self.metrics = Metrics()
         self.storage = Storage(self.settings.database_path)
         self.storage.on_failure = self.risk.halt
+        self.signal_ledger = SignalLedger(self.storage)
         self.matcher = MarketMatcher()
         self.markets = self.matcher.markets
         self.quotes: dict[str, dict[tuple[str, str], Quote]] = {}
@@ -75,6 +78,7 @@ class Engine:
         self.audit_queue = self.bus.subscribe("audit", critical=True)
         self.dashboard_queue = self.bus.subscribe("dashboard-events", ["trade.order", "trade.fill", "system.notice"])
         self.settlement_queue = self.bus.subscribe("settlement-accounting", ["trade.settlement"], critical=True)
+        self.signal_queue = self.bus.subscribe("signal-ledger", ["signal.observation", "signal.result"], critical=True)
         self.settlements = {}
         self.closing_observations = {}
         self.stopping = False
@@ -86,6 +90,7 @@ class Engine:
 
     async def start(self):
         await self.storage.open()
+        await self.signal_ledger.start()
         saved = await self.storage.load_config()
         if "pricing" in saved:
             self.settings.pricing = type(self.settings.pricing).model_validate(saved["pricing"])
@@ -117,6 +122,7 @@ class Engine:
             asyncio.create_task(self._dashboard_events(), name="dashboard-observer"),
             asyncio.create_task(self._maintenance(), name="freshness-fill-maintenance"),
             asyncio.create_task(self._settlement_loop(), name="settlement-accounting"),
+            asyncio.create_task(self._signal_loop(), name="signal-ledger"),
         ]
         for task in self.tasks:
             task.add_done_callback(self._task_done)
@@ -133,13 +139,36 @@ class Engine:
         for name in list(self.registry.records):
             await self.registry.stop(name)
         await self.oms.cancel_all()
-        # Let observers drain already emitted order events before cancelling workers.
-        await self.audit_queue.join()
+        # Stop producers first, then finish pricing decisions and their ledger records.
+        clean = True
+        for queue, worker in [(self.process_queue, "normalization-strategy"),
+                              (self.risk_queue, "risk-routing"),
+                              (self.settlement_queue, "settlement-accounting"),
+                              (self.signal_queue, "signal-ledger")]:
+            clean = await self._drain_worker(queue, worker) and clean
+        if clean and self.signal_ledger.started:
+            await self.signal_ledger.close_all(reason="shutdown")
+        # A dead observer must not hang shutdown or mark an incomplete audit clean.
+        clean = await self._drain_worker(self.audit_queue, "audit-enqueue") and clean
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
-        await self.storage.save_config("unclean_shutdown", False)
+        if clean and not self.storage.failure:
+            await self.storage.save_config("unclean_shutdown", False)
         await self.storage.close()
+
+    async def _drain_worker(self, queue, worker):
+        if not any(task.get_name() == worker and not task.done() for task in self.tasks):
+            if queue.empty():
+                return True
+            self.risk.halt(f"Undrained worker on shutdown: {worker}")
+            return False
+        try:
+            await asyncio.wait_for(queue.join(), timeout=5)
+            return True
+        except TimeoutError:
+            self.risk.halt(f"Worker failed to drain on shutdown: {worker}")
+            return False
 
     def _persist_halt(self, reason):
         if not self.storage.connection or self.storage.failure or self.halt_persisted:
@@ -169,6 +198,51 @@ class Engine:
                 self.risk.halt("Audit persistence unavailable")
             finally:
                 self.audit_queue.task_done()
+
+    async def _signal_loop(self):
+        while True:
+            event = await self.signal_queue.get()
+            try:
+                if event.schema_name == "signal.result":
+                    payload = event.payload
+                    await self.signal_ledger.apply_result(
+                        payload.market, payload.result, payload.provenance,
+                        refund_fees_returned=payload.refund_fees_returned)
+                else:
+                    await self.signal_ledger.process(event.payload)
+            finally:
+                self.signal_queue.task_done()
+
+    async def _record_signal(self, market, status, reason, candidates=()):
+        config = market_config(self.settings.pricing, market)
+        eligible = tuple(c.id for c in candidates
+                         if c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi)
+        quotes = list(self.quotes.get(market.id, {}).values())
+        books = list(self.books.get(market.id, {}).values())
+        synthetic = (any(c.synthetic for c in candidates) if candidates else
+                     not any(not item.synthetic for item in [*quotes, *books]))
+        fees = {c.id: book.fee for c in candidates
+                if (book := self.book(market.id, c.venue, c.outcome)) is not None}
+        observation = SignalObservation(
+            market=market, candidates=tuple(candidates), status=status, reason=reason,
+            qualified_candidate_ids=eligible, model=config.devig_method,
+            pricing_thresholds={"min_ev": config.min_ev, "min_roi": config.min_roi},
+            fee_schedules=fees, synthetic=synthetic,
+            strategies=tuple(name for name, record in self.registry.records.items()
+                             if isinstance(record.plugin, StrategyPlugin)),
+        )
+        await self.bus.publish(Envelope(schema_name="signal.observation", source="strategy-engine", payload=observation))
+
+    async def record_signal_result(self, payload: SignalResultImport):
+        # Complete all earlier observations before matching a supplied result.
+        await self.process_queue.join()
+        await self.signal_queue.join()
+        await self.signal_ledger.apply_result(
+            payload.market, payload.result, payload.provenance,
+            refund_fees_returned=payload.refund_fees_returned)
+        # The independent audit and ledger consumers see the same typed result.
+        # Ledger result application is idempotent; this replay cannot double-grade.
+        await self.bus.publish(Envelope(schema_name="signal.result", source=payload.provenance.source, payload=payload))
 
     async def _dashboard_events(self):
         while True:
@@ -248,11 +322,13 @@ class Engine:
         books = list(self.books.get(market_id, {}).values())
         if not any(r.enabled and isinstance(r.plugin, StrategyPlugin) for r in self.registry.records.values()):
             self.signals[market_id] = {"status": "NO SIGNAL", "reason": "Strategy disabled"}
+            await self._record_signal(market, **self.signals[market_id])
             return
         view = {"market": market, "quotes": quotes, "books": books, "config": self.settings.pricing,
                 "typed_events": self.latest_typed}
         if market_id in self.settlements:
             self.signals[market_id] = {"status": "NO SIGNAL", "reason": "Market settled"}
+            await self._record_signal(market, **self.signals[market_id])
             return
         generated, reasons = [], []
         for name, strategy in self.registry.records.items():
@@ -283,12 +359,15 @@ class Engine:
                     self.risk.halt("Strategy failure")
         if not generated:
             self.signals[market_id] = {"status": "NO SIGNAL", "reason": "; ".join(reasons) if reasons else "No executable synchronized book"}
+            await self._record_signal(market, **self.signals[market_id])
             return
         config = market_config(self.settings.pricing, market)
         eligible = [c for c in generated if c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi]
         self.signals[market_id] = {"status": "POSITIVE EV" if eligible else "NEGATIVE EV",
                                   "reason": "Fee-adjusted executable offers",
                                   "best_ev": str(max(c.ev_per_contract for c in generated))}
+        await self._record_signal(market, self.signals[market_id]["status"],
+                                  self.signals[market_id]["reason"], generated)
         for candidate in generated:
             key = f"{candidate.strategy}:{market_id}:{candidate.venue}:{candidate.outcome}"
             self.opportunities[key] = candidate
@@ -326,6 +405,10 @@ class Engine:
         strategy = self.registry.records.get(c.strategy)
         if market is None or strategy is None or not strategy.enabled or not isinstance(strategy.plugin, StrategyPlugin):
             raise RiskRejected("Market or strategy unavailable")
+        if isinstance(c, Order):
+            if c.market_snapshot is not None and c.market_snapshot.identity() != market.identity():
+                raise RiskRejected("Market identity changed after order reservation")
+            self.risk.check_position_conflicts(c, market, exclude_order_id=c.id)
         book = self.book(c.market_id, c.venue, c.outcome)
         if book is None:
             raise RiskRejected("Executable book unavailable")
@@ -355,11 +438,13 @@ class Engine:
             qty = min(c.max_quantity, int(self.settings.risk.max_order_stake / c.price))
             if qty <= 0:
                 raise RiskRejected("No affordable quantity")
-            # Arbitrary partial fills can each trigger fee rounding. Evaluate the
-            # same one-contract worst-case bound used by the exposure reservation.
-            net = current.fair_probability - c.price - worst_fee(book.fee, c.price, 1)
-            if net < config.min_ev or net / c.price < config.min_roi:
-                raise RiskRejected("Size-adjusted net edge below threshold")
+        # Standing limits retain their approved price even when the new best ask
+        # changes. Never approve a fill by evaluating only the cheaper current ask.
+        net = current.fair_probability - c.price - worst_fee(book.fee, c.price, 1)
+        if net < config.min_ev or net / c.price < config.min_roi:
+            raise RiskRejected("Size-adjusted net edge below threshold")
+        if isinstance(c, Order):
+            self.risk.check_reserved_limits(c, book)
         return current.model_copy(update={"id": c.id}) if isinstance(c, Candidate) else current
 
     async def _risk_loop(self):
@@ -412,6 +497,10 @@ class Engine:
             return
         if set(result.outcome_payouts) != set(market.outcomes) or not result.evidence.strip():
             raise ValueError("Settlement must cover the exact opposing outcome set and include evidence")
+        if result.settled_at.tzinfo is None or result.settled_at > utcnow():
+            raise ValueError("Settlement must have an aware timestamp no later than the current time")
+        if not result.refund and sum(result.outcome_payouts.values()) != Decimal(1):
+            raise ValueError("Binary settlement must distribute exactly one winning payout")
         if not result.synthetic:
             raise ValueError("Native settlement reconciliation is not enabled")
         async with self.oms.lock:
@@ -442,6 +531,15 @@ class Engine:
                 "settled_order_ids": sorted(settled_ids), "settlements": settlements,
             })
             self.risk.settled, self.settlements, self.risk.daily_realized = settled_ids, settlements, daily_pnl
+        if self.signal_ledger.started:
+            await self.record_signal_result(SignalResultImport(
+                market=market, result=result,
+                provenance=ResultProvenance(
+                    source="paper_operator", reference=result.evidence,
+                    verified_by="local_paper_operator", verified_at=utcnow(),
+                    verification="canonical_settlement_verified", synthetic=True),
+                refund_fees_returned=True if result.refund else None,
+            ))
         await self.recalculate(result.market_id)
         await self.notice("info", f"Simulated settlement recorded; realized P&L {realized:.2f}", "paper_settlement")
 
@@ -514,7 +612,7 @@ class Engine:
             "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
             "positions": positions, "metrics": metrics,
             "risk": {**self.risk.config.model_dump(mode="json"), "total_exposure": str(self.risk.exposures()),
-                     "daily_realized": str(self.risk.daily_realized)},
+                     "daily_realized": str(self.risk.daily_realized), "position_conflicts_enforced": True},
             "pricing": self.settings.pricing.model_dump(mode="json"),
             "events": list(self.events),
             "signals": [{"market_id": k, **v} for k, v in self.signals.items()],

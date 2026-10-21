@@ -71,10 +71,16 @@ For frontend development, run `npm.cmd run dev` in `frontend/`; Vite proxies to
   references, freshness, disagreement limits, and explicit `NO SIGNAL` states.
 - Checks fresh executable best-price depth, fees, duplicate orders, stake,
   event/player/venue/correlated exposure, daily realized loss, and a kill switch.
+- Locks each position family across venues and strategies, including alternate
+  lines. Filled, partial and unknown positions remain reserved until settlement.
+  Submission caps and monetary limits are rechecked after durable writes.
 - Persists intent before simulated submission, acknowledges separately from
   fills, produces partial fills, supports cancellation, and recovers on restart.
 - Shows source clocks, quote age, books, model details, orders, positions,
   plugin status/configuration, latency samples, and audit events.
+- Saves every generated signal update even while trading is paused, including
+  negative opportunities and NO SIGNAL transitions. Performance shows permanent
+  signal episodes and explicitly hypothetical grades from supplied results.
 
 Synthetic paper fills are intentionally conservative and simplified. They are
 not an estimate of live queue position, matching probability, adverse selection,
@@ -131,6 +137,8 @@ documentation. Their exact scope and evidence are in:
 
 - [Provider protocols and limitations](docs/PROVIDER_PROTOCOLS.md)
 - [Native venue protocols and limitations](docs/VENUE_PROTOCOLS.md)
+- [Oddize free REST setup and actual validation](docs/ODDIZE.md)
+- [Signal history, grading and safety controls](docs/SIGNAL_TRACKING.md)
 
 Every live provider is disabled by default and independent of the demo. Enabling
 a provider with no credentials reports a blocked state rather than crashing or

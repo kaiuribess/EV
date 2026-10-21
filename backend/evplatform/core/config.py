@@ -42,6 +42,8 @@ class RiskConfig(BaseModel):
     duplicate_window_seconds: int = Field(default=30, ge=1)
     max_candidate_age_ms: int = Field(default=1000, ge=10)
     live_max_order_stake: Decimal | None = Field(default=None, gt=0)
+    max_open_orders: int = Field(default=20, ge=1)
+    max_orders_per_minute: int = Field(default=30, ge=1)
 
 
 class Settings(BaseSettings):

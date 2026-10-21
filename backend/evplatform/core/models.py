@@ -235,6 +235,13 @@ class Order(Contract):
     synthetic: bool
     mode: str
     reason: str = ""
+    # Complete immutable canonical identity survives discovery changes and restart.
+    # Nullable defaults preserve old audit records; risk treats missing metadata
+    # conservatively while such orders can still hold a position.
+    market_snapshot: Market | None = None
+    market_fingerprint: str | None = None
+    risk_family_id: str | None = None
+    reviewed_correlation_groups: tuple[str, ...] = ()
 
 
 class Fill(Contract):

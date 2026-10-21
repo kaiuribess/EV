@@ -292,6 +292,86 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
     return result
 
 
+def _oddize_quote_time(row: dict) -> datetime | None:
+    epoch = parse_timestamp(row.get("ts"))
+    iso = parse_timestamp(row.get("timestamp"))
+    # The two documented fields represent the same observation clock. Conflicts
+    # cannot be made trustworthy by using whichever happens to look fresher.
+    if epoch is not None and iso is not None and epoch != iso:
+        return None
+    return epoch or iso
+
+
+def _oddize_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
+    payload = envelope.payload
+    if not isinstance(payload, dict):
+        raise ValueError("Oddize payload must be an object")
+    props = envelope.kind == "props_snapshot"
+    if props:
+        events = [{"event_id": payload.get("event_id") or envelope.metadata.get("event_id"),
+                   "sport": payload.get("sport") or envelope.metadata.get("sport"),
+                   "props": payload.get("props", [])}]
+    elif "event" in payload:
+        events = [payload["event"]]
+    else:
+        events = payload.get("events", [])
+    grouped: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if not isinstance(event, dict) or not event.get("event_id"):
+            raise ValueError("Oddize event identity missing")
+        rows = event.get("props" if props else "odds", [])
+        if not isinstance(rows, list):
+            raise ValueError("Oddize prices must be a list")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Oddize price must be an object")
+            bookmaker, market = row.get("book"), row.get("offer_type") or row.get("market")
+            side = row.get("side") if props else row.get("team")
+            if not all(isinstance(value, str) and value.strip() for value in (bookmaker, market, side)):
+                raise ValueError("Oddize book, market or outcome missing")
+            player = row.get("subject") if props and row.get("subject_type") == "player" else row.get("player_name")
+            if props and (row.get("subject_type") not in {"player", "team"} or not row.get("subject")):
+                raise ValueError("Oddize prop subject identity missing")
+            if props and side not in {"Over", "Under"}:
+                raise ValueError("Oddize prop side is not a documented Over/Under outcome")
+            line = number_identity(row.get("line"))
+            if line is not None:
+                numeric = Decimal(line)
+                if not numeric.is_finite():
+                    raise ValueError("Invalid Oddize threshold")
+                if not props and market in {"s", "rl", "alt_s"}:
+                    line = number_identity(abs(numeric))
+            if props and line is None:
+                raise ValueError("Oddize prop threshold missing")
+            raw_price = Decimal(str(row.get("american_odds")))
+            if not raw_price.is_finite() or abs(raw_price) < 100 or raw_price != raw_price.to_integral_value():
+                raise ValueError("Invalid Oddize American price")
+            context = {
+                "event_sport": event.get("sport") or envelope.metadata.get("sport"),
+                # OpenAPI defines team1 as away and team2 as home.
+                "participants": [event.get("team2"), event.get("team1")],
+                "scheduled_start": event.get("start_date"),
+                "subject": row.get("subject") if props else None,
+                "subject_type": row.get("subject_type") if props else None,
+                "observation_clock": "oddize_observation",
+                "settlement_rules_provided": False,
+            }
+            identity = {"bookmaker": bookmaker, "event_id": str(event["event_id"]), "market_key": market,
+                        "player_key": player, "line": line, "context": context}
+            key = json.dumps(identity, sort_keys=True, default=str)
+            group = grouped.setdefault(key, {**identity, "prices": {}, "points": {}, "times": []})
+            if side in group["prices"]:
+                raise ValueError("Duplicate Oddize outcome in a source market")
+            group["prices"][side] = decimal_price(raw_price, "american")
+            group["points"][side] = number_identity(row.get("line"))
+            group["times"].append(_oddize_quote_time(row))
+    return [SourceOffer(
+        envelope.provider_id, group["bookmaker"], group["event_id"], group["market_key"],
+        group["player_key"], group["line"], None, group["points"], group["prices"],
+        _oldest(group["times"]), None, "active", group["context"],
+    ) for group in grouped.values()]
+
+
 def extract_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
     if envelope.kind not in {"snapshot", "props_snapshot", "initial_state", "odds_update"}:
         return []
@@ -309,6 +389,8 @@ def extract_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
         return list({offer.signature: offer for offer in _toa_offers(envelope, events, odds_format="american")}.values())
     if envelope.provider_id == "oddspapi_rest":
         return _oddspapi_offers(envelope)
+    if envelope.provider_id == "oddize_rest":
+        return _oddize_offers(envelope)
     return []
 
 

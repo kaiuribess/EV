@@ -3,13 +3,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from .core.config import PricingConfig, RiskConfig, Settings
 from .core.models import Envelope, SettlementResult
+from .core.signals import SignalResultImport
 from .engine import Engine
 
 
@@ -70,6 +71,46 @@ def create_app(settings=None):
     @app.get("/api/state")
     async def state():
         return engine.state()
+
+    @app.get("/api/signals")
+    async def signal_history(limit: int = Query(25, ge=1, le=200),
+                             offset: int = Query(0, ge=0), synthetic: bool = True):
+        return await engine.signal_ledger.query(limit=limit, offset=offset, synthetic=synthetic)
+
+    @app.get("/api/signals/summary")
+    async def signal_summary(synthetic: bool = True):
+        return await engine.signal_ledger.summary(synthetic=synthetic)
+
+    @app.get("/api/signals/transitions")
+    async def signal_transitions(limit: int = Query(50, ge=1, le=200),
+                                 offset: int = Query(0, ge=0), synthetic: bool = True):
+        return await engine.signal_ledger.transitions(limit=limit, offset=offset, synthetic=synthetic)
+
+    @app.post("/api/signals/result")
+    async def signal_result(body: SignalResultImport):
+        try:
+            await engine.record_signal_result(body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        return {"status": "recorded", "hypothetical_only": True,
+                "synthetic": body.result.synthetic,
+                "note": "Operator-supplied canonical result; this does not settle native positions or prove execution."}
+
+    @app.get("/api/readiness")
+    async def readiness():
+        summary = await engine.signal_ledger.summary(synthetic=False)
+        return {
+            "live_trading_ready": False,
+            "paper_position_conflicts_enforced": True,
+            "signal_ledger": engine.signal_ledger.started,
+            "real_signal_evidence": summary,
+            "blocking_items": [
+                "Native order routing, quantity accounting, fees and private reconciliation remain unvalidated",
+                "No automatic verified settlement feed or compatible closing-price feed is connected",
+                "Real market identity and settlement mappings require review",
+                "Synthetic paper results do not establish a profitable real strategy",
+            ],
+        }
 
     @app.post("/api/shutdown")
     async def shutdown():

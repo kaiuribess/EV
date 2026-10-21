@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { emptyState, normalizeState, type Json, type State } from './types'
 
-export async function request(path: string, body?: Json): Promise<Json> {
+export async function request(path: string, body?: Json, signal?: AbortSignal): Promise<Json> {
   const response = await fetch(path, {
     method: body ? 'POST' : 'GET',
     headers: body ? { 'Content-Type': 'application/json', 'X-EV-Control': 'local' } : {},
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {

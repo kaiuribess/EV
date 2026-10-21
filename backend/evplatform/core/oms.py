@@ -54,11 +54,17 @@ class OrderManager:
             try:
                 self.risk.check_enabled()
                 self.revalidate(candidate)
+                self.revalidate(order)
+                self.risk.check_order_limits(exclude_order_id=order.id)
+                self.risk.check_reserved_limits(order, self.book_lookup(order.market_id, order.venue, order.outcome))
                 order = await self._save(order.model_copy(update={
                     "status": OrderStatus.SUBMITTING, "submitted_at": utcnow()}))
                 # Revalidate again after the final persistence barrier.
                 self.risk.check_enabled()
                 self.revalidate(candidate)
+                self.revalidate(order)
+                self.risk.check_order_limits(exclude_order_id=order.id)
+                self.risk.check_reserved_limits(order, self.book_lookup(order.market_id, order.venue, order.outcome))
                 authorization = self.risk.authority.issue(order.id)
                 result = await self.venue.submit(order, authorization)
                 order = await self._save(order.model_copy(update={
@@ -107,6 +113,15 @@ class OrderManager:
         await self.storage.save_fill_and_order(fill, updated)
         self.fill_ids.add(fill.id)
         self.risk.orders[order.id] = updated
+        # A valid late fill must be accounted even if it reveals a conflict with
+        # a replacement position. Freeze routing rather than discarding that fill.
+        if updated.market_snapshot is not None:
+            try:
+                self.risk.check_position_conflicts(updated, updated.market_snapshot, exclude_order_id=updated.id)
+            except RiskRejected:
+                self.risk.halt("Fill created a conflicting position; reconciliation required")
+        else:
+            self.risk.halt("Fill has unverified legacy market identity; reconciliation required")
         await self.bus.publish(Envelope(schema_name="trade.fill", source="paper_execution", payload=fill))
         await self.bus.publish(Envelope(schema_name="trade.order", source="oms", payload=updated))
         if order.submitted_at:
@@ -120,8 +135,7 @@ class OrderManager:
                 book = self.book_lookup(order.market_id, order.venue, order.outcome)
                 # Standing simulated orders are cancelled when source references become invalid.
                 try:
-                    if self.risk.kill_switch:
-                        raise RiskRejected("Kill switch")
+                    self.risk.check_enabled()
                     self.revalidate(order)
                 except RiskRejected:
                     await self._cancel(order)

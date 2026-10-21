@@ -278,6 +278,62 @@ td small { display: block; font: 8px 'DM Sans',sans-serif; color: #5f7088; margi
 .latency-block b { display: block; font: 14px 'IBM Plex Mono',monospace; color: #b7c8de; margin-top: 5px; }
 .latency-block > small { display: block; color: #536c8b; font-size: 8px; margin-top: 14px; }
 .metrics-panel { margin-top: 20px; }
+
+/* The durable signal ledger is separate from order and fill performance. */
+.signal-performance { margin-top: 36px; padding-top: 30px; border-top: 1px solid var(--border); }
+.signal-performance-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
+.signal-performance-head .eyebrow { display: block; margin-bottom: 8px; }
+.signal-performance-head h2 { font-size: 20px; font-weight: 550; letter-spacing: -.4px; }
+.signal-performance-head p { color: var(--muted); font-size: 11px; line-height: 1.6; margin-top: 8px; }
+.signal-source-filter { display: inline-flex; padding: 3px; border: 1px solid var(--border); background: #0b1018; border-radius: 6px; flex-shrink: 0; }
+.signal-source-filter button { color: var(--muted); font-size: 10px; padding: 8px 12px; border-radius: 4px; white-space: nowrap; }
+.signal-source-filter button.selected { color: var(--accent); background: #c5f6790d; }
+.signal-method-note { align-items: flex-start; }
+.signal-method-note > svg { margin-top: 2px; }
+.signal-stats .stat-detail { line-height: 1.6; }
+.signal-summary-strip { display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 14px 20px; border-bottom: 1px solid var(--subtle-border); background: #0c1219; }
+.signal-summary-strip > span { display: inline-flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; }
+.signal-summary-strip b { font-family: 'IBM Plex Mono',monospace; color: #bac7d8; font-size: 10px; font-weight: 500; }
+.signal-ledger-table { min-width: 1280px; }
+.signal-ledger-table td { vertical-align: top; line-height: 1.6; }
+.signal-ledger-table td:first-child { min-width: 150px; }
+.signal-ledger-table .signal-event { max-width: 220px; display: block; font-size: 11px; font-weight: 500; white-space: normal; }
+.signal-ledger-table small { white-space: normal; max-width: 240px; line-height: 1.6; }
+.signal-ledger-table small.green { color: var(--green); }
+.signal-ledger-table small.signal-negative { color: var(--red); }
+.signal-ledger-table .badge { margin-top: 3px; }
+.signal-grade { font-size: 10px; text-transform: capitalize; }
+.signal-negative { color: var(--red); }
+.signal-close-reason { min-width: 160px; }
+.signal-pagination > div:first-child { display: flex; flex-direction: column; gap: 6px; }
+.signal-pagination small { color: var(--faint); font-size: 9px; }
+.signal-pagination .signal-page-controls { display: flex; gap: 8px; }
+.signal-pagination .button { font-size: 10px; }
+.signal-methodology { margin: 13px 0 20px; display: flex; justify-content: space-between; gap: 15px; font-size: 10px; line-height: 1.7; color: var(--muted); }
+.signal-methodology > p { max-width: 750px; }
+.signal-methodology > span { color: #65758a; text-align: right; flex-shrink: 0; }
+.signal-refreshing { animation: signal-spin 1.4s linear infinite; }
+.signal-fetch-error { margin-bottom: 16px; }
+.risk-safeguard-notice { align-items: flex-start; }
+.risk-safeguard-notice > svg { margin-top: 2px; }
+.risk-safeguard-notice small { display: block; margin-top: 6px; color: var(--muted); font-size: 9px; }
+.risk-safeguard-notice > .badge { margin-top: 2px; }
+@keyframes signal-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .signal-refreshing { animation: none; } }
+@media (max-width: 900px) {
+  .signal-performance-head { align-items: flex-start; flex-direction: column; }
+  .signal-methodology { flex-direction: column; gap: 6px; }
+  .signal-methodology > span { text-align: left; }
+}
+@media (max-width: 560px) {
+  .signal-performance { margin-top: 27px; padding-top: 25px; }
+  .signal-performance-head h2 { font-size: 18px; }
+  .signal-source-filter { width: 100%; }
+  .signal-source-filter button { flex: 1; }
+  .signal-summary-strip { padding: 12px 13px; gap: 10px 20px; }
+  .signal-pagination { align-items: flex-start; flex-direction: column; gap: 13px; }
+  .signal-pagination .signal-page-controls { width: 100%; justify-content: space-between; }
+}
 .metrics-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); padding: 3px 20px 22px; gap: 22px; }
 .metrics-grid > div > span { display: block; font-size: 9px; color: #7b90ac; text-transform: capitalize; }
 .metrics-grid strong { display: block; font: 17px 'IBM Plex Mono',monospace; margin-top: 10px; }
