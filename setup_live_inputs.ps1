@@ -15,7 +15,7 @@ $oddizeRestWasEnabled = @($state.plugins | Where-Object { $_.manifest.name -eq '
 $isPaper = $state.mode -eq 'paper' -and $state.sample_feed_enabled -eq $false -and
     $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0
 $isNative = $state.mode -in @('sandbox', 'production') -and $state.sample_feed_enabled -eq $false -and
-    $state.auto_trade -eq $false -and $native.native_execution_enabled -eq $false -and
+    $state.auto_trade -eq $false -and
     @($native.orders | Where-Object { $_.status -in @('intent', 'submitting', 'open', 'partial', 'cancel_pending', 'unknown') }).Count -eq 0
 if (-not $isPaper -and -not $isNative) {
     throw 'Start a paused sample-free paper or native workspace before configuring shared live inputs. No account request was made.'
@@ -187,4 +187,4 @@ if ($isPaper) {
 } else {
     Write-Host 'Native risk draft: quarter-Kelly, $5 reporting unit, verified available cash required; real stake authorization remains off.'
 }
-Write-Host 'Quote active status and settlement equivalence remain unverified. Native execution stays blocked.'
+Write-Host 'Quote active status and settlement equivalence remain unverified. Automatic native orders remain paused.'

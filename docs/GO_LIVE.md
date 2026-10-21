@@ -56,6 +56,22 @@ For production monitoring, the corresponding command is:
 .\start_native.ps1 -Environment production -Port 8003 -Background
 ```
 
+To preserve the *native order transport path* across a restart for an already
+reviewed production pilot, use the explicit switch:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start_native.ps1 -Environment production -Port 8002 -NativeOrderPath -Background
+```
+
+This sets `EV_LIVE_ENABLED=true` for that process but still forces
+`auto_trade=false`. It cannot place an order until the exact launch profile,
+market mapping, reference and account checks pass and the operator arms the
+digest-bound scope. It refuses to treat an already-running process with a
+different execution-path setting as newly configured; stop that process safely
+before restarting with this switch. Without the switch, the native order path
+remains off by default. The current pilot process on port 8002 already has the
+path configured, and remains paused and blocked by its release checks.
+
 That workspace also starts paused and uses `data/native-production.db`.
 Neither command grants order authorization or turns on automation, including
 after a restart. Native launch artifacts currently share the paths below;

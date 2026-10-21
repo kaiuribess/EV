@@ -2,6 +2,7 @@
 param(
     [ValidateSet("sandbox", "production")][string]$Environment = "sandbox",
     [int]$Port = 8002,
+    [switch]$NativeOrderPath,
     [switch]$NoBrowser,
     [switch]$Background
 )
@@ -13,13 +14,20 @@ $priorLive = $env:EV_LIVE_ENABLED
 $priorAuto = $env:EV_AUTO_TRADE
 try {
     $env:EV_SAMPLE_FEED_ENABLED = 'false'
-    $env:EV_LIVE_ENABLED = 'false'
+    # Explicitly preparing the native path never arms automation. The backend's
+    # reviewed launch gate and per-order risk checks still control submission.
+    $env:EV_LIVE_ENABLED = if ($NativeOrderPath) { 'true' } else { 'false' }
     $env:EV_AUTO_TRADE = 'false'
     & "$PSScriptRoot\scripts\start_local.ps1" -Mode $Environment -Port $Port -NoBrowser -Background
 } finally {
     $env:EV_SAMPLE_FEED_ENABLED = $priorSample
     $env:EV_LIVE_ENABLED = $priorLive
     $env:EV_AUTO_TRADE = $priorAuto
+}
+$state = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/state" -TimeoutSec 10
+if ($state.mode -ne $Environment -or $state.sample_feed_enabled -ne $false -or
+    $state.live_enabled -ne [bool]$NativeOrderPath -or $state.auto_trade -ne $false) {
+    throw 'The running native workspace does not match the requested paused execution configuration. Stop it safely and restart with the intended switches.'
 }
 & "$PSScriptRoot\setup_live_inputs.ps1" -Port $Port
 if (-not $NoBrowser) { Start-Process -FilePath "http://127.0.0.1:$Port/?page=providers" }
