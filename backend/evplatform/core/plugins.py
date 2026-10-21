@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
+import os
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -238,11 +239,24 @@ class PluginRegistry:
             record.health = {"status": "disabled", "message": "Disabled by operator"}
 
     def public(self):
+        def credential_status(record):
+            if record.health.get("authenticated") is True:
+                return "authenticated"
+            if record.health.get("state") == "unauthorized":
+                return "rejected"
+            names_for_config = getattr(record.plugin, "credential_names", None)
+            if callable(names_for_config):
+                try:
+                    selected = names_for_config(record.config)
+                except ValueError:
+                    return "missing"
+                return "configured_unverified" if all(os.getenv(name) for name in selected.values()) else "missing"
+            return record.credential_status
+
         return [{
             "manifest": r.plugin.manifest.model_dump(mode="json"),
             "enabled": r.enabled, "health": r.health,
-            "credential_status": ("authenticated" if r.health.get("authenticated") is True else
-                                  "rejected" if r.health.get("state") == "unauthorized" else r.credential_status),
+            "credential_status": credential_status(r),
             "config": r.config,
         } for r in self.records.values()]
 

@@ -69,6 +69,27 @@ def test_kalshi_profile_choice_is_in_manifest(kalshi_monitor):
     assert kalshi_monitor.manifest.config_schema['properties']['credential_profile']['default'] == 'environment'
 
 
+def test_provider_center_reports_credentials_for_selected_kalshi_environment(monkeypatch):
+    registry = PluginRegistry()
+    register_external(registry, None)
+    for key in ('KALSHI_API_KEY_ID', 'KALSHI_PRIVATE_KEY_PATH',
+                'KALSHI_SANDBOX_API_KEY_ID', 'KALSHI_SANDBOX_PRIVATE_KEY_PATH'):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv('KALSHI_API_KEY_ID', 'production-key')
+    monkeypatch.setenv('KALSHI_PRIVATE_KEY_PATH', 'production-path')
+    def status():
+        return next(row['credential_status'] for row in registry.public()
+                    if row['manifest']['name'] == 'kalshi')
+    assert status() == 'missing'
+    registry.configure('kalshi', {'environment': 'production'})
+    assert status() == 'configured_unverified'
+    registry.configure('kalshi', {'environment': 'sandbox'})
+    assert status() == 'missing'
+    monkeypatch.setenv('KALSHI_SANDBOX_API_KEY_ID', 'demo-key')
+    monkeypatch.setenv('KALSHI_SANDBOX_PRIVATE_KEY_PATH', 'demo-path')
+    assert status() == 'configured_unverified'
+
+
 def test_existing_configuration_keeps_exact_legacy_pair(monitor):
     config = NovigMonitorConfig(environment='sandbox').model_dump()
     assert config['credential_profile'] == 'legacy'
