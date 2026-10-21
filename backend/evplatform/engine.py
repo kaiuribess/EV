@@ -12,7 +12,7 @@ from .core.config import Settings
 from .core.metrics import Metrics
 from .core.models import (
     Candidate, Contract, Envelope, Fill, GameState, Market, Order, OrderBook,
-    PlayerProjection, Quote, SettlementResult, utcnow,
+    PlayerProjection, ProviderFrame, Quote, SettlementResult, utcnow,
 )
 from .core.normalization import MarketMatcher
 from .core.oms import OrderManager
@@ -29,6 +29,7 @@ from .plugins.demo import DemoInput
 from .plugins.paper import PaperVenue
 from .plugins.positive_ev import PositiveEV
 from .plugins.native_positive_ev import NativePositiveEV
+from .plugins.parlay_paper import ParlayPaperEV, ParlayPaperInput
 
 
 class Notice(Contract):
@@ -48,7 +49,7 @@ class Engine:
             ("trade.candidate", Candidate), ("trade.order", Order), ("trade.fill", Fill),
             ("trade.settlement", SettlementResult),
             ("signal.observation", SignalObservation), ("signal.result", SignalResultImport),
-            ("system.notice", Notice),
+            ("system.notice", Notice), ("provider.frame", ProviderFrame),
             ("exchange.native_book", NativeBook), ("trade.native_candidate", NativeCandidate),
             ("native.order", NativeOrder), ("native.settlement", NativeSettlement),
             ("native.signal", NativeSignalObservation),
@@ -78,6 +79,9 @@ class Engine:
                                                   and self.settings.sample_feed_enabled))
         self.registry.register(PositiveEV(), enabled=True)
         self.registry.register(NativePositiveEV(), enabled=False)
+        self.registry.register(ParlayPaperEV(), enabled=(self.settings.mode == "paper"
+            and not self.settings.sample_feed_enabled))
+        self.registry.register(ParlayPaperInput(self), enabled=False)
         self.registry.register(self.paper, enabled=True)
         self.registry.configure("synthetic_schedule", {"interval": self.settings.demo_interval, "seed": self.settings.demo_seed})
         self.registry.configure("positive_ev", self.settings.pricing.model_dump(mode="json"))
@@ -740,6 +744,10 @@ class Engine:
         return {**candidate.model_dump(mode="json"), "event_name": market.event_name,
                 "sport": market.sport, "league": market.league, "market_type": market.market_type,
                 "player": market.player, "line": str(market.line) if market.line is not None else None,
+                "paper_only": market.extensions.get("paper_only", False),
+                "target_bookmaker": (candidate.venue.removeprefix("parlay_paper:")
+                    if market.extensions.get("paper_only") else None),
+                "capacity_kind": "simulated" if market.extensions.get("paper_only") else "observed",
                 "status": "RESEARCH ONLY" if not candidate.reference_inputs_eligible else "POSITIVE EV" if candidate.execution_eligible and candidate.ev_per_contract >= config.min_ev and candidate.roi >= config.min_roi else "NEGATIVE EV"}
 
     def quote_public(self, quote):
@@ -752,10 +760,16 @@ class Engine:
 
     def market_detail(self, market_id):
         market = self.markets[market_id]
-        try:
-            reference_pricing = fair_value(market, list(self.quotes.get(market_id, {}).values()), self.settings.pricing).model_dump(mode="json")
-        except NoSignal as exc:
-            reference_pricing = {"status": "NO SIGNAL", "reason": str(exc)}
+        if market.extensions.get("paper_only"):
+            reference_pricing = {"status": "PAPER ASSUMPTION", "reason":
+                "Fair prices are target-specific and exclude the target bookmaker. "
+                "See each paper calculation below. Parlay price timestamps do not verify "
+                "current offer status, settlement, or executable capacity."}
+        else:
+            try:
+                reference_pricing = fair_value(market, list(self.quotes.get(market_id, {}).values()), self.settings.pricing).model_dump(mode="json")
+            except NoSignal as exc:
+                reference_pricing = {"status": "NO SIGNAL", "reason": str(exc)}
         return {
             "market": market.model_dump(mode="json"),
             "reference_pricing": reference_pricing,

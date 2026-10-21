@@ -67,33 +67,56 @@ odds**, run this from PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\start_live_paper.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\setup_live_inputs.ps1
 ```
 
 The launcher stops a paused demo instance on port 8001, opens
 `data/live-paper.db`, and restores its enabled input and account-monitor
 plugins. It never copies synthetic trade history or trading authorization.
-The second command pauses paper automation and configures four priority sports
-across a broad Parlay prop stream, a separate game-line stream, and scheduled
-REST discovery. The game-line stream requests the provider's complete-board
+It also runs the same `setup_live_inputs.ps1` feed/profile setup used by
+`start_native.ps1`; there is one source of sportsbook weights and feed scopes.
+It configures four priority sports across a broad Parlay prop stream, a
+separate game-line stream, and scheduled REST discovery, then enables paper
+automation only after a complete game-board baseline arrives. Pass `-Paused`
+to leave paper orders paused.
+The game-line stream requests the provider's complete-board
 shape and records which sports actually receive a confirmed complete baseline.
 If the paper workspace still uses legacy equal weights, this command also
-loads the supplied four research profiles without authorizing execution.
+loads the supplied research profiles without authorizing native execution.
 This configuration uses the backend-only Parlay key. It makes an estimated 24
 REST credits per 15-minute cycle when all four sports are subscribed; check
 the provider's actual usage headers and account balance in Provider Center.
 By itself, the launcher enables **simulated paper automation** unless you pass
-`-Paused` or an emergency stop is active; `setup_live_inputs.ps1` pauses it
-while updating feed scopes. Native execution stays off. The Provider Center shows
-which live messages arrived and which quotes remain quarantined. A connection
-or message is not evidence of a current, comparable quote. The current feeds
-have no reviewed sportsbook-to-market mappings, and the native exchange monitors
-do not route orders into the paper simulator. This workspace therefore receives
-real data but cannot yet produce live-input paper trades. The synthetic demo
-remains available separately for end-to-end paper order testing.
-Running the launcher again retains its separate provider settings.
-For an explicitly paused start, use `start_live_paper.ps1 -Paused` before
-`setup_live_inputs.ps1`. A complete provider game board is only a scoped
+`-Paused` or an emergency stop is active. The paper-only strategy consumes the existing Parlay
+game-board stream and compares complete, pregame, two-sided moneylines from
+distinct sportsbooks. It excludes the quoted target book from its own fair
+estimate, requires Pinnacle plus another fresh book, checks both power and
+proportional devigging, and records positive and negative paper signals. A
+qualifying signal passes the central risk engine into the local simulator.
+For this paper experiment the complete Parlay game board may retain a price
+whose `last_update` is up to 10 minutes old. Its source timestamp stays intact.
+Opposing moneyline sides must have price-change clocks within 30 seconds of
+each other; a retained side cannot be paired with a much newer opposing side.
+The paper strategy additionally requires the provider heartbeat to show that
+the **book** was polled within three minutes, then constructs short-lived
+simulated capacity. A book poll does not establish that this exact quote is
+currently offered. Production pricing continues to require its separate
+reviewed observation, market-status and TTL evidence.
+No additional Parlay socket is opened for the paper consumer. Native execution
+stays off. The paper offer is the actual Parlay quoted price converted to a
+$1-payout equivalent; its available quantity and fill are **simulated**. A
+complete provider baseline and a recent `last_update` do not prove the book
+would accept a wager, that its displayed line is still active upstream, or that
+its settlement is equivalent to a prediction-market contract. These paper
+results must not be used as validated live-order evidence. Player props and
+exchange books remain excluded from this assumed-price paper route; unverified
+real quotes stay quarantined for native trading.
+Running the launcher again retains its separate order ledger and applies the
+shared feed/profile settings. `start_native.ps1 -Environment production`
+applies the same feed/profile setup to its own paused workspace. This does not
+make the paper-only hypothetical sportsbook offer a native exchange order:
+real bets still require exact exchange mappings, quote-status and settlement
+evidence, account preflight, and the live activation gates. A complete provider
+game board is only a scoped
 baseline; it does not verify each retained price is still offered or that an
 exchange contract has equivalent settlement rules.
 

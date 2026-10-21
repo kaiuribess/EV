@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([ValidateRange(1, 65535)][int]$Port = 8001)
+param([ValidateRange(1, 65535)][int]$Port = 8001, [switch]$EnablePaperAutomation)
 
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
@@ -10,9 +10,16 @@ $books = @('pinnacle', 'fanduel', 'draftkings', 'caesars', 'betonline', 'bet365'
 
 $state = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 $native = Invoke-RestMethod -Uri "$baseUrl/api/native/orders" -TimeoutSec 10
-if ($state.mode -ne 'paper' -or $state.sample_feed_enabled -ne $false -or
-    $native.native_execution_enabled -ne $false -or @($native.orders).Count -ne 0) {
-    throw 'Start the separate sample-free paper workspace before configuring live inputs. No account request was made.'
+$isPaper = $state.mode -eq 'paper' -and $state.sample_feed_enabled -eq $false -and
+    $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0
+$isNative = $state.mode -in @('sandbox', 'production') -and $state.sample_feed_enabled -eq $false -and
+    $state.auto_trade -eq $false -and $native.native_execution_enabled -eq $false -and
+    @($native.orders | Where-Object { $_.status -in @('intent', 'submitting', 'open', 'partial', 'cancel_pending', 'unknown') }).Count -eq 0
+if (-not $isPaper -and -not $isNative) {
+    throw 'Start a paused sample-free paper or native workspace before configuring shared live inputs. No account request was made.'
+}
+if ($EnablePaperAutomation -and -not $isPaper) {
+    throw 'Paper automation is only available in the paper workspace. Native order authorization is never changed here.'
 }
 if ($state.auto_trade) {
     Invoke-RestMethod -Uri "$baseUrl/api/control" -Method Post -Headers $headers `
@@ -51,12 +58,21 @@ function Configure-Input {
 # quote-specific active status, settlement equivalence or EV.
 Configure-Input 'parlay_ws' @{
     sports = $sports; bookmakers = $books; stream_kinds = @('prop'); markets = @();
-    stream_limit = 1000; max_age_seconds = 30
+    stream_limit = 1000; max_age_seconds = 30; account_tier = 'unknown'
 }
 Configure-Input 'parlay_game_ws' @{
     sports = $sports; bookmakers = $books; stream_kinds = @('game');
-    markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000; max_age_seconds = 30;
-    include_props = $false
+    markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000; max_age_seconds = 600;
+    include_props = $false; account_tier = 'unknown'
+}
+if ($isPaper) {
+    Configure-Input 'parlay_paper_input' @{
+        sports = $sports; bookmakers = $books; stream_kinds = @('game');
+        markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000;
+        max_age_seconds = 600; max_poll_age_seconds = 180;
+        include_props = $false; account_tier = 'unknown'
+    }
+    Configure-Input 'parlay_paper_ev' @{ max_quote_age_ms = 600000; min_references = 2 }
 }
 # REST is scheduled discovery. Four sports × (3 game-market credits + 3 prop
 # credits) per 15-minute cycle is an estimated 24 Parlay credits/cycle;
@@ -64,7 +80,8 @@ Configure-Input 'parlay_game_ws' @{
 Configure-Input 'parlay_rest' @{
     sports = $sports; bookmakers = $books; markets = @('h2h', 'spreads', 'totals');
     include_props = $true; props_limit = 5000; max_age_seconds = 120;
-    poll_interval_seconds = [double]900; session_request_budget = 80000
+    poll_interval_seconds = [double]900; session_request_budget = 80000;
+    account_tier = 'unknown'
 }
 
 $current = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
@@ -75,18 +92,65 @@ if ($current.pricing.reference_profile_mode -ne 'strict') {
     & '.\.venv\Scripts\python.exe' 'scripts\prepare_reference_profiles.py' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'The supplied reference-prior file failed validation.' }
     $pricing = Get-Content -LiteralPath 'data\reference_profiles.pricing.json' -Raw | ConvertFrom-Json
+} else {
+    $pricing = $current.pricing
+}
+$mainlineProfiles = @('nba_nfl_mainlines', 'mlb_mainlines', 'nhl_mainlines_experimental')
+$enabled = @($pricing.enabled_reference_profiles)
+foreach ($name in $mainlineProfiles) {
+    if (-not ($pricing.reference_profiles.PSObject.Properties.Name -contains $name)) {
+        throw "Shared reference profile $name is unavailable. No order authorization was changed."
+    }
+    if ($enabled -notcontains $name) { $enabled += $name }
+}
+if (@($pricing.enabled_reference_profiles).Count -ne $enabled.Count -or $current.pricing.reference_profile_mode -ne 'strict') {
+    $pricing.enabled_reference_profiles = $enabled
     $body = @{ config = $pricing } | ConvertTo-Json -Compress -Depth 50
     Invoke-RestMethod -Uri "$baseUrl/api/plugins/positive_ev/config" -Method Post -Headers $headers `
         -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
 }
 
+# These operator preferences apply to both workspaces. The paper simulator
+# cannot know sportsbook account cash, so its per-order exposure stays capped
+# at one $5 reporting unit; the separate native cash-bound Kelly draft remains
+# unapplied until its account and launch checks can verify it.
+$riskChanges = @{ block_overlapping_events = $true; block_overlapping_players = $true;
+    unit_size_usd = '5'; daily_loss_limit = $null }
+if ($isPaper) { $riskChanges.max_order_stake = '5' }
+$riskBody = $riskChanges | ConvertTo-Json -Compress
+Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
+    -ContentType 'application/json' -Body $riskBody -TimeoutSec 30 | Out-Null
+
+if ($isPaper) {
+    # The paper consumer must see a fresh complete snapshot after it starts.
+    # Restart the existing game-board source rather than opening more sockets.
+    Invoke-RestMethod -Uri "$baseUrl/api/plugins/parlay_game_ws/toggle" -Method Post -Headers $headers `
+        -ContentType 'application/json' -Body '{"enabled":false}' -TimeoutSec 30 | Out-Null
+    Invoke-RestMethod -Uri "$baseUrl/api/plugins/parlay_game_ws/toggle" -Method Post -Headers $headers `
+        -ContentType 'application/json' -Body '{"enabled":true}' -TimeoutSec 30 | Out-Null
+}
+
 $result = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 $native = Invoke-RestMethod -Uri "$baseUrl/api/native/orders" -TimeoutSec 10
-if ($result.auto_trade -ne $false -or $native.native_execution_enabled -ne $false) {
-    throw 'The paper/native execution switches changed during source setup. Stop the application and inspect its state.'
+if ($result.auto_trade -ne $false -or ($isPaper -and $native.native_execution_enabled -ne $false)) {
+    throw 'An execution switch changed during source setup. Stop the application and inspect its state.'
 }
-Write-Host 'Configured Parlay prop stream, complete game-board stream, and 15-minute REST discovery.' -ForegroundColor Green
-Write-Host 'Research reference profiles are loaded if this workspace previously used legacy default weights.'
-Write-Host "Sample odds OFF. Paper automation OFF. Native execution OFF. Dashboard: $baseUrl"
+if ($EnablePaperAutomation) {
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        $result = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
+        $paper = @($result.plugins | Where-Object { $_.manifest.name -eq 'parlay_paper_input' })[0]
+        if ($paper.enabled -and @($paper.health.complete_baseline_sports).Count -gt 0) { break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $paper.enabled -or @($paper.health.complete_baseline_sports).Count -eq 0) {
+        throw 'No complete Parlay paper baseline arrived. Paper automation remains paused; inspect Provider Center.'
+    }
+    $result = Invoke-RestMethod -Uri "$baseUrl/api/control" -Method Post -Headers $headers `
+        -ContentType 'application/json' -Body '{"auto_trade":true}' -TimeoutSec 10
+}
+Write-Host 'Configured shared Parlay prop stream, complete game-board stream, and 15-minute REST discovery.' -ForegroundColor Green
+Write-Host 'The same research profiles and weights are configured for paper and native workspaces.'
+Write-Host "Workspace: $($result.mode). Automatic orders: $($result.auto_trade). Dashboard: $baseUrl"
 Write-Host 'Source feeds may need several seconds to authenticate and publish a snapshot. Check Provider Center.'
-Write-Host 'No mapping or current quote status was approved by this setup. Real EV signals remain blocked until the evidence gates pass.'
+Write-Host 'Parlay moneyline paper comparisons use live prices, but hypothetical offers, capacity and fills.'
+Write-Host 'Quote active status and settlement equivalence remain unverified. Native execution stays blocked.'

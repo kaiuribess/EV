@@ -17,6 +17,8 @@ class PositiveEV(StrategyPlugin):
 
     async def evaluate(self, event, view):
         market = view["market"]
+        if market.extensions.get("paper_only"):
+            return []
         config = view["config"]
         fair = fair_value(market, view["quotes"], config)
         candidates, errors = [], []
@@ -30,6 +32,8 @@ class PositiveEV(StrategyPlugin):
         return candidates
 
     def revalidate(self, candidate, view):
+        if view["market"].extensions.get("paper_only"):
+            raise NoSignal("Paper-only assumed markets require their dedicated strategy")
         fair = fair_value(view["market"], view["quotes"], view["config"])
         return opportunity(view["market"], fair, view["book"], view["config"])
 

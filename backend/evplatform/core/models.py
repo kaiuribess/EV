@@ -19,6 +19,17 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class ProviderFrame(Contract):
+    """Sanitized provider transport frame for independent input consumers."""
+    provider_id: str
+    kind: str
+    payload: dict[str, Any]
+    received_at: datetime
+    published_at: datetime | None = None
+    snapshot_complete: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class SettlementContingencies(Contract):
     """Versioned exact rule statements; none are inferred from a generic void.
 

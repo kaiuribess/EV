@@ -26,6 +26,10 @@ running on port 8001. Use the native launcher for account testing:
 
 This opens the dashboard at `http://127.0.0.1:8002` and starts with automatic
 trading paused. It uses `data/native-sandbox.db`, separate from demo history.
+The launcher applies `setup_live_inputs.ps1` automatically: Parlay feed scopes
+and the research sportsbook-weight profiles are the same ones used by
+`start_live_paper.ps1`. Order ledgers stay separate, and the paper-only
+hypothetical sportsbook offer is never promoted to a native exchange book.
 For production monitoring, the corresponding command is:
 
 ```powershell

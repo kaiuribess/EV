@@ -26,11 +26,8 @@ if ($previous) {
     $native = Invoke-RestMethod -Uri "$baseUrl/api/native/orders" -TimeoutSec 5
     if ($previous.mode -eq 'paper' -and $previous.sample_feed_enabled -eq $false -and
         $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0) {
-        if ($Paused -and $previous.auto_trade) {
-            $previous = Invoke-RestMethod -Uri "$baseUrl/api/control" -Method Post -ContentType 'application/json' -Headers $controlHeaders -Body '{"auto_trade":false}' -TimeoutSec 10
-        } elseif (-not $Paused -and -not $previous.auto_trade -and -not $previous.kill_switch) {
-            $previous = Invoke-RestMethod -Uri "$baseUrl/api/control" -Method Post -ContentType 'application/json' -Headers $controlHeaders -Body '{"auto_trade":true}' -TimeoutSec 10
-        }
+        & "$PSScriptRoot\setup_live_inputs.ps1" -Port $Port -EnablePaperAutomation:(-not $Paused)
+        $previous = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
         Write-Host "Live-input paper workspace is already running at $baseUrl. Paper automation: $($previous.auto_trade)."
         if (-not $NoBrowser) { Start-Process -FilePath "$baseUrl/?page=providers" }
         return
@@ -105,13 +102,12 @@ if ($state.mode -ne 'paper' -or $state.sample_feed_enabled -ne $false -or
     @($native.orders).Count -ne 0) {
     throw 'The paper workspace did not enter the expected paused, sample-free state.'
 }
-if (-not $Paused -and -not $state.kill_switch) {
-    $state = Invoke-RestMethod -Uri "$baseUrl/api/control" -Method Post -ContentType 'application/json' -Headers $controlHeaders -Body '{"auto_trade":true}' -TimeoutSec 10
-}
+& "$PSScriptRoot\setup_live_inputs.ps1" -Port $Port -EnablePaperAutomation:(-not $Paused)
+$state = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 Write-Host "Live-feed paper workspace running at $baseUrl." -ForegroundColor Green
 Write-Host "Sample odds OFF. Paper automation: $($state.auto_trade). Native execution OFF."
 Write-Host "Enabled source/monitor count: $(@($state.plugins | Where-Object { $_.enabled -and $_.health.synthetic -eq $false }).Count)."
 if ($failed.Count) { Write-Warning "Could not restore these monitors: $($failed -join ', '). Review Provider Center." }
 if ($state.kill_switch -and -not $Paused) { Write-Warning 'Emergency stop is active; paper automation remains off.' }
-Write-Host 'Unreviewed real quotes stay quarantined; paper orders require matching reference and market data.'
+Write-Host 'Shared sportsbook profiles drive both live-input paper comparisons and native pricing.'
 if (-not $NoBrowser) { Start-Process -FilePath "$baseUrl/?page=providers" }

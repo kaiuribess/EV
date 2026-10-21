@@ -17,7 +17,7 @@ class PricingConfig(BaseModel):
     ))
     required_books: list[str] = Field(default_factory=list)
     weights: dict[str, Decimal] = Field(default_factory=dict)
-    max_quote_age_ms: int = Field(default=5000, ge=100, le=300000)
+    max_quote_age_ms: int = Field(default=5000, ge=100, le=600000)
     max_disagreement: Decimal = Field(default=Decimal(".08"), gt=0, le=1)
     min_ev: Decimal = Field(default=Decimal(".015"), ge=0, le=1)
     min_roi: Decimal = Field(default=Decimal(".01"), ge=0)
