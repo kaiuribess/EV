@@ -82,6 +82,14 @@ connection/revision synchronization. Its order gate remained disabled. Local
 evidence: `data/kalshi-private-readonly-check.json`. This validates read-side
 account synchronization; it does not certify native placement, fills or payouts.
 
+A Novig sandbox monitor briefly reconnected with a `ValueError` after restart
+and resumed subscriptions. A separate bounded 35-second diagnostic then received
+10 frames and three books with no parser exceptions or reconnects; seven saved
+market IDs were excluded only after confirmed settlement. The intermittent
+failure was not reproduced or claimed fixed. It remains an item for genuine
+native lifecycle validation. Sanitized local evidence:
+`data/novig-monitor-diagnostic.json`. No private payloads were exported.
+
 ## Operator policy rehearsal — October 20 PDT / October 21 UTC
 
 An isolated 15-second synthetic run used the requested $5 including-fee cap,
