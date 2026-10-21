@@ -19,6 +19,14 @@ are unsupported. Credentials stay in the protected backend environment. See
 Provider Center remembers external feed and account-monitor enable settings
 across restarts. Trading activation remains separate and starts paused.
 
+The supplied 11 sport/market weighting profiles are available as provisional
+research settings, with the first four prop profiles selected for initial testing.
+They use power devig plus proportional sensitivity checks, distinct-book and
+anchor requirements, and exact source freshness policies. Missing freshness or
+status evidence blocks execution. See [reference profiles](docs/REFERENCE_MODEL.md)
+and [the source review](docs/BOOK_WEIGHT_RESEARCH.md); these are not fitted or
+proven-profitable weights.
+
 ## Start on Windows
 
 Prerequisites: Python 3.12+, Node.js 22.12+ or a compatible current LTS, PowerShell,

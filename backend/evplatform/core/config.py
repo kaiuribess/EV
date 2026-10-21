@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .reference_profiles import ReferenceFreshnessRule, ReferenceProfile
+
 
 class PricingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -22,9 +24,23 @@ class PricingConfig(BaseModel):
     max_book_age_ms: int = Field(default=2500, ge=100, le=60000)
     provider_priority: dict[str, int] = Field(default_factory=dict)
     market_overrides: dict[str, dict] = Field(default_factory=dict)
+    reference_profile_mode: Literal["legacy", "strict"] = "legacy"
+    reference_profiles: dict[str, ReferenceProfile] = Field(default_factory=dict)
+    enabled_reference_profiles: list[str] = Field(default_factory=list)
+    profile_freshness_rules: list[ReferenceFreshnessRule] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def positive_weights(self):
+        if (len(set(self.enabled_reference_profiles)) != len(self.enabled_reference_profiles)
+                or set(self.enabled_reference_profiles) - set(self.reference_profiles)):
+            raise ValueError("Enabled reference profiles must name distinct registered profiles")
+        selectors = [selector.key() for name in self.enabled_reference_profiles
+                     for selector in self.reference_profiles[name].selectors]
+        if len(selectors) != len(set(selectors)):
+            raise ValueError("Enabled reference profiles must not overlap exact selectors")
+        rule_keys = [rule.source_key() for rule in self.profile_freshness_rules]
+        if len(rule_keys) != len(set(rule_keys)):
+            raise ValueError("Reference TTL policies must have unique exact source selectors")
         for books in (self.required_books, self.eligible_books or []):
             if len(set(books)) != len(books) or any(not book or book != book.strip() for book in books):
                 raise ValueError("Reference bookmaker identities must be nonblank, exact and unique")
@@ -37,6 +53,9 @@ class PricingConfig(BaseModel):
         for override in self.market_overrides.values():
             if "market_overrides" in override:
                 raise ValueError("Nested market overrides are unsupported")
+            if set(override) & {"reference_profile_mode", "reference_profiles",
+                                "enabled_reference_profiles", "profile_freshness_rules"}:
+                raise ValueError("Reference profiles and TTLs require exact selectors, not broad market overrides")
             type(self).model_validate({**self.model_dump(), **override, "market_overrides": {}})
         return self
 

@@ -270,6 +270,18 @@ async def test_pricing_model_change_starts_new_episode(ledger, market):
     assert {group["value"] for group in summary["groups"] if group["dimension"] == "reference_model"} == {"proportional", "power"}
 
 
+@pytest.mark.parametrize("field,initial,changed", [
+    ("reference_policy_digest", "old-policy", "new-policy"),
+    ("reference_inputs_eligible", False, True),
+])
+async def test_profile_and_input_quality_changes_split_unqualified_episodes(ledger, market, field, initial, changed):
+    first = candidate(market, ev="-.1").model_copy(update={field: initial, "execution_eligible": False})
+    await ledger.process(observation(market, [first], qualified=False))
+    second = candidate(market, ev="-.1").model_copy(update={field: changed, "execution_eligible": False})
+    await ledger.process(observation(market, [second], qualified=False))
+    assert (await ledger.summary())["episodes"] == 2
+
+
 async def test_import_contract_has_no_execution_fields(market):
     settlement = result(market)
     imported = SignalResultImport(market=market, result=settlement, provenance=provenance(settlement))

@@ -85,6 +85,20 @@ def test_runtime_baseline_is_explicit_and_remains_blocked_for_missing_settlement
     assert not runtime.report().safe_to_arm
 
 
+@pytest.mark.parametrize("ages", [(None, None, None), (None, 10, 20)])
+def test_research_reference_unknown_age_stays_unknown_without_breaking_setup(runtime, monkeypatch, ages):
+    from evplatform.core.pricing import fair_value
+    market = next(iter(runtime.engine.markets.values()))
+    fair = fair_value(market, list(runtime.engine.quotes[market.id].values()), runtime.engine.settings.pricing)
+    fair = fair.model_copy(update={"execution_eligible": False,
+        "references": tuple({**ref, "age_ms": age} for ref, age in zip(fair.references, ages))})
+    monkeypatch.setattr("evplatform.core.native_runtime.fair_value", lambda *args, **kwargs: fair)
+    facts = runtime.runtime_facts()
+    assert facts.markets[0].oldest_reference_age_ms is None
+    assert not facts.markets[0].required_books_present
+    assert not runtime.report().safe_to_arm
+
+
 @pytest.mark.parametrize("update", [
     {"provider_remaining": 0}, {"minute_remaining": 0}, {"cooldown_seconds": 0.1},
     {"reserved_cost": 30}, {"local_session_budget": 0}, {"reserved_cost": -1},

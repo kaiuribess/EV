@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from pydantic import Field, field_validator, model_validator
 
-from .models import Candidate, Contract, FeeSchedule, Market, SettlementResult, utcnow
+from .models import Candidate, Contract, FeeSchedule, Market, Quote, SettlementResult, utcnow
 from .storage import Storage
 
 D = Decimal
@@ -27,7 +27,7 @@ D = Decimal
 class SignalObservation(Contract):
     market: Market
     candidates: tuple[Candidate, ...] = ()
-    status: Literal["POSITIVE EV", "NEGATIVE EV", "NO SIGNAL"]
+    status: Literal["POSITIVE EV", "NEGATIVE EV", "NO SIGNAL", "RESEARCH ONLY"]
     reason: str
     evaluated_at: datetime = Field(default_factory=utcnow)
     qualified_candidate_ids: tuple[str, ...] = ()
@@ -36,6 +36,10 @@ class SignalObservation(Contract):
     fee_schedules: dict[str, FeeSchedule] = Field(default_factory=dict)
     strategies: tuple[str, ...] = ("positive_ev",)
     synthetic: bool = True
+    # Retain the evaluated reference universe, including rejected/unused books,
+    # in the independent audit stream for later grouped model comparison.
+    reference_quotes: tuple[Quote, ...] = ()
+    pricing_policy: dict = Field(default_factory=dict)
 
     @field_validator("evaluated_at")
     @classmethod
@@ -56,6 +60,10 @@ class SignalObservation(Contract):
             raise ValueError("Signal candidates must match the exact canonical market")
         if self.status == "NO SIGNAL" and self.candidates:
             raise ValueError("NO SIGNAL cannot contain executable candidates")
+        if any(q.market_id != self.market.id for q in self.reference_quotes):
+            raise ValueError("Signal reference observations must match the canonical market")
+        if any(not c.execution_eligible for c in self.candidates if c.id in self.qualified_candidate_ids):
+            raise ValueError("Research-only candidates cannot be qualified")
         if set(self.fee_schedules) - ids:
             raise ValueError("Fee schedules must identify observed candidates")
         for candidate in self.candidates:
@@ -258,6 +266,8 @@ class SignalLedger:
                 current = self.active.get(key)
                 if current and (current.last.qualified != snapshot.qualified or
                                 current.last.reference_model != snapshot.reference_model or
+                                current.last.candidate.reference_inputs_eligible != candidate.reference_inputs_eligible or
+                                current.last.candidate.reference_policy_digest != candidate.reference_policy_digest or
                                 current.last.pricing_thresholds != snapshot.pricing_thresholds):
                     self._close(key, "qualification or pricing model changed", at, statements)
                     current = None
@@ -297,6 +307,7 @@ class SignalLedger:
                     strategy_settled = settled.get((identity, origin), False)
                     status = ("SETTLED" if strategy_settled else
                               "POSITIVE EV" if any(c.id in qualified for c in strategy_candidates)
+                              else "RESEARCH ONLY" if strategy_candidates and all(not c.reference_inputs_eligible for c in strategy_candidates)
                               else "NEGATIVE EV" if strategy_candidates else "NO SIGNAL")
                     transition_reason = "verified result already recorded" if strategy_settled else observation.reason
                     statements.append(("""INSERT INTO signal_transitions

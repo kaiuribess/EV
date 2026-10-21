@@ -10,7 +10,7 @@ class NativePositiveEV(StrategyPlugin):
     manifest = Manifest(
         name="native_positive_ev", kind="strategy",
         description="Reviewed native-unit opportunities with conservative fee and settlement bounds",
-        sports=["*"], markets=["moneyline", "total", "player_prop"],
+        sports=["*"], markets=["moneyline", "spread", "total", "player_prop"],
         input_schemas=["odds.quote@1", "exchange.native_book@1", "sports.market@1"],
         output_schemas=["trade.native_candidate@1"],
         capabilities={"devig": ["proportional", "power"], "direct_order_access": False,

@@ -2,9 +2,75 @@
 
 The fair-value engine removes each eligible sportsbook's margin, then combines
 the resulting probabilities. It does not learn profitable weights from the feed.
-The default equal weights and thresholds are an uncalibrated starting model.
+The library's legacy equal weights and thresholds are an uncalibrated starting model.
 An estimated positive edge is conditional on the model, equivalent settlement,
 usable source observations, executable liquidity, and verified fees.
+
+## Imported sport and market priors
+
+The original owner specification is preserved in
+[`config/book_weight_priors_2026-10-20.json`](../config/book_weight_priors_2026-10-20.json).
+The importer registers all 11 profiles and selects the first four for research:
+NBA core props, NFL volume props, MLB strikeouts and MLB hitter volume.
+Weights are attached to canonical bookmakers, never provider names. The supplied
+percentages are retained exactly; the [research review](BOOK_WEIGHT_RESEARCH.md)
+does not establish a better fitted allocation. No real history has yet been used
+to optimize them.
+
+`reference_profile_mode="strict"` requires an exact sport, league, market type
+and statistic selector, a scheduled game whose start is still in the future,
+the profile's minimum number of distinct books and any required anchor.
+Unknown categories and in-play markets receive no automatic inherited blend.
+College selectors intersect the specification's shared statistic list with the
+appropriate football or basketball vocabulary. This registers vocabulary; it
+does not establish external player/market/settlement equivalence or coverage.
+
+Each selected book is devigged separately with **power** and **proportional**
+normalization. Both blended EV and ROI values must pass at the executable price,
+actual size and conservative fee cap, including standing-order revalidation.
+Duplicate sportsbook copies are selected by valid complete observations and
+documented observation time, never the most profitable quoted price. Equally
+recent conflicting prices withhold execution.
+
+The source JSON deliberately supplies **no verified TTL policies** and marks
+every profile `live_execution_allowed=false`. The importer preserves both facts.
+An incomplete freshness/status policy can produce a labelled research estimate,
+but receives no executable qualification, simulated auto-order or native order.
+Verified quotes need outcome-level observation time, complete synchronized
+sides, current status and an exact provider/book/market TTL with evidence.
+Freshness is currently binary (eligible 1, ineligible 0); no unvalidated time-decay
+curve has been invented. Historical/unknown observations can be shown in research
+estimates with explicit reasons, but their execution weight is zero.
+
+Generate the validated settings file without network requests or trading:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\prepare_reference_profiles.py
+```
+
+The output is `data/reference_profiles.pricing.json`. It contains all 11 typed
+profiles; it does not alter trading permissions or save to a running engine.
+The local dashboard's validated Settings API can save these pricing fields.
+Changing a source profile or TTL invalidates cached pricing and launch digests.
+The optional BookMaker override and exchange-reference experiment remain off.
+
+Both ordinary and native signal audit events now retain the full normalized
+reference universe and pricing policy, including rejected evaluations. Their
+asynchronous persistence is separate from pricing. Research estimates and
+synthetic fixtures are not realized profit. See
+[quote clock contracts](QUOTE_OBSERVATION_CONTRACT.md) for provider limitations.
+
+The [offline comparison tool](MODEL_VALIDATION.md) evaluates equal, fixed-anchor,
+prior and learned nonnegative blends on chronological game groups. It requires
+explicit verified results and when those results became available, uses equal
+event weighting, and reports log loss, Brier score and calibration. It never
+updates live settings. No real forecast/result dataset has yet qualified for
+fitting; deterministic fixtures verify the software only.
+
+The supplied-file compiler is a one-time vocabulary translator. New plugins do
+not need to modify it or the trading core: register arbitrary exact selectors
+and book weights directly through the typed `reference_profiles` configuration.
+New schema-specific semantics still require their own normalization and evidence.
 
 ## Reference policy
 
@@ -29,8 +95,7 @@ The library defaults are proportional devig, two independent references, no
 required book, a five-second maximum reference age, a 2.5-second exchange-book
 age, and a maximum disagreement of eight probability percentage points.
 Workspace settings can differ; inspect the running dashboard's pricing settings.
-No universal sport-specific sharpness ordering or validated weight calibration
-is bundled. Set the eligible universe and requirements for a researched market
+No validated weight calibration is bundled. Set the eligible universe and requirements for a researched market
 scope before evaluating its observed results.
 
 ## Calculation

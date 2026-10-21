@@ -7,6 +7,7 @@ prices as an executable order book.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -197,6 +198,23 @@ class OddizeRest(RestProvider):
         return replace(result, kind="props_snapshot", metadata={**result.metadata, "sport": sport,
                                                                 "event_id": event_id, "odds_format": "american"})
 
+    async def discover_prop_events(self, sport: str, *, prop_type: str, limit: int = 50) -> ProviderEnvelope:
+        """Read the documented grouped discovery view, without guessing its odds shape.
+
+        The OpenAPI schema deliberately leaves players/alt_lines/all_odds
+        untyped. Preserve that response for review, then use fetch_event_props
+        for exact line-bearing rows. Discovery never emits normalized prices.
+        This explicit call is not added to the automatic polling budget.
+        """
+        if not isinstance(prop_type, str) or not re.fullmatch(r"[a-z][a-z_0-9]*", prop_type):
+            raise ValueError("Choose one discovered Oddize prop_type explicitly")
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("Oddize props discovery limit must be between 1 and 200")
+        result = await self.request(f"/api/v1/props/{safe_component(sport)}",
+                                    params={"prop_type": prop_type, "limit": limit}, cost=2)
+        return replace(result, kind="prop_discovery", metadata={**result.metadata,
+            "sport": sport, "prop_type": prop_type, "requires_flat_event_props": True})
+
     def effective_poll_interval(self) -> float:
         per_cycle = len(self._subscriptions)
         if self.config.include_props:
@@ -276,6 +294,7 @@ OddizeRest.manifest = provider_manifest(
         "Developer allowance is 1,500 credits/month and 30 requests/minute; cache hits still consume credits.",
         "Actual sports and prop coverage come from metadata; a book listing is not a per-market coverage guarantee.",
         "No executable depth, settlement rules or reliable market-status field is provided by this odds schema.",
+        "Grouped props alt_lines/all_odds are discovery only; normalize the typed flat event-props rows at each exact threshold.",
         "All identities and settlement equivalence require verified mapping; quote observation time is preserved.",
     ],
 )

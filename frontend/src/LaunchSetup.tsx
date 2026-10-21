@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { CheckCircle2, ChevronRight, LockKeyhole, Radio, RefreshCw, ShieldCheck, TriangleAlert, Wallet, X } from 'lucide-react'
 import { request } from './api'
 import { human, money, type Json } from './types'
-import { activationBody, activationGate, parseSetupReport, setupIsCurrent, weightSummary, type SetupReport } from './launchSetupModel'
+import { activationBody, activationGate, parseSetupReport, profileFreshnessCoverage, setupIsCurrent, weightSummary, type SetupReport } from './launchSetupModel'
 import './LaunchSetup.css'
 
 type Props = { mutate: (path: string, body: Json) => Promise<Json>; notify: (message: string, error?: boolean) => void; disabled: boolean }
@@ -23,6 +23,41 @@ function Limits({ report, complete = false }: { report: SetupReport; complete?: 
       <div><span>Maximum open orders</span><strong>{typeof values?.max_open_orders === 'number' ? values.max_open_orders : 'Not configured'}</strong></div>
       <div><span>Maximum orders per minute</span><strong>{typeof values?.max_orders_per_minute === 'number' ? values.max_orders_per_minute : 'Not configured'}</strong></div></>}
   </div>
+}
+
+function PricingModel({ pricing }: { pricing: SetupReport['pricing'] }) {
+  const strict = pricing.reference_profile_mode === 'strict'
+  const profiles = Object.entries(pricing.reference_profiles ?? {})
+  const enabled = new Set(pricing.enabled_reference_profiles ?? [])
+  return <section className="setup-subpanel"><div className="setup-section-title"><h3>How books are weighted</h3><span className="setup-pill">Model estimate</span></div>
+    <strong className="setup-model-title">{weightSummary(pricing)}</strong>
+    {strict ? <>
+      <p>Each exact sport and market uses its own reference profile. Power removes the margin; proportional provides a sensitivity check. Multiple feeds for one book count once. Unmatched markets receive no signal.</p>
+      <p className="setup-note">Profiles below are starting assumptions for research. Enabling a profile selects it for calculations; it does not authorize real trading. Missing verified source-age limits keep calculations in research only.</p>
+      <div className="setup-reference-profiles">{profiles.map(([name, profile]) => {
+        const selected = enabled.has(name)
+        const coverage = profileFreshnessCoverage(profile, pricing.profile_freshness_rules ?? [])
+        return <details className={`setup-reference-profile ${selected ? 'is-selected' : ''}`} key={name}>
+          <summary><span><strong>{human(name)}</strong><small>{profile.selectors.map(s => s.league).filter((v, i, all) => all.indexOf(v) === i).join(', ')} · Pregame only</small></span><span className="setup-pill">{selected ? 'Enabled for research' : 'Inactive'}</span><ChevronRight size={13} /></summary>
+          <div className="setup-reference-content">
+            <div className="setup-weight-chips" aria-label={`${human(name)} book weights`}>{Object.entries(profile.weights_percent).map(([book, weight]) => <span key={book}>{human(book)} <strong>{String(weight)}%</strong></span>)}</div>
+            <dl className="setup-pricing"><div><dt>Required anchor</dt><dd>{profile.required_any_anchor.length > 1 ? 'At least one of: ' : ''}{profile.required_any_anchor.map(human).join(', ')}</dd></div><div><dt>Minimum distinct books</dt><dd>{profile.min_distinct_books}</dd></div><div><dt>Calculation / sensitivity</dt><dd>{human(profile.primary_devig)} / {human(profile.sensitivity_devig)}</dd></div><div><dt>Status</dt><dd>{human(profile.status)}</dd></div><div><dt>Live execution flag</dt><dd>{profile.live_execution_allowed ? 'Allowed by profile · other checks still required' : 'Off · research only'}</dd></div><div><dt>Verified source-age coverage</dt><dd>{coverage.covered} / {coverage.total} book/market pairs</dd></div></dl>
+            <p className={coverage.covered === 0 ? 'setup-inline-error' : 'setup-note'}>{coverage.covered === 0 ? 'No verified source-age limits. This profile cannot qualify real trades.' : `${coverage.verifiedRules} verified source rule${coverage.verifiedRules === 1 ? '' : 's'}. Coverage counts a book/market pair with at least one verified provider rule; every incoming quote still requires its own matching rule.`}{coverage.unverifiedRules > 0 ? ` ${coverage.unverifiedRules} unverified rules do not count.` : ''}</p>
+            <div className="setup-selector-list"><strong>Exact markets</strong><ul>{profile.selectors.map(s => <li key={JSON.stringify(s)}>{s.sport} · {s.league} · {s.market_type}{s.statistic ? ` · ${s.statistic}` : ''}</li>)}</ul></div>
+            {coverage.rules.length > 0 && <div className="setup-ttl-list"><strong>Source-age rules</strong><ul>{coverage.rules.map(r => <li key={JSON.stringify([r.provider, r.bookmaker, r.sport, r.league, r.market_type, r.statistic])}>{human(r.provider)} / {human(r.bookmaker)} · {r.league} / {r.statistic ?? r.market_type} · {String(r.ttl_seconds)}s · {r.verified ? 'Verified' : 'Unverified'}</li>)}</ul></div>}
+            {profile.note && <p className="setup-note">{profile.note}</p>}
+          </div>
+        </details>
+      })}</div>
+      {!profiles.length && <p className="setup-inline-error">No reference profiles are registered.</p>}
+      <p className="setup-note">Configured base weights appear above. Effective weights depend on the books that pass the exact identity, freshness, status, and outcome-completeness checks. Missing anchors or too few valid books produce no signal.</p>
+    </> : <>
+      <p>{human(pricing.devig_method)} no-vig probabilities, combined using the configured weights. Multiple feeds for the same book count once.</p>
+      <dl className="setup-pricing"><div><dt>Eligible books</dt><dd>{pricing.eligible_books === null ? 'All mapped books (no allowlist)' : pricing.eligible_books.length ? pricing.eligible_books.join(', ') : 'None · signals disabled'}</dd></div><div><dt>Required books</dt><dd>{pricing.required_books.length ? pricing.required_books.join(', ') : 'None configured'}</dd></div><div><dt>Minimum distinct books</dt><dd>{pricing.min_references}</dd></div><div><dt>Maximum source age</dt><dd>{pricing.max_quote_age_ms / 1000}s references · {pricing.max_book_age_ms / 1000}s exchange</dd></div><div><dt>Maximum disagreement</dt><dd>{Number(pricing.max_disagreement) * 100} probability points</dd></div></dl>
+      <details><summary>View weights and market overrides <ChevronRight size={12} /></summary><pre>{JSON.stringify({ weights: pricing.weights, market_overrides: pricing.market_overrides }, null, 2)}</pre><p>Unspecified eligible books have weight 1. Market-specific overrides can change the defaults above.</p></details>
+    </>}
+    <p className="setup-note">These weights have not established a profitable live track record.</p>
+  </section>
 }
 
 export function LaunchSetup({ mutate, notify, disabled }: Props) {
@@ -135,7 +170,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
         })}</div>
         {!report.accounts.length && <p className="setup-placeholder">No exchange monitor plugins are registered.</p>}
         <div className="setup-two-columns"><section className="setup-subpanel"><div className="setup-section-title"><h3>Trading limits</h3><span className={`setup-pill ${current && report.risk_policy.applied ? 'good' : ''}`}>{!current ? 'Unconfirmed' : report.risk_policy.applied ? 'Applied to live scope' : report.risk_policy.values ? 'Saved draft · not applied' : 'Not configured'}</span></div><Limits report={report} /><details className="setup-all-limits"><summary>Review all exposure and order limits <ChevronRight size={12} /></summary><Limits report={report} complete /></details><p className="setup-note">{report.risk_policy.applied ? 'These limits bind the reviewed scope.' : 'Saved limits do not authorize real orders.'} Wallet balances are never pooled. Pending orders and unsettled fills retain their game and player reservations.</p>{report.risk_policy.error && <p className="setup-inline-error">{report.risk_policy.error}</p>}</section>
-          <section className="setup-subpanel"><div className="setup-section-title"><h3>How books are weighted</h3><span className="setup-pill">Model estimate</span></div><strong className="setup-model-title">{weightSummary(report.pricing)}</strong><p>{human(report.pricing.devig_method)} no-vig probabilities, combined using the configured weights. Multiple feeds for the same book count once.</p><dl className="setup-pricing"><div><dt>Eligible books</dt><dd>{report.pricing.eligible_books === null ? 'All mapped books (no allowlist)' : report.pricing.eligible_books.length ? report.pricing.eligible_books.join(', ') : 'None · signals disabled'}</dd></div><div><dt>Required books</dt><dd>{report.pricing.required_books.length ? report.pricing.required_books.join(', ') : 'None configured'}</dd></div><div><dt>Minimum distinct books</dt><dd>{report.pricing.min_references}</dd></div><div><dt>Maximum source age</dt><dd>{report.pricing.max_quote_age_ms / 1000}s references · {report.pricing.max_book_age_ms / 1000}s exchange</dd></div><div><dt>Maximum disagreement</dt><dd>{Number(report.pricing.max_disagreement) * 100} probability points</dd></div></dl><details><summary>View weights and market overrides <ChevronRight size={12} /></summary><pre>{JSON.stringify({ weights: report.pricing.weights, market_overrides: report.pricing.market_overrides }, null, 2)}</pre><p>Unspecified eligible books have weight 1. Market-specific overrides can change the defaults above.</p></details><p className="setup-note">These weights have not established a profitable live track record.</p></section></div>
+          <PricingModel pricing={report.pricing} /></div>
         <details className="setup-inputs"><summary><Radio size={16} />Sportsbook mapping coverage <ChevronRight size={13} /></summary><div className="table-scroll"><table><thead><tr><th>PROVIDER</th><th>ACCESS</th><th>MAPPED UPDATES</th><th>AWAITING REVIEW</th></tr></thead><tbody>{report.inputs.map(input => <tr key={input.provider}><td>{human(input.provider)}</td><td>{current && input.authenticated ? 'Authenticated' : 'Unconfirmed'}</td><td>{input.mapped_quotes.toLocaleString()}</td><td>{input.quarantined.toLocaleString()}</td></tr>)}</tbody></table></div><p className="setup-note">Mapped updates are cumulative observations, not unique tradable markets. Quarantined observations cannot produce approved native orders.</p></details>
         <div className="setup-section-title"><h3>What still needs to pass</h3><span>{current ? `${pending.length} pending` : 'Current status unconfirmed'}</span></div><div className="setup-checklist">{report.requirements.map(item => <details key={item.code}><summary>{current && item.status === 'passed' ? <CheckCircle2 size={17} className="good" /> : <LockKeyhole size={16} />}<strong>{item.title}</strong><span>{!current ? 'Unconfirmed' : item.status === 'passed' ? 'Passed' : 'Pending'}</span></summary><p>{item.detail}</p></details>)}</div>
       </div></>}

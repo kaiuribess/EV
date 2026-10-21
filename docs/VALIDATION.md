@@ -2,6 +2,43 @@
 
 ## Latest automated checks
 
+Sport/market profile integration: **1,531 backend tests passed in 40.06 seconds**,
+with **88.53% statement coverage** (10,589 of 11,961 statements). All **88 frontend
+tests** passed, followed by TypeScript checking and the production build. One
+upstream Starlette/httpx TestClient deprecation warning remains. These are offline
+tests, not native order or settlement certifications.
+
+The added checks cover all 11 imported profiles, exact pregame selectors,
+independent-book counts/anchors, unchanged-price observation clocks, source TTL
+policies, incomplete/status-unknown quotes, duplicate conflicts, degraded-source
+recovery watermarks, dual-method EV at original limits/fee caps, native production
+permissions, full rejected-reference audit records, and research/negative episode
+separation. The offline evaluator additionally tests chronological event grouping,
+opposing-side deduplication, equal event weights, result-availability timing,
+regularized simplex fitting, common-fold comparisons, log loss/Brier/calibration,
+synthetic provenance and exclusive local output.
+
+A separate **15-second strict-profile synthetic run** produced nine markets,
+63 source quotes and nine research-only opportunities. Internal processing across
+3,000 observations: median **0.125 ms**, p95 **1.552 ms**, p99 **1.816 ms**.
+Receipt-to-calculation across 2,610 observations: median **8.999 ms**, p95
+**51.419 ms**, p99 **58.001 ms**. There were **zero dropped bus events and zero
+orders**, despite that isolated benchmark's paper automation being on: empty
+verified TTL policies correctly prevented execution. This sample is not live
+feed latency, exchange fill latency or profitability evidence. Output:
+`artifacts/benchmark-reference-priors.json`.
+
+The dashboard has all 11 profiles saved, with the first four core prop profiles
+selected and the original empty TTL table/live-disabled flags retained. Browser
+inspection confirmed the NBA 50/20/20/10 weights, FanDuel anchor, minimum three
+books, power/proportional comparison, research-only status, missing TTL coverage,
+pending launch checks and disabled real-trading button. The app remains paused
+with its emergency stop on and zero native orders. Native monitors authenticate
+and stream, but no reviewed real source/native market mappings or native
+candidates exist. No source results have been fitted into profitable weights.
+
+## Prior launch-preparation checks
+
 Launch-preparation and reference-policy follow-up: **1,395 tests passed in
 38.60 seconds**, with **88.03% backend statement coverage** (9,874 of 11,216
 statements). These are offline tests, including the new preparation report,

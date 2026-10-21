@@ -1,0 +1,502 @@
+{
+  "schema_version": "1.0",
+  "prepared_on": "2026-10-20",
+  "purpose": "Reference-book weighting specification for a modular ParlayAPI + Oddize fair-probability engine.",
+  "status": "research_informed_starting_priors_not_empirically_optimized",
+  "disclaimer": "Exact numerical weights and eligibility thresholds are proposed design choices. No authenticated feed audit, historical backtest, code integration or wager execution was performed. No profitability guarantee.",
+  "default_mode": "paper",
+  "execution_enabled": false,
+  "all_profiles_pregame_only": true,
+  "unknown_sport_or_market_policy": "research_only_no_automatic_weight_inheritance",
+  "sources": {
+    "parlay_registry": "https://parlay-api.com/v1/bookmakers",
+    "parlay_docs": "https://parlay-api.com/docs",
+    "oddize_overview": "https://oddize.com/odds-api",
+    "oddize_openapi": "https://oddize.com/api/v1/openapi.json",
+    "outlier_presets_2026_07_16": "https://help.outlier.bet/en/articles/11908672-how-to-read-use-positive-ev-filter-presets-in-outlier",
+    "pikkit_nba_nfl_2024_12_20": "https://pikkit.com/blog/which-sportsbooks-are-sharp-best-apps-sports-betting-2024",
+    "pikkit_mlb_2025_08_08": "https://pikkit.com/blog/promoguys-which-sportsbooks-are-the-sharpest",
+    "upside_2026_10_14": "https://upside.tools/research/sharpest-sportsbook-exchange",
+    "unabated_props_2026_07_31": "https://unabated.com/post/the-biggest-mistake-youre-making-when-betting-nfl-player-props",
+    "devig_power_paper_2017": "https://www.sciencepg.com/article/10.11648/j.ajss.20170506.12",
+    "probability_calibration": "https://scikit-learn.org/stable/modules/calibration.html"
+  },
+  "provider_book_aliases": {
+    "parlay_api": {
+      "pinnacle": "pinnacle",
+      "fanduel": "fanduel",
+      "draftkings": "draftkings",
+      "caesars": "caesars",
+      "bet365": "bet365",
+      "betonline": "betonline",
+      "bookmaker_eu": "bookmaker"
+    },
+    "oddize": {
+      "pin": "pinnacle",
+      "fd": "fanduel",
+      "dk": "draftkings",
+      "czr": "caesars",
+      "b365": "bet365",
+      "boag": "betonline",
+      "circa": "circa",
+      "novig": "novig",
+      "phtx": "prophetx",
+      "poly": "polymarket"
+    }
+  },
+  "provider_coverage_notes": {
+    "parlay_api": [
+      "Registry documents BookMaker NFL/MLB moneylines only; source boards checked every 60 seconds.",
+      "Registry documents BetOnline NFL/NCAAF/MLB pregame moneylines, spreads and totals, not props.",
+      "Circa was not listed in the reviewed registry.",
+      "A documented endpoint is not proof of complete per-sport, per-stat, per-book availability.",
+      "Book variants with _open and _an suffixes are historical data, not separate live books."
+    ],
+    "oddize": [
+      "Published roster lists Circa and BetOnline but not BookMaker.",
+      "Published leagues are MLB, NBA, NFL, NCAABM, NCAAF and NHL.",
+      "GET /api/v1/props/{sport} requires prop_type.",
+      "Use alt_lines/all_odds to preserve exact off-main thresholds; do not average different thresholds.",
+      "Authenticate and discover actual coverage before enabling a source; account connection and source latency were not tested."
+    ]
+  },
+  "oddize_prop_type_to_canonical": {
+    "nba": {
+      "player_pts": "player_points",
+      "player_reb": "player_rebounds",
+      "player_ast": "player_assists",
+      "player_3pm": "player_threes",
+      "player_pra": "player_points_rebounds_assists"
+    },
+    "nfl": {
+      "player_pass_yds": "player_passing_yards",
+      "player_rush_yds": "player_rushing_yards",
+      "player_rec_yds": "player_receiving_yards",
+      "player_rec": "player_receptions"
+    },
+    "mlb": {
+      "pitcher_k": "pitcher_strikeouts",
+      "batter_h": "batter_hits",
+      "batter_tb": "batter_total_bases",
+      "batter_rbi": "batter_rbi",
+      "batter_r": "batter_runs",
+      "batter_hr": "batter_home_runs"
+    },
+    "nhl": {
+      "player_sog": "player_shots_on_goal",
+      "player_pts": "player_points"
+    }
+  },
+  "profiles": {
+    "nba_core_props": {
+      "sports": [
+        "nba"
+      ],
+      "canonical_markets": [
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_threes",
+        "player_points_rebounds_assists"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "fanduel": 50,
+        "pinnacle": 20,
+        "draftkings": 20,
+        "caesars": 10
+      },
+      "required_any_anchor": [
+        "fanduel"
+      ],
+      "min_distinct_books": 3,
+      "status": "recommended_initial_paper_test",
+      "live_execution_allowed": false,
+      "evidence_sources": [
+        "pikkit_nba_nfl_2024_12_20",
+        "outlier_presets_2026_07_16"
+      ],
+      "note": "Use the same initial blend across these statistics. No independently validated stat-specific numerical weights were found. Do not construct PRA by adding marginal probabilities."
+    },
+    "nfl_volume_props": {
+      "sports": [
+        "nfl"
+      ],
+      "canonical_markets": [
+        "player_passing_yards",
+        "player_rushing_yards",
+        "player_receiving_yards",
+        "player_receptions"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "pinnacle": 35,
+        "fanduel": 30,
+        "betonline": 15,
+        "circa": 10,
+        "draftkings": 10
+      },
+      "required_any_anchor": [
+        "pinnacle",
+        "fanduel"
+      ],
+      "min_distinct_books": 3,
+      "status": "recommended_initial_paper_test",
+      "live_execution_allowed": false,
+      "evidence_sources": [
+        "pikkit_nba_nfl_2024_12_20",
+        "outlier_presets_2026_07_16"
+      ],
+      "note": "Circa and BetOnline must actually quote the exact two-sided prop. ParlayAPI does not document BetOnline props; do not infer prop coverage from its game-line coverage."
+    },
+    "mlb_pitcher_strikeouts": {
+      "sports": [
+        "mlb"
+      ],
+      "canonical_markets": [
+        "pitcher_strikeouts"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "circa": 35,
+        "fanduel": 35,
+        "pinnacle": 20,
+        "draftkings": 10
+      },
+      "required_any_anchor": [
+        "circa",
+        "fanduel"
+      ],
+      "min_distinct_books": 3,
+      "status": "recommended_initial_paper_test",
+      "live_execution_allowed": false,
+      "evidence_sources": [
+        "pikkit_mlb_2025_08_08",
+        "outlier_presets_2026_07_16"
+      ],
+      "note": "Circa evidence is specifically relevant to its narrower strikeout/home-run offering. Confirm starting-pitcher and settlement rules."
+    },
+    "mlb_hitter_volume": {
+      "sports": [
+        "mlb"
+      ],
+      "canonical_markets": [
+        "batter_hits",
+        "batter_total_bases",
+        "batter_rbi",
+        "batter_runs"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "fanduel": 40,
+        "pinnacle": 25,
+        "draftkings": 15,
+        "caesars": 10,
+        "bet365": 10
+      },
+      "required_any_anchor": [
+        "fanduel",
+        "pinnacle"
+      ],
+      "min_distinct_books": 3,
+      "status": "recommended_initial_paper_test",
+      "live_execution_allowed": false,
+      "evidence_sources": [
+        "pikkit_mlb_2025_08_08",
+        "outlier_presets_2026_07_16"
+      ],
+      "note": "Do not extrapolate Circa strikeout/home-run results to all batting markets. Require exact starting/participation/void rules."
+    },
+    "mlb_home_runs_two_sided": {
+      "sports": [
+        "mlb"
+      ],
+      "canonical_markets": [
+        "batter_home_runs"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "circa": 35,
+        "fanduel": 35,
+        "pinnacle": 20,
+        "draftkings": 10
+      },
+      "required_any_anchor": [
+        "circa",
+        "fanduel"
+      ],
+      "min_distinct_books": 3,
+      "status": "experimental_paper_only",
+      "live_execution_allowed": false,
+      "evidence_sources": [
+        "pikkit_mlb_2025_08_08"
+      ],
+      "note": "Require YES and NO or OVER and UNDER for the same player and threshold. A list of players to hit a home run is not an exhaustive mutually exclusive outcome set."
+    },
+    "nhl_common_props_experimental": {
+      "sports": [
+        "nhl"
+      ],
+      "canonical_markets": [
+        "player_shots_on_goal",
+        "player_points"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "pinnacle": 25,
+        "fanduel": 25,
+        "draftkings": 25,
+        "caesars": 25
+      },
+      "required_any_anchor": [
+        "pinnacle",
+        "fanduel"
+      ],
+      "min_distinct_books": 3,
+      "status": "experimental_paper_only",
+      "live_execution_allowed": false,
+      "evidence_sources": [],
+      "note": "Neutral research baseline, not an empirically established NHL sharp-book ranking."
+    },
+    "college_props_experimental": {
+      "sports": [
+        "ncaaf",
+        "ncaabm"
+      ],
+      "canonical_markets": [
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_threes",
+        "player_points_rebounds_assists",
+        "player_passing_yards",
+        "player_rushing_yards",
+        "player_receiving_yards",
+        "player_receptions"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "pinnacle": 25,
+        "fanduel": 25,
+        "draftkings": 25,
+        "caesars": 25
+      },
+      "required_any_anchor": [
+        "pinnacle",
+        "fanduel"
+      ],
+      "min_distinct_books": 3,
+      "status": "experimental_paper_only",
+      "live_execution_allowed": false,
+      "evidence_sources": [],
+      "note": "Intersect markets with actual league and provider coverage. Do not treat the shared list as a promise every sport has every statistic."
+    },
+    "nba_nfl_mainlines": {
+      "sports": [
+        "nba",
+        "nfl"
+      ],
+      "canonical_markets": [
+        "moneyline",
+        "spread",
+        "game_total"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "pinnacle": 35,
+        "circa": 35,
+        "betonline": 10,
+        "fanduel": 10,
+        "draftkings": 10
+      },
+      "required_any_anchor": [
+        "pinnacle",
+        "circa"
+      ],
+      "min_distinct_books": 2,
+      "status": "recommended_initial_paper_test",
+      "live_execution_allowed": false,
+      "evidence_sources": [
+        "pikkit_nba_nfl_2024_12_20",
+        "outlier_presets_2026_07_16"
+      ],
+      "note": "BetOnline NBA availability must come from a verified source; ParlayAPI registry does not document it. BookMaker is an optional NFL moneyline override below, not a prop or spread source."
+    },
+    "mlb_mainlines": {
+      "sports": [
+        "mlb"
+      ],
+      "canonical_markets": [
+        "moneyline",
+        "spread",
+        "game_total"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "pinnacle": 40,
+        "circa": 30,
+        "betonline": 15,
+        "draftkings": 10,
+        "fanduel": 5
+      },
+      "required_any_anchor": [
+        "pinnacle",
+        "circa"
+      ],
+      "min_distinct_books": 2,
+      "status": "recommended_initial_paper_test",
+      "live_execution_allowed": false,
+      "evidence_sources": [
+        "pikkit_mlb_2025_08_08"
+      ],
+      "note": "BookMaker is an optional moneyline-only override below."
+    },
+    "college_mainlines_experimental": {
+      "sports": [
+        "ncaaf",
+        "ncaabm"
+      ],
+      "canonical_markets": [
+        "moneyline",
+        "spread",
+        "game_total"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "circa": 40,
+        "pinnacle": 35,
+        "betonline": 15,
+        "draftkings": 5,
+        "fanduel": 5
+      },
+      "required_any_anchor": [
+        "pinnacle",
+        "circa"
+      ],
+      "min_distinct_books": 2,
+      "status": "experimental_paper_only",
+      "live_execution_allowed": false,
+      "evidence_sources": [],
+      "note": "Provisional research allocation. Actual availability and college-specific performance must be validated; no exact optimized college weights are claimed."
+    },
+    "nhl_mainlines_experimental": {
+      "sports": [
+        "nhl"
+      ],
+      "canonical_markets": [
+        "moneyline",
+        "spread",
+        "game_total"
+      ],
+      "phase": "pregame",
+      "weights_percent": {
+        "pinnacle": 40,
+        "circa": 25,
+        "draftkings": 15,
+        "betonline": 10,
+        "fanduel": 10
+      },
+      "required_any_anchor": [
+        "pinnacle",
+        "circa"
+      ],
+      "min_distinct_books": 2,
+      "status": "experimental_paper_only",
+      "live_execution_allowed": false,
+      "evidence_sources": [],
+      "note": "Provisional research allocation, not an NHL-specific fitted result. Distinguish regulation, three-way and overtime-inclusive markets."
+    }
+  },
+  "optional_bookmaker_override": {
+    "enabled": false,
+    "allowed_sports": [
+      "nfl",
+      "mlb"
+    ],
+    "allowed_markets": [
+      "moneyline"
+    ],
+    "phase": "pregame",
+    "proposed_share_percent": 15,
+    "rescale_existing_weights_by": 0.85,
+    "requirements": [
+      "Complete matching outcome set",
+      "Validated source freshness and tradability",
+      "Independent out-of-sample test against model without BookMaker"
+    ],
+    "note": "A candidate paper-test override, not a claim that a 60-second board check meets live execution needs."
+  },
+  "aggregation": {
+    "unit_of_weight": "canonical_book_not_provider",
+    "target_venue_reference_weight": 0,
+    "exchange_reference_default_weight": 0,
+    "deduplicate_same_book_across_providers": true,
+    "duplicate_selection_policy": "Choose the most recently validated complete outcome set under documented observation semantics, not the most favorable price or newest transport timestamp. Reject unresolved conflicts.",
+    "devig_before_averaging": true,
+    "primary_devig_candidate": "power",
+    "sensitivity_devig_candidate": "multiplicative",
+    "blend": "weighted_arithmetic_mean_of_devigged_probabilities",
+    "effective_weight": "base_weight * measured_freshness_factor * eligibility_indicator",
+    "renormalize_only_after_gates_pass": true,
+    "unresolved_price_disagreement_policy": "flag_and_withhold_execution_do_not_automatically_discard_a_sharp_first_mover",
+    "method_sensitivity_policy": "Report both model EV estimates; do not execute if the apparent edge depends solely on the selected devig method."
+  },
+  "eligibility_rules": {
+    "same_event_player_stat_threshold_period_and_settlement_rules": true,
+    "require_complete_mutually_exclusive_exhaustive_outcomes": true,
+    "require_active_unsuspended_market_status": true,
+    "require_validated_outcome_level_observation": true,
+    "require_synchronized_sides_from_same_book": true,
+    "reject_topups_stale_rows_and_unresolved_truncation": true,
+    "require_explicit_push_model_when_refund_possible": true,
+    "no_automatic_integer_to_halfpoint_conversion": true,
+    "unpriced_push_or_rule_mismatch_policy": "skip",
+    "one_sided_anytime_scorer_markets": "skip_for_standard_devig",
+    "unknown_freshness_or_status_policy": "paper_research_only",
+    "live_execution": "disabled_until_independently_validated"
+  },
+  "freshness_contract": {
+    "record_separately": [
+      "source_price_changed_at",
+      "source_observed_at",
+      "provider_observed_at",
+      "received_at",
+      "market_status",
+      "source_health"
+    ],
+    "do_not_use_as_selection_freshness": [
+      "websocket_heartbeat",
+      "frame_send_time",
+      "last_price_change_alone",
+      "unqualified_fixture_verification_time"
+    ],
+    "ttl_seconds_by_provider_book_sport_market_phase": {},
+    "missing_ttl_policy": "No execution eligibility; measure source lag and quote verification before setting TTL.",
+    "note": "A price can remain unchanged and still be fresh. A newly delivered row can also contain an old price."
+  },
+  "validation_plan": {
+    "log_full_candidate_universe_including_rejections": true,
+    "baselines": [
+      "equal_weight_eligible_books",
+      "single_anchor",
+      "these_starting_priors",
+      "learned_nonnegative_regularized_weights"
+    ],
+    "splits": "Time-ordered walk-forward; keep all alternate lines, sides and repeated observations of a game within the same split; aggregate or weight repeated snapshots to avoid pseudo-replication.",
+    "metrics": [
+      "out_of_sample_log_loss",
+      "out_of_sample_brier_score",
+      "reliability_curves",
+      "closing_line_comparison",
+      "paper_execution_net_returns_and_fill_quality"
+    ],
+    "weight_learning": "Fit nonnegative sum-to-one weights with shrinkage toward parent league/market priors; do not fit thin stat-specific groups independently.",
+    "do_not_use": [
+      "future_or_closing_information_at_decision_time",
+      "random_quote_level_train_test_split",
+      "short_run_win_rate_as_sole_objective",
+      "unverified_provider_timestamps_as_ground_truth_latency"
+    ],
+    "exchange_challenger": "Test separately with executable bid/ask, depth, fees and target-venue exclusion; do not copy large exchange weights from third-party research without reproducing results."
+  }
+}

@@ -20,7 +20,8 @@ from .core.native_oms import NativeOrder, NativeSettlement
 from .core.native_pricing import NativeBook, NativeCandidate
 from .core.native_runtime import NativeRuntime, NativeSignalObservation
 from .core.plugins import ExecutionVenue, InputPlugin, PluginContext, PluginRegistry, StrategyPlugin
-from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, worst_fee
+from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, resolved_reference_policy, worst_fee
+from .core.reference_profiles import freshness_rule, quote_eligibility
 from .core.risk import RiskEngine, RiskRejected
 from .core.signals import ResultProvenance, SignalLedger, SignalObservation, SignalResultImport
 from .core.storage import Storage
@@ -61,6 +62,8 @@ class Engine:
         self.matcher = MarketMatcher()
         self.markets = self.matcher.markets
         self.quotes: dict[str, dict[tuple[str, str], Quote]] = {}
+        self.quote_observation_watermarks = {}
+        self.quote_verification_latches = {}
         self.books: dict[str, dict[tuple[str, str], OrderBook]] = {}
         self.opportunities = {}
         self.signals = {}
@@ -275,18 +278,24 @@ class Engine:
     async def _record_signal(self, market, status, reason, candidates=()):
         config = market_config(self.settings.pricing, market)
         eligible = tuple(c.id for c in candidates
-                         if c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi)
+                         if c.execution_eligible and c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi)
         quotes = list(self.quotes.get(market.id, {}).values())
         books = list(self.books.get(market.id, {}).values())
         synthetic = (any(c.synthetic for c in candidates) if candidates else
                      not any(not item.synthetic for item in [*quotes, *books]))
         fees = {c.id: book.fee for c in candidates
                 if (book := self.book(market.id, c.venue, c.outcome)) is not None}
+        try:
+            actual_model = (candidates[0].primary_model or config.devig_method) if candidates else resolved_reference_policy(
+                self.settings.pricing, market, utcnow())[0].devig_method
+        except NoSignal:
+            actual_model = "no_applicable_profile"
         observation = SignalObservation(
             market=market, candidates=tuple(candidates), status=status, reason=reason,
-            qualified_candidate_ids=eligible, model=config.devig_method,
+            qualified_candidate_ids=eligible, model=actual_model,
             pricing_thresholds={"min_ev": config.min_ev, "min_roi": config.min_roi},
             fee_schedules=fees, synthetic=synthetic,
+            reference_quotes=tuple(quotes), pricing_policy=self.settings.pricing.model_dump(mode="json"),
             strategies=tuple(name for name, record in self.registry.records.items()
                              if isinstance(record.plugin, StrategyPlugin)),
         )
@@ -342,15 +351,50 @@ class Engine:
             if payload.source_time and payload.source_time > utcnow():
                 self.matcher.quarantine.append({"reason": "Future source clock", "market_id": market_id, "provider": payload.provider})
                 return
-            # Arrival time is never used to promote an old source observation.
-            if old and old.source_time and payload.source_time and payload.source_time < old.source_time and payload.status == "active":
+            # Only a documented outcome observation may replace the legacy
+            # source clock. Transport receipt never promotes an old quote.
+            old_clock = (old.source_observed_at if old.observation_verified else old.source_time) if old else None
+            strict = self.settings.pricing.reference_profile_mode == "strict"
+            source_key = (market_id, *key)
+            watermark = self.quote_observation_watermarks.get(source_key)
+            if strict and watermark is not None:
+                old_clock = watermark
+            flags = ("observation_verified", "observation_complete", "market_status_verified")
+            downgraded = strict and old and any(getattr(old, flag) and not getattr(payload, flag) for flag in flags)
+            new_clock = payload.source_observed_at if payload.observation_verified else payload.source_time
+            if new_clock and new_clock > utcnow():
+                self.matcher.quarantine.append({"reason": "Future observation clock", "market_id": market_id})
+                return
+            if old and old_clock and new_clock and new_clock < old_clock and payload.status == "active" and not downgraded:
                 self.metrics.counters["out_of_order_quotes"] += 1
                 return
-            if old and old.status != "active" and payload.status == "active" and old.source_time and payload.source_time and payload.source_time <= old.source_time:
+            if old and old.status != "active" and payload.status == "active" and (not new_clock or old_clock and new_clock <= old_clock):
                 self.metrics.counters["out_of_order_quotes"] += 1
                 return
-            if old and payload.status != "active" and old.source_time and payload.source_time and payload.source_time < old.source_time:
+            if old and payload.status != "active" and old_clock and new_clock and new_clock < old_clock:
                 payload = old.model_copy(update={"status": payload.status, "received_at": payload.received_at})
+            if downgraded:
+                self.quote_verification_latches[source_key] = "verification_downgrade_requires_new_observation"
+            if (strict and old and old_clock
+                    and new_clock == old_clock and payload.status == "active"
+                    and payload.decimal_odds != old.decimal_odds):
+                # Same-observation contradictions stay research-only until a
+                # strictly newer complete observation resolves them. Receipt
+                # order and repeated packets cannot clear this condition.
+                self.quote_verification_latches[source_key] = "conflicting_same_observation"
+                self.metrics.counters["conflicting_quote_observations"] += 1
+            if strict and source_key in self.quote_verification_latches:
+                recovered = (payload.status == "active" and all(getattr(payload, flag) for flag in flags)
+                    and payload.source_observed_at is not None
+                    and (old_clock is None or payload.source_observed_at > old_clock))
+                if recovered:
+                    del self.quote_verification_latches[source_key]
+                else:
+                    payload = payload.model_copy(update={"observation_complete": False,
+                        "verification_reason": self.quote_verification_latches[source_key]})
+            if payload.observation_verified and payload.source_observed_at is not None:
+                self.quote_observation_watermarks[source_key] = max(
+                    payload.source_observed_at, watermark or payload.source_observed_at)
             self.quotes[market_id][key] = payload
         elif isinstance(payload, NativeBook):
             market_id = payload.instrument.canonical_market_id
@@ -433,9 +477,10 @@ class Engine:
             await self._record_signal(market, **self.signals[market_id])
             return
         config = market_config(self.settings.pricing, market)
-        eligible = [c for c in generated if c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi]
-        self.signals[market_id] = {"status": "POSITIVE EV" if eligible else "NEGATIVE EV",
-                                  "reason": "Fee-adjusted executable offers",
+        eligible = [c for c in generated if c.execution_eligible and c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi]
+        research_only = all(not c.reference_inputs_eligible for c in generated)
+        self.signals[market_id] = {"status": "POSITIVE EV" if eligible else "RESEARCH ONLY" if research_only else "NEGATIVE EV",
+                                  "reason": "; ".join(dict.fromkeys(r for c in generated for r in c.ineligibility_reasons)) if research_only else "Fee-adjusted executable offers",
                                   "best_ev": str(max(c.ev_per_contract for c in generated))}
         await self._record_signal(market, self.signals[market_id]["status"],
                                   self.signals[market_id]["reason"], generated)
@@ -458,6 +503,15 @@ class Engine:
         now = utcnow().timestamp()
         times = [q.source_time.timestamp() + config.max_quote_age_ms / 1000
                  for q in self.quotes.get(market_id, {}).values() if q.source_time and q.status == "active"]
+        if config.reference_profile_mode == "strict":
+            market = self.markets[market_id]
+            times = [q.source_observed_at.timestamp() + float(rule.ttl_seconds)
+                     for q in self.quotes.get(market_id, {}).values()
+                     if q.source_observed_at and q.observation_verified and q.status == "active"
+                     and (rule := freshness_rule(config, market, q.provider, q.bookmaker)) is not None]
+            # A pregame profile must expire at the scheduled start even when
+            # the provider never sends a status update or price change.
+            times.append(market.start_time.timestamp())
         times += [b.source_time.timestamp() + config.max_book_age_ms / 1000
                   for b in self.books.get(market_id, {}).values() if b.source_time and b.status == "active"]
         times += [b.source_time.timestamp() + config.max_book_age_ms / 1000
@@ -500,6 +554,8 @@ class Engine:
             raise RiskRejected(str(exc)) from exc
         if (current.strategy, current.market_id, current.venue, current.outcome) != (c.strategy, c.market_id, c.venue, c.outcome):
             raise RiskRejected("Strategy changed approved trade identity")
+        if not current.execution_eligible or self.settings.mode == "production" and not current.live_execution_allowed:
+            raise RiskRejected("Reference profile is not eligible for this execution mode")
         if current.ev_per_contract < config.min_ev or current.roi < config.min_roi:
             raise RiskRejected("Signal no longer meets thresholds")
         if current.price > c.price:
@@ -513,9 +569,11 @@ class Engine:
                 raise RiskRejected("No affordable quantity")
         # Standing limits retain their approved price even when the new best ask
         # changes. Never approve a fill by evaluating only the cheaper current ask.
-        net = current.fair_probability - c.price - worst_fee(book.fee, c.price, 1)
-        if net < config.min_ev or net / c.price < config.min_roi:
-            raise RiskRejected("Size-adjusted net edge below threshold")
+        from .core.pricing import validate_candidate_size
+        try:
+            validate_candidate_size(current, book.fee, c.price, 1, config)
+        except NoSignal as exc:
+            raise RiskRejected(str(exc)) from exc
         if isinstance(c, Order):
             self.risk.check_reserved_limits(c, book)
         return current.model_copy(update={"id": c.id}) if isinstance(c, Candidate) else current
@@ -550,7 +608,7 @@ class Engine:
             if self.risk.kill_switch:
                 await self.oms.cancel_all()
             positive = {k for k, c in self.opportunities.items()
-                        if c.ev_per_contract >= self.settings.pricing.min_ev}
+                        if c.execution_eligible and c.ev_per_contract >= self.settings.pricing.min_ev}
             self.metrics.update_opportunities(positive, utcnow())
             for name, record in self.registry.records.items():
                 if record.enabled:
@@ -677,16 +735,25 @@ class Engine:
         return {**candidate.model_dump(mode="json"), "event_name": market.event_name,
                 "sport": market.sport, "league": market.league, "market_type": market.market_type,
                 "player": market.player, "line": str(market.line) if market.line is not None else None,
-                "status": "POSITIVE EV" if candidate.ev_per_contract >= config.min_ev and candidate.roi >= config.min_roi else "NEGATIVE EV"}
+                "status": "RESEARCH ONLY" if not candidate.reference_inputs_eligible else "POSITIVE EV" if candidate.execution_eligible and candidate.ev_per_contract >= config.min_ev and candidate.roi >= config.min_roi else "NEGATIVE EV"}
 
     def quote_public(self, quote):
-        return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(),
-                "fresh": quote.status == "active" and quote.fresh(self.settings.pricing.max_quote_age_ms)}
+        market = self.markets.get(quote.market_id)
+        strict = self.settings.pricing.reference_profile_mode == "strict"
+        eligible, reasons, age = quote_eligibility(self.settings.pricing, market, quote, utcnow()) if market else (False, ("Unknown market",), None)
+        return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": age,
+                "execution_freshness_reasons": reasons if strict else (),
+                "fresh": quote.status == "active" and (eligible if strict else quote.fresh(self.settings.pricing.max_quote_age_ms))}
 
     def market_detail(self, market_id):
         market = self.markets[market_id]
+        try:
+            reference_pricing = fair_value(market, list(self.quotes.get(market_id, {}).values()), self.settings.pricing).model_dump(mode="json")
+        except NoSignal as exc:
+            reference_pricing = {"status": "NO SIGNAL", "reason": str(exc)}
         return {
             "market": market.model_dump(mode="json"),
+            "reference_pricing": reference_pricing,
             "quotes": [self.quote_public(q) for q in self.quotes.get(market_id, {}).values()],
             "books": [b.model_dump(mode="json") for b in self.books.get(market_id, {}).values()],
             "opportunities": [self.candidate_public(c) for c in self.opportunities.values() if c.market_id == market_id],

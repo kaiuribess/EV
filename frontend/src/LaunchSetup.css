@@ -38,6 +38,27 @@
 .setup-subpanel details { margin-top:15px; }
 .setup-subpanel details summary { display:flex; align-items:center; justify-content:space-between; font-size:10px; cursor:pointer; }
 .setup-subpanel pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#080e16; padding:12px; margin:10px 0; font-size:10px; }
+.setup-reference-profiles { margin-top:18px; display:grid; gap:9px; }
+.setup-subpanel .setup-reference-profile { margin-top:0; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+.setup-reference-profile.is-selected { border-color:#b8ce792f; }
+.setup-reference-profile > summary { padding:12px; gap:9px; }
+.setup-reference-profile > summary > span:first-child { flex:1; min-width:0; }
+.setup-reference-profile summary strong { display:block; font-size:11px; font-weight:500; overflow-wrap:anywhere; }
+.setup-reference-profile summary small { display:block; color:var(--muted); font-size:9px; margin-top:5px; }
+.setup-reference-profile summary > svg { flex-shrink:0; transition:transform .15s ease; }
+.setup-reference-profile[open] summary > svg { transform:rotate(90deg); }
+.setup-reference-content { border-top:1px solid var(--border); padding:14px 12px; }
+.setup-weight-chips { display:flex; flex-wrap:wrap; gap:7px; }
+.setup-weight-chips > span { display:inline-flex; gap:8px; border:1px solid var(--border); border-radius:4px; padding:7px 9px; font-size:10px; color:var(--muted); }
+.setup-weight-chips strong { color:var(--text); font-weight:500; }
+.setup-selector-list,.setup-ttl-list { margin-top:16px; font-size:10px; line-height:1.7; }
+.setup-selector-list > strong,.setup-ttl-list > strong { font-weight:500; }
+.setup-selector-list ul,.setup-ttl-list ul { margin-top:7px; padding-left:15px; color:var(--muted); overflow-wrap:anywhere; }
+.reference-model-detail { padding:0 20px 18px; }
+.research-explanation,.research-reasons { font-size:11px; line-height:1.7; color:var(--amber); overflow-wrap:anywhere; }
+.research-reasons { margin:12px 0; padding-left:18px; }
+.method-comparison { display:grid; gap:8px; font-size:11px; line-height:1.7; color:var(--muted); }
+.method-comparison strong { color:var(--text); font-weight:500; margin-right:5px; }
 .setup-inputs { border-block:1px solid var(--border); margin-bottom:24px; padding:16px 0; }
 .setup-inputs > summary { display:flex; align-items:center; gap:9px; cursor:pointer; font-size:12px; }
 .setup-inputs .table-scroll { margin-top:15px; }

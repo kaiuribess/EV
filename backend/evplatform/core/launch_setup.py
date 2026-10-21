@@ -158,6 +158,18 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "Match event, player, line and settlement rules across real sportsbook references and executable venue books.", external=True)
     requirement("scope.profiles", bool(profiles) and not native.profile_error, "Review the exact accounts and limits",
         "A saved limits draft is not an applied launch profile. Each selected account needs its own verified identity and market scope.")
+    pricing = engine.settings.pricing
+    reference_profiles_ready = True
+    if pricing.reference_profile_mode == "strict":
+        selected_references = [pricing.reference_profiles[name] for name in pricing.enabled_reference_profiles]
+        reference_profiles_ready = bool(selected_references) and all(
+            profile.live_execution_allowed and all(
+                any(rule.verified and rule.key() == selector.key() and rule.bookmaker == book
+                    for rule in pricing.profile_freshness_rules)
+                for selector in profile.selectors for book in profile.weights_percent)
+            for profile in selected_references)
+        requirement("pricing.profiles", reference_profiles_ready, "Validate reference profiles for live execution",
+            "Starting weights remain research settings. Validate each enabled profile and exact-source freshness policy; every current quote must also pass status, completeness, anchor and sensitivity checks.", external=True)
     relevant_software = [item for item in software_blockers if not profiles or item.scope in profiles]
     requirement("software.settlement", bool(accounts) and not relevant_software,
         "Complete venue settlement support",
@@ -184,10 +196,10 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
     requirement("runtime.gate", aggregate.safe_to_arm, "Pass the current release checks",
         "Every technical and account check must pass together. Quotes, fees and account facts are checked again before each order.")
     native_mode = engine.settings.mode == "production"
-    activation_available = bool(native_mode and engine.settings.live_enabled and aggregate.safe_to_arm)
+    activation_available = bool(native_mode and engine.settings.live_enabled and aggregate.safe_to_arm and reference_profiles_ready)
     activation_reason = (
         "Current checks passed. Final activation remains an explicit operator action." if activation_available
-        else "Finish the current launch checks before enabling real orders." if not aggregate.safe_to_arm
+        else "Finish the current launch checks before enabling real orders." if not aggregate.safe_to_arm or not reference_profiles_ready
         else "Start the reviewed production workspace with native execution configured, then repeat the live checks."
     )
     draft_blockers = []
@@ -199,7 +211,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         draft_blockers.append("Current account identity and reconciled inventory must be verified before preparing a launch profile.")
     return {
         "schema_version": 1, "checked_at": now.isoformat(), "environment": engine.settings.mode,
-        "safe_to_arm": aggregate.safe_to_arm,
+        "safe_to_arm": aggregate.safe_to_arm and reference_profiles_ready,
         "activation": {"available": activation_available,
             "scope_digest": aggregate.profile_digest,
             "requires_restart": not native_mode or not engine.settings.live_enabled,

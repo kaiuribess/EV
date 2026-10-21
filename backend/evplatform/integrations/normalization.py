@@ -60,6 +60,14 @@ class SourceOffer:
     provider_time: datetime | None
     status: str = "active"
     context: dict[str, Any] = field(default_factory=dict)
+    # Identity and clocks are separate. A delivery or price-change timestamp
+    # must never be promoted to evidence that the source re-observed a price.
+    source_observed_at: datetime | None = None
+    observation_verified: bool = False
+    observation_complete: bool = False
+    source_price_changed_at: datetime | None = None
+    verification_reason: str | None = None
+    market_status_verified: bool = False
 
     def identity(self) -> dict[str, Any]:
         return {
@@ -115,6 +123,52 @@ def _oldest(values: list[datetime | None]) -> datetime | None:
     return min(values) if values and all(value is not None for value in values) else None
 
 
+def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | None:
+    """Retain adverse completeness evidence without making it market identity."""
+    body = envelope.payload if isinstance(envelope.payload, dict) else {}
+    for scope in (body, *scopes):
+        if scope.get("topped_up") is True:
+            return "retained_top_up"
+        if scope.get("truncated") is True or scope.get("truncated_books"):
+            return "truncated_response"
+        if (scope.get("partial") is True or scope.get("missing_books")
+                or scope.get("snapshot_partial_reasons") or scope.get("snapshot_in_progress") is True):
+            return "partial_response"
+        if scope.get("snapshot_complete") is False:
+            return "incomplete_snapshot"
+    headers = envelope.metadata.get("headers", {})
+    if str(headers.get("x-result-truncated", "")).lower() == "true":
+        return "truncated_response"
+    if str(headers.get("x-result-has-more", "")).lower() == "true" or headers.get("x-next-offset"):
+        return "paginated_response_not_atomic"
+    if headers.get("x-result-degraded") or headers.get("x-result-degraded-sources"):
+        return "degraded_source"
+    return None
+
+
+def _parlay_observation(envelope: ProviderEnvelope, row: dict, *, complete: bool,
+                        scopes: tuple[dict, ...] = ()) -> dict[str, Any]:
+    # /docs#market-aliases-offer-identity-and-completeness documents this exact
+    # pair. last_update has varying legacy meanings; verified_at is a fixture
+    # heartbeat. Neither establishes quote-bound collector verification.
+    # The reference describes last_observed semantically but the published
+    # AsyncAPI does not specify numeric units. ISO with an offset is unambiguous;
+    # guessing seconds/milliseconds from magnitude would manufacture evidence.
+    raw_observed = row.get("last_observed")
+    observed = parse_timestamp(raw_observed) if isinstance(raw_observed, str) else None
+    verified = observed is not None and row.get("last_update_type") == "collector_observation"
+    problem = _observation_problem(envelope, *scopes, row)
+    if observed is not None and observed > envelope.received_at:
+        problem, verified = "future_observation_clock", False
+    return {
+        "source_observed_at": observed,
+        "observation_verified": verified,
+        "observation_complete": verified and complete and problem is None,
+        "source_price_changed_at": parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds"),
+        "verification_reason": problem or ("quote_bound_collector_observation" if verified else "unverified_observation_clock"),
+    }
+
+
 def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -> list[SourceOffer]:
     result = []
     for event in events:
@@ -151,6 +205,9 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                     str(market["key"]), None, None, market.get("period"), points, prices,
                     observed, envelope.published_at, status,
                     {**_row_context(market), **event_context},
+                    **(_parlay_observation(envelope, market, complete=len(prices) >= 2,
+                                           scopes=(event, book))
+                       if envelope.provider_id.startswith("parlay") else {}),
                 ))
                 # Alternate lines are separate source identities. Missing sides never
                 # inherit prices or timestamps from a primary rung.
@@ -166,7 +223,10 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                         envelope.provider_id, str(book["key"]), str(event.get("eventId") or event.get("id")),
                         str(market["key"]), None, None, market.get("period"), alt_points, alt_prices,
                         _oldest([parse_timestamp(o.get("last_update")) for o in group]), envelope.published_at,
-                        "active", {**_row_context(market), **event_context, "alternate": True},
+                        status, {**_row_context(market), **event_context, "alternate": True},
+                        # An alternate rung has no documented quote-bound
+                        # observation pair. It cannot inherit the main clock.
+                        verification_reason="alternate_observation_unverified",
                     ))
     return result
 
@@ -236,6 +296,7 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
             parse_timestamp(row.get("last_update"), epoch_unit="milliseconds"),
             envelope.published_at, status,
             {**_row_context(row), "participants": [row.get("home_team"), row.get("away_team")]},
+            **_parlay_observation(envelope, row, complete=len(prices) >= 2),
         ))
     return result
 
@@ -372,11 +433,30 @@ def _oddize_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
             group["prices"][side] = decimal_price(raw_price, "american")
             group["points"][side] = number_identity(row.get("line"))
             group["times"].append(_oddize_quote_time(row))
-    return [SourceOffer(
-        envelope.provider_id, group["bookmaker"], group["event_id"], group["market_key"],
-        group["player_key"], group["line"], None, group["points"], group["prices"],
-        _oldest(group["times"]), None, "active", group["context"],
-    ) for group in grouped.values()]
+    result = []
+    for group in grouped.values():
+        observed = _oldest(group["times"])
+        verified = observed is not None and all(stamp <= envelope.received_at for stamp in group["times"])
+        problem = _observation_problem(envelope)
+        if any(stamp is not None and stamp > envelope.received_at for stamp in group["times"]):
+            problem = "future_observation_clock"
+        # Per-side timestamps must identify the same observation before this
+        # pair can be used by strict profiles. No guessed skew tolerance.
+        synchronized = len(set(group["times"])) == 1
+        complete = verified and len(group["prices"]) >= 2 and synchronized and problem is None
+        result.append(SourceOffer(
+            envelope.provider_id, group["bookmaker"], group["event_id"], group["market_key"],
+            group["player_key"], group["line"], None, group["points"], group["prices"],
+            observed, None, "active", group["context"],
+            source_observed_at=observed, observation_verified=verified,
+            observation_complete=complete,
+            verification_reason=problem or ("unsynchronized_outcomes" if not synchronized else
+                "oddize_price_observation" if verified else "unverified_observation_clock"),
+            # OpenAPI Price/PropRow has no current market-status declaration.
+            # A timestamp alone never certifies that the quote is still offered.
+            market_status_verified=False,
+        ))
+    return result
 
 
 def extract_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
@@ -410,6 +490,8 @@ class VerifiedProviderMapper:
         self.rejected_count = 0
         self._last: dict[tuple[str, str], tuple[SourceOffer, Market, Quote, str | None]] = {}
         self._partial: dict[str, dict[str, SourceOffer]] = {}
+        self._verified_watermarks: dict[tuple[str, str], datetime] = {}
+        self._verification_latches: set[tuple[str, str]] = set()
         for mapping in mappings or []:
             self.register(mapping)
 
@@ -440,6 +522,12 @@ class VerifiedProviderMapper:
             "observation": ({
                 "source_time": offer.observed_at.isoformat() if offer.observed_at else None,
                 "provider_time": offer.provider_time.isoformat() if offer.provider_time else None,
+                "source_observed_at": offer.source_observed_at.isoformat() if offer.source_observed_at else None,
+                "source_price_changed_at": offer.source_price_changed_at.isoformat() if offer.source_price_changed_at else None,
+                "observation_verified": offer.observation_verified,
+                "observation_complete": offer.observation_complete,
+                "market_status_verified": offer.market_status_verified,
+                "verification_reason": offer.verification_reason,
                 "status": offer.status,
                 "decimal_odds": {name: str(value) for name, value in offer.prices.items()},
             } if offer else None),
@@ -460,7 +548,11 @@ class VerifiedProviderMapper:
                 continue
             if selectors and any(value and getattr(offer, name) != value for name, value in selectors.items()):
                 continue
-            suspended = quote.model_copy(update={"status": "suspended", "received_at": envelope.received_at})
+            suspended = quote.model_copy(update={"status": "suspended", "received_at": envelope.received_at,
+                "observation_complete": False, "market_status_verified": False,
+                "verification_reason": "feed_or_mapping_invalidated"})
+            if key in self._verified_watermarks:
+                self._verification_latches.add(key)
             self._last[key] = (offer, market, suspended, cached_scope)
             result.append((market, suspended))
         return result
@@ -468,6 +560,7 @@ class VerifiedProviderMapper:
     def _combine_partial_outcomes(self, offers: list[SourceOffer]) -> list[SourceOffer]:
         complete = []
         changed = {}
+        current_sides: dict[str, set[str]] = {}
         # REST prop rows may be separate outcomes within one response. They must
         # never inherit an opposing side from an earlier polling snapshot.
         snapshot_partial: dict[str, dict[str, SourceOffer]] = {}
@@ -507,16 +600,36 @@ class VerifiedProviderMapper:
                 self._partial.pop(next(iter(self._partial)))
             side = next(iter(offer.prices))
             previous = sides.get(side)
-            if previous and previous.observed_at and offer.observed_at and offer.observed_at < previous.observed_at:
+            previous_clock = (previous.source_observed_at if previous.observation_verified else previous.observed_at) if previous else None
+            current_clock = offer.source_observed_at if offer.observation_verified else offer.observed_at
+            degraded = previous and any(getattr(previous, name) and not getattr(offer, name) for name in (
+                "observation_verified", "observation_complete", "market_status_verified"))
+            if previous_clock and current_clock and current_clock < previous_clock and not degraded:
                 continue
             sides[side] = offer
             changed[key] = (offer, sides)
-        for offer, sides in changed.values():
+            current_sides.setdefault(key, set()).add(side)
+        for key, (offer, sides) in changed.items():
+            timestamps = [part.source_observed_at for part in sides.values()]
+            same_observation = len(set(timestamps)) == 1 and all(stamp is not None for stamp in timestamps)
+            current_pair = len(sides) >= 2 and set(sides) == current_sides[key]
+            verified = all(part.observation_verified for part in sides.values())
+            acceptable = all(part.verification_reason == "quote_bound_collector_observation" for part in sides.values())
+            adverse_reason = next((part.verification_reason for part in sides.values()
+                                   if part.verification_reason != "quote_bound_collector_observation"), None)
             complete.append(replace(
                 offer,
                 prices={side: part.prices[side] for side, part in sides.items()},
                 outcome_points={side: part.outcome_points[side] for side, part in sides.items()},
                 observed_at=_oldest([part.observed_at for part in sides.values()]),
+                source_observed_at=_oldest(timestamps),
+                source_price_changed_at=_oldest([part.source_price_changed_at for part in sides.values()]),
+                observation_verified=verified,
+                observation_complete=verified and current_pair and same_observation and acceptable,
+                market_status_verified=all(part.market_status_verified for part in sides.values()),
+                verification_reason=("incomplete_or_cross_frame_outcomes" if not current_pair else
+                                     "unsynchronized_outcomes" if not same_observation else
+                                     adverse_reason or offer.verification_reason),
                 status="active" if all(part.status == "active" for part in sides.values()) else "suspended",
             ))
         return complete
@@ -539,7 +652,22 @@ class VerifiedProviderMapper:
             rows = envelope.payload.get("data", []) if isinstance(envelope.payload, dict) else envelope.payload
             if isinstance(rows, list):
                 for row in rows:
-                    if isinstance(row, dict) and (row.get("action") == "remove" or row.get("suspended") is True or row.get("available") is False):
+                    price_fields = {key: row[key] for key in (
+                        "over_price", "under_price", "home_ml", "away_ml", "price", "price_american", "price_decimal",
+                    ) if isinstance(row, dict) and key in row}
+                    # Null sides are absence of a supplied usable price, never
+                    # an instruction to keep an earlier opposing price alive.
+                    side_prices = {key: value for key, value in price_fields.items()
+                                   if key in {"over_price", "under_price", "home_ml", "away_ml"}}
+                    single_prices = {key: value for key, value in price_fields.items() if key not in side_prices}
+                    # Nullable columns for a *different* row shape do not
+                    # withdraw a valid per-outcome price (e.g. moneyline rows
+                    # with unused null over_price/under_price columns).
+                    missing_price = (bool(price_fields)
+                                     and not any(value is not None for value in single_prices.values())
+                                     and (any(value is None for value in side_prices.values())
+                                          or all(value is None for value in price_fields.values())))
+                    if isinstance(row, dict) and (row.get("action") == "remove" or row.get("suspended") is True or row.get("available") is False or missing_price):
                         self._clear_partial(envelope.provider_id)
                         result.extend(self._invalidate(envelope, {
                             "event_id": str(row.get("canonical_event_id") or row.get("event_id") or row.get("eventId") or ""),
@@ -576,17 +704,45 @@ class VerifiedProviderMapper:
                 market_id=mapping.market.id, provider=envelope.provider_id, bookmaker=mapping.bookmaker,
                 decimal_odds={mapping.outcome_map[key]: price for key, price in offer.prices.items()},
                 source_time=offer.observed_at, provider_time=offer.provider_time,
+                source_observed_at=offer.source_observed_at,
+                observation_verified=offer.observation_verified,
+                observation_complete=offer.observation_complete,
+                source_price_changed_at=offer.source_price_changed_at,
+                verification_reason=offer.verification_reason,
+                market_status_verified=offer.market_status_verified,
                 received_at=envelope.received_at, synthetic=envelope.synthetic,
                 status=offer.status, original_market_id=offer.market_key,
             )
-            previous = self._last.get((envelope.provider_id, offer.signature))
-            if (previous and previous[2].source_time and quote.source_time
-                    and quote.source_time < previous[2].source_time and quote.status == "active"):
+            cache_key = (envelope.provider_id, offer.signature)
+            previous = self._last.get(cache_key)
+            previous_clock = (previous[2].source_observed_at if previous[2].observation_verified else previous[2].source_time) if previous else None
+            current_clock = quote.source_observed_at if quote.observation_verified else quote.source_time
+            degraded = previous and any(getattr(previous[2], name) and not getattr(quote, name) for name in (
+                "observation_verified", "observation_complete", "market_status_verified"))
+            watermark = self._verified_watermarks.get(cache_key)
+            if degraded and watermark is not None:
+                self._verification_latches.add(cache_key)
+            if cache_key in self._verification_latches and not degraded:
+                complete_evidence = (quote.observation_verified and quote.observation_complete
+                                     and quote.market_status_verified and quote.source_observed_at is not None)
+                if complete_evidence and (watermark is None or quote.source_observed_at > watermark):
+                    self._verification_latches.discard(cache_key)
+                elif quote.observation_complete:
+                    # A delayed duplicate cannot resurrect eligibility after
+                    # evidence was lost. Keep its research clocks/prices, while
+                    # preserving the pre-downgrade observation watermark.
+                    quote = quote.model_copy(update={"observation_complete": False,
+                        "verification_reason": "new_complete_verified_observation_required"})
+            if previous_clock and current_clock and current_clock < previous_clock and quote.status == "active" and not degraded:
                 # An out-of-order observation cannot overwrite a newer price.
                 continue
+            if (cache_key not in self._verification_latches and quote.observation_verified
+                    and quote.source_observed_at is not None):
+                if watermark is None or quote.source_observed_at > watermark:
+                    self._verified_watermarks[cache_key] = quote.source_observed_at
             self.mapped_count += 1
             self.quarantine.pop(offer.signature, None)
-            self._last[(envelope.provider_id, offer.signature)] = (
+            self._last[cache_key] = (
                 offer, mapping.market, quote, envelope.metadata.get("sport"),
             )
             result.append((mapping.market, quote))

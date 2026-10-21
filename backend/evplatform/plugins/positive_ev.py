@@ -7,7 +7,7 @@ class PositiveEV(StrategyPlugin):
     config_model = PricingConfig
     manifest = Manifest(
         name="positive_ev", kind="strategy", description="Independent, fee-aware sharp reference consensus",
-        sports=["*"], markets=["moneyline", "total", "player_prop"],
+        sports=["*"], markets=["moneyline", "spread", "total", "player_prop"],
         input_schemas=["odds.quote@1", "exchange.book@1", "sports.market@1"],
         output_schemas=["trade.candidate@1"],
         capabilities={"devig": ["proportional", "power"], "payout": "$1 binary",
@@ -25,6 +25,8 @@ class PositiveEV(StrategyPlugin):
                 candidates.append(opportunity(market, fair, book, config))
             except NoSignal as exc:
                 errors.append(str(exc))
+        if errors and not candidates:
+            raise NoSignal("; ".join(dict.fromkeys(errors)))
         return candidates
 
     def revalidate(self, candidate, view):

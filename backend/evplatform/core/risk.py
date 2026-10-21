@@ -228,6 +228,8 @@ class RiskEngine:
 
     def reserve(self, candidate: Candidate, market: Market, book, mode: str) -> Order:
         self.check_enabled()
+        if not candidate.execution_eligible:
+            raise RiskRejected("Research-only reference candidate cannot reserve exposure")
         if (book is None or candidate.market_id != market.id or book.market_id != market.id or
                 candidate.venue != book.venue or candidate.outcome != book.outcome or
                 candidate.outcome not in market.outcomes or not book.synchronized or book.status != "active"):

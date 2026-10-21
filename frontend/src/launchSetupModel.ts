@@ -1,5 +1,14 @@
 /** Runtime validation and activation decisions: no network calls or execution side effects. */
 type RecordValue = Record<string, unknown>
+export type ReferenceSelector = { sport: string; league: string; market_type: string; statistic: string | null }
+export type ReferenceProfile = {
+  schema_version: 1; selectors: ReferenceSelector[]; phase: 'pregame'; weights_percent: Record<string, string | number>;
+  required_any_anchor: string[]; min_distinct_books: number; status: string; live_execution_allowed: boolean;
+  evidence_sources: string[]; note: string; primary_devig: 'power'; sensitivity_devig: 'proportional';
+}
+export type ReferenceFreshnessRule = ReferenceSelector & {
+  provider: string; bookmaker: string; phase: 'pregame'; ttl_seconds: string | number; verified: boolean; evidence: string;
+}
 export type SetupBlocker = { code: string; category: string; scope: string; message: string; action: string }
 export type SetupAccount = {
   venue: string; enabled: boolean; configured_environment: string; runtime_environment: string | null;
@@ -22,7 +31,9 @@ export type SetupReport = {
   requirements: { code: string; status: 'passed' | 'pending'; title: string; detail: string; external_evidence_required: boolean }[];
   pricing: { devig_method: string; eligible_books: string[] | null; required_books: string[]; min_references: number;
     weights: Record<string, string | number>; max_quote_age_ms: number; max_book_age_ms: number;
-    max_disagreement: string | number; market_overrides: RecordValue };
+    max_disagreement: string | number; market_overrides: RecordValue;
+    reference_profile_mode?: 'legacy' | 'strict'; reference_profiles?: Record<string, ReferenceProfile>;
+    enabled_reference_profiles?: string[]; profile_freshness_rules?: ReferenceFreshnessRule[] };
   inputs: { provider: string; enabled: boolean; authenticated: boolean; mapped_quotes: number; quarantined: number }[];
 }
 const record = (v: unknown): v is RecordValue => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -33,6 +44,53 @@ const words = (v: RecordValue, keys: string[]) => keys.every(k => typeof v[k] ==
 const timestamp = (v: unknown): v is string => typeof v === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(v) && Number.isFinite(Date.parse(v))
 const nullableString = (v: unknown) => v === null || typeof v === 'string'
 const decimal = (v: unknown) => (typeof v === 'string' && v.trim() !== '' || typeof v === 'number') && Number.isFinite(Number(v)) && Number(v) >= 0
+const identifier = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0 && v.trim() === v && !v.includes('*')
+const uniqueStrings = (v: unknown): v is string[] => strings(v) && new Set(v).size === v.length
+const selectorKey = (s: ReferenceSelector) => JSON.stringify([s.sport, s.league, s.market_type, s.statistic])
+function validSelector(value: unknown): value is ReferenceSelector & RecordValue {
+  return record(value) && ['sport', 'league', 'market_type'].every(k => identifier(value[k]))
+    && (value.market_type === 'player_prop' ? identifier(value.statistic) : value.statistic === null)
+}
+function validPercentWeights(value: unknown): value is Record<string, string | number> {
+  if (!record(value) || !Object.keys(value).length || !Object.keys(value).every(identifier)) return false
+  const parts = Object.values(value).map(v => typeof v === 'string' || typeof v === 'number' ? String(v) : '')
+  if (parts.some(v => v.length > 128 || !/^\d+(?:\.\d+)?$/.test(v) || !Number.isFinite(Number(v)) || Number(v) <= 0)) return false
+  // Sum decimal strings exactly: floating point must not accept a nearly-100 total.
+  const scale = Math.max(...parts.map(v => v.split('.')[1]?.length ?? 0))
+  const total = parts.reduce((sum, v) => {
+    const [whole, fraction = ''] = v.split('.')
+    return sum + BigInt(whole + fraction.padEnd(scale, '0'))
+  }, 0n)
+  return total === 100n * 10n ** BigInt(scale)
+}
+function validReferenceSettings(pricing: RecordValue): boolean {
+  const fields = ['reference_profile_mode', 'reference_profiles', 'enabled_reference_profiles', 'profile_freshness_rules']
+  if (fields.every(k => pricing[k] === undefined)) return true // Older legacy reports remain readable.
+  if (typeof pricing.reference_profile_mode !== 'string' || !['legacy', 'strict'].includes(pricing.reference_profile_mode) || !record(pricing.reference_profiles)
+      || !uniqueStrings(pricing.enabled_reference_profiles) || !Array.isArray(pricing.profile_freshness_rules)) return false
+  const profiles = pricing.reference_profiles
+  for (const [name, p] of Object.entries(profiles)) {
+    if (!identifier(name) || !record(p) || p.schema_version !== 1 || p.phase !== 'pregame'
+        || !Array.isArray(p.selectors) || !p.selectors.length || !p.selectors.every(validSelector)
+        || new Set(p.selectors.map(selectorKey)).size !== p.selectors.length || !validPercentWeights(p.weights_percent)
+        || !uniqueStrings(p.required_any_anchor) || !p.required_any_anchor.length
+        || p.required_any_anchor.some(book => !Object.hasOwn(p.weights_percent as RecordValue, book))
+        || !count(p.min_distinct_books) || p.min_distinct_books < 1 || p.min_distinct_books > Object.keys(p.weights_percent).length
+        || !identifier(p.status) || typeof p.live_execution_allowed !== 'boolean' || !strings(p.evidence_sources)
+        || typeof p.note !== 'string' || p.primary_devig !== 'power' || p.sensitivity_devig !== 'proportional') return false
+  }
+  if (pricing.enabled_reference_profiles.some(name => !Object.hasOwn(profiles, name))) return false
+  const enabledSelectors = pricing.enabled_reference_profiles.flatMap(name => (profiles[name] as ReferenceProfile).selectors.map(selectorKey))
+  if (new Set(enabledSelectors).size !== enabledSelectors.length) return false
+  const ruleKeys: string[] = []
+  for (const r of pricing.profile_freshness_rules) {
+    if (!validSelector(r) || !record(r) || !identifier(r.provider) || !identifier(r.bookmaker) || r.phase !== 'pregame'
+        || !decimal(r.ttl_seconds) || !/^\d+(?:\.\d+)?$/.test(String(r.ttl_seconds)) || Number(r.ttl_seconds) <= 0 || typeof r.verified !== 'boolean'
+        || typeof r.evidence !== 'string' || r.evidence.trim().length < 8) return false
+    ruleKeys.push(JSON.stringify([r.provider, r.bookmaker, selectorKey(r), r.phase]))
+  }
+  return new Set(ruleKeys).size === ruleKeys.length
+}
 
 export function parseSetupReport(value: unknown): SetupReport {
   const fail = () => { throw new Error('Launch checks returned incomplete information. Real trading stays unavailable.') }
@@ -55,7 +113,7 @@ export function parseSetupReport(value: unknown): SetupReport {
       || !strings(pricing.required_books) || !count(pricing.min_references) || pricing.min_references < 1
       || !record(pricing.weights) || Object.values(pricing.weights).some(v => !decimal(v) || Number(v) <= 0)
       || !count(pricing.max_quote_age_ms) || !count(pricing.max_book_age_ms) || !decimal(pricing.max_disagreement)
-      || !record(pricing.market_overrides)) return fail()
+      || !record(pricing.market_overrides) || !validReferenceSettings(pricing)) return fail()
   if (!Array.isArray(value.accounts) || value.accounts.some(a => !record(a) || !words(a, ['venue', 'configured_environment', 'credential_profile'])
       || !nullableString(a.runtime_environment) || !nullableString(a.settlement_policy)
       || !bools(a, ['enabled', 'credentials_configured', 'authenticated', 'streaming', 'monitor_running', 'profile_configured'])
@@ -92,6 +150,10 @@ export function activationGate(report: SetupReport | null, receivedAt: number | 
   if (report.environment !== 'production' || !report.switches.live_enabled || report.activation.requires_restart) return { allowed: false, reason: 'The reviewed production workspace must be started before real trading can be enabled.' }
   if (!report.safe_to_arm || !report.activation.available) return { allowed: false, reason: report.activation.reason }
   if (!report.activation.scope_digest || !/^[0-9a-f]{64}$/.test(report.activation.scope_digest)) return { allowed: false, reason: 'The reviewed trading scope is unavailable.' }
+  if (report.pricing.reference_profile_mode === 'strict'
+      && !report.requirements.some(r => r.code === 'pricing.profiles' && r.status === 'passed')) return { allowed: false, reason: 'The reference profiles still need the backend’s live-execution validation.' }
+  if (report.pricing.reference_profile_mode === 'strict' && (!report.pricing.enabled_reference_profiles?.length
+      || report.pricing.enabled_reference_profiles.some(name => report.pricing.reference_profiles?.[name]?.live_execution_allowed !== true))) return { allowed: false, reason: 'The selected reference profiles are not approved for real trading.' }
   if (!report.scope.profile_count || !report.scope.verified_native_markets || !report.risk_policy.applied || report.risk_policy.values === null || report.risk_policy.error
       || report.accounts.filter(a => a.profile_configured).length !== report.scope.profile_count
       || report.launch_scope.length !== report.scope.profile_count
@@ -126,11 +188,42 @@ export function candidateCounts(values: { synthetic?: unknown }[]) {
   }, { real: 0, synthetic: 0, unknown: 0 })
 }
 export function weightSummary(pricing: SetupReport['pricing']) {
+  if (pricing.reference_profile_mode === 'strict') {
+    const enabled = pricing.enabled_reference_profiles?.length ?? 0
+    return enabled ? `${enabled} active reference profile${enabled === 1 ? '' : 's'} · provisional, not optimized` : 'No active reference profiles · signals disabled'
+  }
   const weights = Object.values(pricing.weights).map(Number)
   const eligible = pricing.eligible_books
   const selected = eligible === null ? null : eligible.map(book => Number(pricing.weights[book] ?? 1))
   const equal = selected ? selected.every(w => w === selected[0]) : weights.every(w => w === 1)
   return `${equal ? 'Equal weights' : 'Configured relative weights'} · uncalibrated`
+}
+
+/** Coverage is descriptive, not authorization: each quote still needs its own exact provider rule. */
+export function profileFreshnessCoverage(profile: ReferenceProfile, rules: ReferenceFreshnessRule[]) {
+  const matching = rules.filter(r => r.phase === profile.phase && Object.hasOwn(profile.weights_percent, r.bookmaker)
+    && profile.selectors.some(s => selectorKey(s) === selectorKey(r)))
+  const verified = matching.filter(r => r.verified)
+  const covered = new Set(verified.map(r => JSON.stringify([r.bookmaker, selectorKey(r)]))).size
+  return { covered, total: Object.keys(profile.weights_percent).length * profile.selectors.length,
+    verifiedRules: verified.length, unverifiedRules: matching.length - verified.length, rules: matching }
+}
+
+export function candidateIsResearch(candidate: RecordValue): boolean {
+  return candidate.reference_inputs_eligible === false || candidate.status === 'RESEARCH ONLY'
+}
+export function candidateCanQualify(candidate: RecordValue, thresholdsPass: boolean): boolean {
+  return !candidateIsResearch(candidate) && candidate.execution_eligible !== false && thresholdsPass
+}
+export function candidateDisplayStatus(candidate: RecordValue): string {
+  if (candidateIsResearch(candidate)) return 'RESEARCH ONLY'
+  if (candidate.execution_eligible === false) return 'NEGATIVE EV'
+  return typeof candidate.status === 'string' && candidate.status ? candidate.status : 'MODEL ESTIMATE'
+}
+export function referenceObservationAge(quote: RecordValue): number | null {
+  // Only the explicit observation clock is suitable for this column. Never relabel price-change age.
+  const age = quote.observation_age_ms
+  return typeof age === 'number' && Number.isFinite(age) && age >= 0 ? age : null
 }
 
 /** JSON editors must preserve nullable collections; null and [] have different policies. */

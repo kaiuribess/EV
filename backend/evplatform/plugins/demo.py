@@ -16,6 +16,7 @@ class DemoConfig(BaseModel):
     interval: float = Field(default=.5, ge=.05, le=30)
     seed: int = 73
     simulate_faults: bool = True
+    pregame_reference_research: bool = False
 
 
 def sample_markets(origin=None):
@@ -51,7 +52,7 @@ def sample_markets(origin=None):
     return result
 
 
-def demo_frame(tick: int, seed=73, origin=None, simulate_faults=True):
+def demo_frame(tick: int, seed=73, origin=None, simulate_faults=True, pregame_reference_research=False):
     """Same origin + tick + seed produces byte-equivalent payloads."""
     origin = origin or datetime(2026, 10, 20, 23, tzinfo=timezone.utc)
     now = origin + timedelta(seconds=tick * .5)
@@ -61,12 +62,19 @@ def demo_frame(tick: int, seed=73, origin=None, simulate_faults=True):
         phase = tick % 80
         suspended = simulate_faults and idx == 1 and 40 <= phase < 46
         market = base.model_copy(update={"status": "suspended" if suspended else "live"})
+        if pregame_reference_research:
+            market = market.model_copy(update={"status": "suspended" if suspended else "scheduled",
+                "start_time": origin + timedelta(hours=2)})
         events.append(("sports.market", market))
         p = .52 + .07 * math.sin(tick / 15 + idx)
-        for j, (provider, book) in enumerate([
+        reference_sources = [
             ("demo_stream", "pinnacle"), ("demo_reference", "circa"),
             ("demo_backup", "pinnacle"), ("demo_reference", "bookmaker"),
-        ]):
+        ]
+        if pregame_reference_research:
+            reference_sources.extend([("demo_stream", "fanduel"), ("demo_reference", "draftkings"),
+                                      ("demo_reference", "caesars")])
+        for j, (provider, book) in enumerate(reference_sources):
             delta = (j % 3 - 1) * .006 + rng.uniform(-.001, .001)
             probability = p + delta
             odds = {market.outcomes[0]: Decimal(str(1 / (probability * 1.025))).quantize(Decimal(".0001")),
@@ -75,7 +83,11 @@ def demo_frame(tick: int, seed=73, origin=None, simulate_faults=True):
             delay = 12 if stale else .10 + j * .08
             quote = Quote(market_id=market.id, provider=provider, bookmaker=book, decimal_odds=odds,
                           source_time=now - timedelta(seconds=delay), provider_time=now - timedelta(seconds=.03),
-                          received_at=now, synthetic=True, status="suspended" if suspended else "active", sequence=tick + 1)
+                          received_at=now, synthetic=True, status="suspended" if suspended else "active", sequence=tick + 1,
+                          source_observed_at=now - timedelta(seconds=delay) if pregame_reference_research else None,
+                          observation_verified=pregame_reference_research, observation_complete=pregame_reference_research,
+                          market_status_verified=pregame_reference_research,
+                          verification_reason="Deterministic synthetic observation; not provider validation" if pregame_reference_research else None)
             events.append(("odds.quote", quote))
         for vi, venue in enumerate(("kalshi_paper", "novig_paper", "prophetx_paper")):
             outcome = market.outcomes[0]
@@ -125,7 +137,8 @@ class DemoInput(InputPlugin):
         while True:
             # Fresh wall-clock at source. Replays instead retain recorded timestamps.
             origin = utcnow() - timedelta(seconds=self.tick * .5)
-            for schema, payload in demo_frame(self.tick, self.config.seed, origin, self.config.simulate_faults):
+            for schema, payload in demo_frame(self.tick, self.config.seed, origin, self.config.simulate_faults,
+                                              self.config.pregame_reference_research):
                 await self.context.bus.publish(Envelope(schema_name=schema, source=self.manifest.name, payload=payload))
             self.tick += 1
             await asyncio.sleep(self.config.interval)

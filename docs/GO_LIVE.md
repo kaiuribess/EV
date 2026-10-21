@@ -6,6 +6,15 @@ execution readiness. The gate evaluates the exact venue, environment, account,
 software build, strategy set, market set, mappings, prices and limits selected
 for launch. It never enables trading itself.
 
+The imported sportsbook priors add a separate reference-model requirement:
+every active profile is currently research-only, its live flag is false, and
+there are no verified exact-source TTL rules. A connected Parlay or Oddize feed
+cannot satisfy those requirements by itself. Current documented observations
+also do not establish every outcome's active status. See
+[reference policy](REFERENCE_MODEL.md), [source observation evidence](QUOTE_OBSERVATION_CONTRACT.md)
+and [offline validation](MODEL_VALIDATION.md). Altering a flag is not a substitute
+for the missing market/status/settlement/lifecycle evidence.
+
 ## Start a paused native workspace on Windows
 
 Run these commands from the repository folder. The existing demo can keep

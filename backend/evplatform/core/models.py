@@ -109,6 +109,19 @@ class Quote(TimedData):
     sequence: int | None = None
     original_market_id: str | None = None
     quality: float = Field(default=1.0, ge=0, le=1)
+    source_observed_at: datetime | None = None
+    observation_verified: bool = False
+    observation_complete: bool = False
+    market_status_verified: bool = False
+    source_price_changed_at: datetime | None = None
+    verification_reason: str | None = None
+
+    @field_validator("source_observed_at", "source_price_changed_at")
+    @classmethod
+    def aware_observation_clock(cls, value):
+        if value is not None and value.tzinfo is None:
+            raise ValueError("Observation timestamps must include a timezone")
+        return value
 
     @field_validator("decimal_odds")
     @classmethod
@@ -176,6 +189,14 @@ class FairValue(Contract):
     calculated_at: datetime
     disagreement: Decimal
     synthetic: bool
+    reference_profile_id: str | None = None
+    reference_policy_digest: str | None = None
+    reference_profile_status: str | None = None
+    live_execution_allowed: bool = True
+    execution_eligible: bool = True
+    ineligibility_reasons: tuple[str, ...] = ()
+    sensitivity_model: str | None = None
+    sensitivity_probabilities: dict[str, Decimal] | None = None
 
 
 class Candidate(Contract):
@@ -195,6 +216,18 @@ class Candidate(Contract):
     quote_age_ms: float
     synthetic: bool
     size_curve: tuple[dict[str, Any], ...] = ()
+    reference_profile_id: str | None = None
+    reference_policy_digest: str | None = None
+    reference_profile_status: str | None = None
+    live_execution_allowed: bool = True
+    execution_eligible: bool = True
+    reference_inputs_eligible: bool = True
+    ineligibility_reasons: tuple[str, ...] = ()
+    primary_model: str | None = None
+    sensitivity_model: str | None = None
+    sensitivity_fair_probability: Decimal | None = None
+    sensitivity_ev_per_contract: Decimal | None = None
+    sensitivity_roi: Decimal | None = None
 
 
 class OrderStatus(StrEnum):

@@ -188,6 +188,8 @@ class NativeRuntime:
             raise RiskRejected("Native executable book is missing")
         try:
             fair = fair_value(market, list(self.engine.quotes.get(market.id, {}).values()), self.engine.settings.pricing)
+            if self.engine.settings.mode == "production" and not fair.live_execution_allowed:
+                raise NoSignal("Reference profile has not been validated for live execution")
             native_revalidate_intent(order.intent, market, fair, book, self.engine.settings.pricing,
                                      remaining_quantity=order.quantity-order.filled_quantity,
                                      fees_already_paid_usd=order.fees)
@@ -258,7 +260,10 @@ class NativeRuntime:
                 reason = str(exc)
         status = "POSITIVE EV" if any(c.qualified for c in candidates) else "NEGATIVE EV" if candidates else "NO SIGNAL"
         observation = NativeSignalObservation(market_id=market_id, status=status, reason=reason,
-            candidates=tuple(c.model_dump(mode="json") for c in candidates))
+            candidates=tuple(c.model_dump(mode="json") for c in candidates),
+            market=self.engine.markets[market_id].model_dump(mode="json"),
+            reference_quotes=tuple(q.model_dump(mode="json") for q in self.engine.quotes.get(market_id, {}).values()),
+            pricing_policy=self.engine.settings.pricing.model_dump(mode="json"))
         self.signals[market_id] = observation
         await self.engine.bus.publish(Envelope(schema_name="native.signal", source="native_positive_ev", payload=observation))
         for candidate in candidates:
@@ -458,6 +463,9 @@ class NativeRuntime:
                 except NoSignal: pass
             ages = [b.age_ms(now) for b in books]
             valid_ages = bool(ages) and all(a is not None and a >= 0 for a in ages)
+            reference_ages = [r.get("age_ms") for r in refs]
+            oldest_reference_age = (max(reference_ages) if reference_ages and all(
+                isinstance(age, (int, float)) and age >= 0 for age in reference_ages) else None)
             exact_mapping = bool(market and books and all(b.market_fingerprint == market.identity()
                 and b.instrument.settlement_rules_fingerprint == market.identity() and b.instrument.verified
                 and b.instrument.canonical_market_id == market_id and b.instrument.venue == venue
@@ -469,8 +477,10 @@ class NativeRuntime:
                 fee_schedule_verified=bool(books) and all(b.fee_bound.verified
                     and b.fee_bound.instrument_fingerprint == instrument_fingerprint(b.instrument)
                     and b.fee_bound.observed_at <= now < b.fee_bound.valid_until for b in books),
-                native_units_supported=bool(books), usable_reference_books=len(refs), required_books_present=bool(fair),
-                oldest_reference_age_ms=max((r["age_ms"] for r in refs), default=None),
+                native_units_supported=bool(books), usable_reference_books=len(refs),
+                required_books_present=bool(fair and fair.execution_eligible and
+                    (engine.settings.mode != "production" or fair.live_execution_allowed)),
+                oldest_reference_age_ms=oldest_reference_age,
                 orderbook_age_ms=max(ages) if valid_ages else None,
                 orderbook_synchronized=bool(books) and all(b.synchronized for b in books),
                 market_active=bool(market and market.status not in {"closed", "suspended"} and books and all(b.status == "active" for b in books)),
@@ -777,6 +787,9 @@ class NativeSignalObservation(Contract):
     status: str
     reason: str
     candidates: tuple[dict, ...] = ()
+    market: dict = Field(default_factory=dict)
+    reference_quotes: tuple[dict, ...] = ()
+    pricing_policy: dict = Field(default_factory=dict)
     # source observations and quantity-specific cash calculations stay nested;
     # no conversion into legacy one-dollar signal/fill records.
     evaluated_at: datetime = Field(default_factory=utcnow)

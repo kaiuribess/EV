@@ -137,6 +137,17 @@ class NativeCandidate(NativeContract):
     synthetic: Literal[False] = False
     model: str
     settlement_probability_source: str
+    reference_profile_id: str | None = None
+    reference_policy_digest: str | None = None
+    reference_profile_status: str | None = None
+    live_execution_allowed: bool = True
+    execution_eligible: bool = True
+    ineligibility_reasons: tuple[str, ...] = ()
+    sensitivity_model: str | None = None
+    sensitivity_fair_probability: AnnotatedProbability | None = None
+    sensitivity_expected_profit_usd: ExactDecimal | None = None
+    sensitivity_ev_per_usd_payout: ExactDecimal | None = None
+    sensitivity_roi: ExactDecimal | None = None
 
 
 def _settlement_bounds(market: Market) -> NativeSettlementProbabilities:
@@ -181,6 +192,10 @@ def _validate_market(market: Market, fair: FairValue, book: NativeBook,
     if book.received_at > now or book.provider_time is not None and book.provider_time > now:
         raise NoSignal("Native receipt/publication clock is future-dated")
     validate_fair_references(market, fair, config, now)
+    if not fair.execution_eligible:
+        raise NoSignal("Reference profile is research-only: validated observations, status and TTL are required")
+    if any(reference["bookmaker"] == instrument.venue for reference in fair.references):
+        raise NoSignal("Target native venue cannot be its own independent reference")
     return _settlement_bounds(market)
 
 
@@ -194,21 +209,35 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
     cost, payout = intent.maximum_cost_usd, intent.minimum_gross_payout_usd
     if not payout or not cost:
         raise NoSignal("Native order size is below representable cash bounds")
-    binary_profit = probability * payout - cost
     non_decisive = bounds.push_probability_upper_bound + bounds.void_probability_upper_bound
     # Refunded cost earns no edge; retain the entire fee cap even when a
     # venue might return some fees. Use the worse endpoint for negative edges.
-    expected_profit = min(binary_profit, (1 - non_decisive) * binary_profit) - intent.max_fee_usd
+    def profit_at(p):
+        binary_profit = p * payout - cost
+        return min(binary_profit, (1 - non_decisive) * binary_profit) - intent.max_fee_usd
+    expected_profit = profit_at(probability)
     ev = expected_profit / payout
     roi = expected_profit / intent.reserved_cost_usd
+    sensitivity_p = fair.sensitivity_probabilities[intent.instrument.outcome] if fair.sensitivity_probabilities else None
+    sensitivity_profit = profit_at(sensitivity_p) if sensitivity_p is not None else None
+    sensitivity_ev = sensitivity_profit / payout if sensitivity_profit is not None else None
+    sensitivity_roi = sensitivity_profit / intent.reserved_cost_usd if sensitivity_profit is not None else None
+    qualified = ev >= config.min_ev and roi >= config.min_roi and (
+        sensitivity_ev is None or sensitivity_ev >= config.min_ev and sensitivity_roi >= config.min_roi)
+    reasons = () if qualified else ("Both primary and sensitivity models must meet native EV and ROI thresholds",)
     ref_ages = [(now - datetime.fromisoformat(ref["source_time"])).total_seconds() * 1000 for ref in fair.references]
     return NativeCandidate(id=intent.id, market_id=market.id, event_id=market.event_id,
         venue=intent.instrument.venue, outcome=intent.instrument.outcome, intent=intent,
         fair_probability=probability, expected_profit_usd=expected_profit, ev_per_usd_payout=ev,
         roi=roi, book_revision=book.revision, references=fair.references, calculated_at=now,
         quote_age_ms=max([book.age_ms(now), *ref_ages]),
-        qualified=ev >= config.min_ev and roi >= config.min_roi,
-        model=fair.model, settlement_probability_source=bounds.source)
+        qualified=qualified, model=fair.model, settlement_probability_source=bounds.source,
+        reference_profile_id=fair.reference_profile_id, reference_policy_digest=fair.reference_policy_digest,
+        reference_profile_status=fair.reference_profile_status, live_execution_allowed=fair.live_execution_allowed,
+        execution_eligible=qualified and fair.execution_eligible, ineligibility_reasons=reasons,
+        sensitivity_model=fair.sensitivity_model, sensitivity_fair_probability=sensitivity_p,
+        sensitivity_expected_profit_usd=sensitivity_profit, sensitivity_ev_per_usd_payout=sensitivity_ev,
+        sensitivity_roi=sensitivity_roi)
 
 
 def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config: PricingConfig, *,
@@ -221,6 +250,8 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     if max_stake_usd is None or isinstance(max_stake_usd, (float, bool)):
         raise NoSignal("Native stake budget must be explicitly configured as an exact decimal")
     bounds = _validate_market(market, fair, book, config, now)
+    if mode == "production" and not fair.live_execution_allowed:
+        raise NoSignal("Reference profile does not authorize production execution")
     try:
         max_stake_usd = D(max_stake_usd)
     except (ValueError, TypeError, ArithmeticError) as exc:
@@ -263,6 +294,8 @@ def native_revalidate_intent(intent: NativeOrderIntent, market: Market, fair: Fa
     """Reprice a durable intent at its original limit and current fee/liquidity cap."""
     now = now or utcnow()
     bounds = _validate_market(market, fair, book, config, now)
+    if intent.mode == "production" and not fair.live_execution_allowed:
+        raise NoSignal("Reference profile does not authorize production execution")
     if instrument_fingerprint(intent.instrument) != instrument_fingerprint(book.instrument):
         raise NoSignal("Native instrument or grid changed after intent creation")
     quantity = intent.quantity if remaining_quantity is None else remaining_quantity
