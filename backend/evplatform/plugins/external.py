@@ -115,9 +115,9 @@ class ProviderBridge(InputPlugin):
             return {"status": "disabled", "message": "Enable after configuring credentials and sport subscriptions"}
         health = await self.client.health_check()
         status = health["state"]
-        if status in {"missing_credentials", "unauthorized", "access_denied"}:
+        if status in {"missing_credentials", "unauthorized", "access_denied", "quota_exhausted"}:
             status = "blocked"
-        if self.task and self.task.done():
+        if status != "blocked" and self.task and self.task.done():
             status = "error"
         return {**health, "status": status, "message": health["reason"],
                 "mapped_quotes": self.mapper.mapped_count if self.mapper else 0,

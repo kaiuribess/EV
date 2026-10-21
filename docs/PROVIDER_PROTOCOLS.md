@@ -1,8 +1,11 @@
 # Provider protocols and verification status
 
 Checked against official documentation on 2026-10-20. The installed transports
-are real HTTPX/WebSocket implementations; their tests use controlled responses.
-No paid account or live odds connection was authenticated during development.
+are real HTTPX/WebSocket implementations; automated tests use controlled responses.
+Parlay REST was separately authenticated against the real service: sport discovery
+and NBA moneylines from DraftKings, FanDuel, and Pinnacle succeeded. The recovered
+key's usage response reports Free, and its WebSocket was refused with close code
+4001. Streaming entitlement remains unverified; no live Parlay props were observed.
 Synthetic demo data comes from the separate demo plugin, never these adapters.
 
 ## Implemented clients
@@ -35,11 +38,32 @@ authentication, missing entitlement, exhausted credits, or rejected filters
 stop reconnection. Transient failures invalidate cached quotes and restart from
 a new initial state. [Official WebSocket reference](https://parlay-api.com/docs/websocket)
 
+The local `account_tier` setting never grants entitlement. Health separately
+reports the current server-provided tier and push settings, and clears them
+when that connection ends. The documented row limit is 1–1000. A support-enabled
+trial may differ from the dashboard's base plan; the server handshake is the
+authority. A trial ending in a streaming refusal does not cause an automatic
+plan purchase or a silent change to synthetic data.
+
+Keys are shown once. Parlay's documented **Reveal & rotate** action immediately
+mints a replacement and leaves the old secret usable for 14 days. Preserve a
+saved key when a trial was enabled specifically on it; trial inheritance after
+rotation is not documented. [Authentication](https://parlay-api.com/docs#authentication),
+[streaming trial](https://parlay-api.com/docs/websocket/quickstart)
+
 Only an explicit complete, untruncated current-board flag establishes a
 replacement baseline. A bounded recent-rows snapshot is not a full inventory.
 Frame send time, retained row observation time, and local receipt time stay
 separate. Numeric row `last_update` uses milliseconds; numeric envelope
 `timestamp` uses seconds. [Machine-readable AsyncAPI](https://parlay-api.com/v1/asyncapi.json)
+
+The extractor accepts the documented legacy American `price` as well as explicit
+`price_american` / `price_decimal` fields and preserves explicit outcome labels.
+Contradictory price representations are rejected. Source timestamps can be ISO
+strings or documented epoch milliseconds; receipt time never replaces them.
+Exact same-source player/line Over/Under rows can be structurally paired, but
+still require a verified player, event, period, and settlement mapping before
+becoming canonical quotes. [Player-prop formats](https://parlay-api.com/docs/websocket/player-props)
 
 Implementation limits:
 

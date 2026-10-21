@@ -4,8 +4,36 @@ from types import SimpleNamespace
 import pytest
 
 from evplatform.core.plugins import PluginRegistry
-from evplatform.plugins.external import NativeMonitor
+from evplatform.plugins.external import NativeMonitor, ProviderBridge
+from evplatform.integrations.parlay import ParlayWebSocket
 from evplatform.venues.novig import NovigClient, NovigSettings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["missing_credentials", "unauthorized", "access_denied", "quota_exhausted"])
+async def test_provider_permission_or_quota_stop_preserves_blocked_health(state):
+    async def health_check():
+        return {"state": state, "reason": "Provider action required", "streaming": False}
+
+    provider = ProviderBridge(ParlayWebSocket, None)
+    provider.client = SimpleNamespace(health_check=health_check)
+    provider.task = SimpleNamespace(done=lambda: True)
+    health = await provider.health_check()
+    assert health["status"] == "blocked"
+    assert health["state"] == state
+    assert health["message"] == "Provider action required"
+    assert health["streaming"] is False
+
+
+@pytest.mark.asyncio
+async def test_unexpected_provider_stop_still_reports_error():
+    async def health_check():
+        return {"state": "streaming", "reason": ""}
+
+    provider = ProviderBridge(ParlayWebSocket, None)
+    provider.client = SimpleNamespace(health_check=health_check)
+    provider.task = SimpleNamespace(done=lambda: True)
+    assert (await provider.health_check())["status"] == "error"
 
 
 @pytest.mark.asyncio

@@ -164,6 +164,28 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
     return result
 
 
+def _parlay_american_price(value: Any) -> Decimal:
+    price = Decimal(str(value))
+    if not price.is_finite() or abs(price) < 100 or price != price.to_integral_value():
+        raise ValueError("Invalid Parlay American price")
+    return decimal_price(price, "american")
+
+
+def _parlay_outcome_price(row: dict) -> Decimal | None:
+    # The AsyncAPI schema calls the American price `price`; the player-props
+    # guide also documents explicit American and decimal representations.
+    american = [_parlay_american_price(row[key]) for key in ("price", "price_american")
+                if row.get(key) is not None]
+    if american and any(price != american[0] for price in american[1:]):
+        raise ValueError("Conflicting Parlay American prices")
+    decimal = decimal_price(row["price_decimal"], "decimal") if row.get("price_decimal") is not None else None
+    # The published example pairs -118 with 1.847, rounded to three decimals.
+    # A larger discrepancy is not an alternate representation of that quote.
+    if american and decimal is not None and abs(american[0] - decimal) > Decimal("0.0005"):
+        raise ValueError("Conflicting Parlay price formats")
+    return american[0] if american else decimal
+
+
 def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
     result = []
     for row in rows:
@@ -171,20 +193,27 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
             continue
         prices: dict[str, Decimal] = {}
         points: dict[str, str | None] = {}
-        if row.get("over_price") is not None or row.get("under_price") is not None:
+        has_totals = any(row.get(f"{side}_price") is not None for side in ("over", "under"))
+        has_moneyline = any(row.get(f"{side}_ml") is not None for side in ("home", "away", "draw"))
+        has_outcome = any(row.get(key) is not None for key in ("price", "price_american", "price_decimal"))
+        if sum((has_totals, has_moneyline, has_outcome)) > 1:
+            raise ValueError("Conflicting Parlay row shapes")
+        if has_totals:
             for side in ("over", "under"):
                 if row.get(f"{side}_price") is not None:
-                    prices[side] = decimal_price(row[f"{side}_price"], "american")
+                    prices[side] = _parlay_american_price(row[f"{side}_price"])
                     points[side] = number_identity(row.get("line") if row.get("line") is not None else row.get("total"))
-        elif row.get("home_ml") is not None or row.get("away_ml") is not None:
+        elif has_moneyline:
             for side in ("home", "away", "draw"):
                 if row.get(f"{side}_ml") is not None:
                     # Canonical mapping decides whether this is truly a two-way market.
-                    prices[side] = decimal_price(row[f"{side}_ml"], "american")
+                    prices[side] = _parlay_american_price(row[f"{side}_ml"])
                     points[side] = None
-        elif row.get("price") is not None:
-            name = str(row.get("team") or row.get("side") or "unknown")
-            prices[name] = decimal_price(row["price"], "american")
+        elif has_outcome:
+            name = row.get("outcome") if "outcome" in row else row.get("team") or row.get("side")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Missing Parlay outcome label")
+            prices[name] = _parlay_outcome_price(row)
             points[name] = number_identity(row.get("line"))
         if not prices:
             continue
@@ -341,29 +370,53 @@ class VerifiedProviderMapper:
             result.append((market, suspended))
         return result
 
-    def _combine_partial_moneylines(self, offers: list[SourceOffer]) -> list[SourceOffer]:
+    def _combine_partial_outcomes(self, offers: list[SourceOffer]) -> list[SourceOffer]:
         complete = []
         changed = {}
+        # REST prop rows may be separate outcomes within one response. They must
+        # never inherit an opposing side from an earlier polling snapshot.
+        snapshot_partial: dict[str, dict[str, SourceOffer]] = {}
         for offer in offers:
-            # Only line-free, non-player outcome rows can be grouped structurally.
-            # Spreads with side-dependent points require a dedicated verified mapper.
-            if offer.provider != "parlay_ws" or len(offer.prices) != 1 or offer.player_key or offer.line is not None:
+            try:
+                numeric_line = offer.line is not None and Decimal(offer.line).is_finite()
+            except InvalidOperation:
+                numeric_line = False
+            # Only the documented exact player/Over/Under threshold structure can
+            # join prop rows. Names, periods, books and lines remain source identity;
+            # the resulting complete offer still needs its own verified mapping.
+            paired_prop = (
+                isinstance(offer.player_key, str) and bool(offer.player_key.strip())
+                and numeric_line
+                and offer.market_key.removesuffix("_alternate") not in {
+                    "player_first_basket", "player_first_team_basket", "player_double_double",
+                    "player_triple_double", "player_anytime_td", "player_1st_td", "player_last_td",
+                    "pitcher_record_a_win",
+                }
+                and set(offer.prices) <= {f"{offer.player_key} Over", f"{offer.player_key} Under"}
+                and set(offer.outcome_points.values()) == {offer.line}
+            )
+            # Line-free game rows retain their actual outcome set. Spreads and
+            # other prop structures require a dedicated verified mapper.
+            moneyline = not offer.player_key and offer.line is None
+            streaming_pair = offer.provider == "parlay_ws" and (moneyline or paired_prop)
+            snapshot_pair = offer.provider == "parlay_rest" and paired_prop
+            if len(offer.prices) != 1 or not (streaming_pair or snapshot_pair):
                 complete.append(offer)
                 continue
             identity = offer.identity()
             identity.pop("outcome_points")
             key = json.dumps(identity, sort_keys=True, default=str)
-            sides = self._partial.setdefault(key, {})
-            if len(self._partial) > max(1000, self.quarantine_limit):
+            partial = self._partial if streaming_pair else snapshot_partial
+            sides = partial.setdefault(key, {})
+            if streaming_pair and len(self._partial) > max(1000, self.quarantine_limit):
                 self._partial.pop(next(iter(self._partial)))
             side = next(iter(offer.prices))
             previous = sides.get(side)
             if previous and previous.observed_at and offer.observed_at and offer.observed_at < previous.observed_at:
                 continue
             sides[side] = offer
-            changed[key] = offer
-        for key, offer in changed.items():
-            sides = self._partial[key]
+            changed[key] = (offer, sides)
+        for offer, sides in changed.values():
             complete.append(replace(
                 offer,
                 prices={side: part.prices[side] for side, part in sides.items()},
@@ -398,7 +451,7 @@ class VerifiedProviderMapper:
                             "bookmaker": row.get("bookmaker"), "market_key": row.get("market_key"),
                         }))
         try:
-            offers = self._combine_partial_moneylines(extract_offers(envelope))
+            offers = self._combine_partial_outcomes(extract_offers(envelope))
         except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
             self._quarantine(None, "Invalid provider payload or price", envelope.provider_id)
             self._clear_partial(envelope.provider_id)

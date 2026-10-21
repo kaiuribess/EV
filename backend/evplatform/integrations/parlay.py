@@ -26,7 +26,7 @@ class ParlayConfig(ProviderConfig):
     include_props: bool = True
     stream_kinds: list[Literal["game", "prop"]] = Field(default_factory=list)
     max_age_seconds: int = Field(default=30, ge=1, le=3600)
-    stream_limit: int = Field(default=1000, ge=1, le=10000)
+    stream_limit: int = Field(default=1000, ge=1, le=1000)
     watchdog_seconds: float = Field(default=90, ge=10, le=180)
     account_tier: Literal["unknown", "free", "starter", "pro", "business", "enterprise", "scale"] = "unknown"
 
@@ -94,6 +94,8 @@ class ParlayWebSocket(ParlayRest):
         self._event_filters: dict[str, str] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._queue: asyncio.Queue[ProviderEnvelope] | None = None
+        self._server_connections: dict[str, dict[str, Any]] = {}
+        self._ready_sports: set[str] = set()
         self.reconnects = 0
 
     async def connect(self) -> bool:
@@ -104,6 +106,35 @@ class ParlayWebSocket(ParlayRest):
             self.reason = "WebSocket requires Business, Enterprise, or Scale access"
             return False
         return True
+
+    def _record_connection(self, sport: str, payload: dict[str, Any]) -> None:
+        # Health exposes only documented non-secret connection fields.
+        self._ready_sports.discard(sport)
+        details: dict[str, Any] = {}
+        tier = payload.get("tier")
+        if isinstance(tier, str) and tier in {"free", "starter", "pro", "business", "enterprise", "scale"}:
+            details["tier"] = tier
+        push_mode = payload.get("push_mode")
+        if isinstance(push_mode, str) and push_mode in {"raw", "coalesced"}:
+            details["push_mode"] = push_mode
+        interval = payload.get("min_push_interval_s")
+        if isinstance(interval, (int, float)) and not isinstance(interval, bool) and math.isfinite(interval) and interval >= 0:
+            details["min_push_interval_s"] = interval
+        self._server_connections[sport] = details
+
+    async def health_check(self) -> dict[str, Any]:
+        health = await super().health_check()
+        authenticated_sports = self._server_connections.keys()
+        ready_sports = self._ready_sports.intersection(authenticated_sports)
+        return {
+            **health,
+            "authenticated": bool(authenticated_sports),
+            "streaming": bool(ready_sports),
+            "ready_sports": sorted(ready_sports),
+            "awaiting_snapshot_sports": sorted(authenticated_sports - ready_sports),
+            "configured_account_tier": self.config.account_tier,
+            "server_connections": {sport: dict(details) for sport, details in self._server_connections.items()},
+        }
 
     def stream_url(self, sport: str) -> str:
         params: dict[str, Any] = {
@@ -210,8 +241,14 @@ class ParlayWebSocket(ParlayRest):
                         frame = await asyncio.wait_for(socket.recv(), timeout=self.config.watchdog_seconds)
                         envelope = self.parse_frame(frame, has_snapshot=has_snapshot)
                         self.last_received_at = envelope.received_at
+                        if envelope.kind == "connected":
+                            self._record_connection(sport, envelope.payload)
+                            self.state = ProviderState.CONNECTED
+                            self.reason = "Authenticated; awaiting initial snapshot"
                         if envelope.kind == "initial_state":
                             has_snapshot = True
+                            if sport in self._server_connections:
+                                self._ready_sports.add(sport)
                             backoff.reset()
                             self.state, self.reason = ProviderState.CONNECTED, "Receiving authenticated stream"
                             if event_id := self._event_filters.get(sport):
@@ -233,6 +270,8 @@ class ParlayWebSocket(ParlayRest):
                 self.state, self.reason = ProviderState.BACKOFF, "WebSocket interrupted; snapshot required"
             finally:
                 self._sockets.pop(sport, None)
+                self._server_connections.pop(sport, None)
+                self._ready_sports.discard(sport)
             await queue.put(ProviderEnvelope(
                 self.provider_id, "feed_invalidated", {"sport": sport, "reason": self.reason},
                 datetime.now(UTC), time.perf_counter_ns(),
@@ -270,6 +309,8 @@ class ParlayWebSocket(ParlayRest):
 
     async def disconnect(self) -> None:
         self._closed = True
+        self._server_connections.clear()
+        self._ready_sports.clear()
         for socket in list(self._sockets.values()):
             await socket.close()
         await super().disconnect()

@@ -17,4 +17,5 @@ artifacts/
 *.egg-info/
 .research*/
 .pytest-*/
+.pytest_tmp*/
 
