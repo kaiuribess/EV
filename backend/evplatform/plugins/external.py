@@ -163,6 +163,11 @@ class NativeMonitorConfig(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
 
 
+class KalshiMonitorConfig(NativeMonitorConfig):
+    credential_profile: Literal["legacy", "environment"] = Field(default="environment",
+        description="Environment selects the separate Kalshi demo key for sandbox and the production key for production. Legacy preserves older configuration explicitly.")
+
+
 class NovigMonitorConfig(NativeMonitorConfig):
     credential_profile: Literal["legacy", "environment"] = Field(default="legacy",
         description="Legacy preserves the existing pair. Environment selects separate paper/production trading credentials.")
@@ -220,7 +225,8 @@ class NativeMonitor(Plugin):
         self.config_error = ""
 
     def credential_names(self, config):
-        if config.get("credential_profile", "legacy") == "legacy":
+        default_profile = getattr(self.config_model(), "credential_profile", "legacy")
+        if config.get("credential_profile", default_profile) == "legacy":
             return self.credentials
         names = self.credential_environments.get(config.get("environment", "sandbox"))
         if not names:
@@ -315,7 +321,7 @@ def register_external(registry, engine):
         registry.register(ProviderBridge(factory, engine))
         registry.records[name].credential_status = "configured_unverified" if os.getenv(factory.credential_env) else "missing"
     for factory, settings_factory, credentials, config_model in [
-        (KalshiClient, KalshiSettings, {"api_key_id": "KALSHI_API_KEY_ID", "private_key_path": "KALSHI_PRIVATE_KEY_PATH"}, NativeMonitorConfig),
+        (KalshiClient, KalshiSettings, {"api_key_id": "KALSHI_API_KEY_ID", "private_key_path": "KALSHI_PRIVATE_KEY_PATH"}, KalshiMonitorConfig),
         (NovigClient, NovigSettings, {"api_key": "NOVIG_API_KEY", "private_key_path": "NOVIG_PRIVATE_KEY_PATH"}, NovigMonitorConfig),
         (ProphetXClient, ProphetXSettings, {"api_key": "PROPHETX_API_KEY", "secret_key": "PROPHETX_SECRET_KEY"}, ProphetXMonitorConfig),
         (PolymarketUSClient, PolymarketUSSettings, {"api_key_id": "POLYMARKET_US_API_KEY_ID", "secret_key": "POLYMARKET_US_SECRET_KEY"}, PolymarketUSMonitorConfig),
@@ -323,7 +329,10 @@ def register_external(registry, engine):
         environments = ({
             "sandbox": {"api_key": "NOVIG_PAPER_TRADING_API_KEY", "private_key_path": "NOVIG_PAPER_TRADING_PRIVATE_KEY_PATH"},
             "production": {"api_key": "NOVIG_PRODUCTION_TRADING_API_KEY", "private_key_path": "NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH"},
-        } if factory is NovigClient else {})
+        } if factory is NovigClient else {
+            "sandbox": {"api_key_id": "KALSHI_SANDBOX_API_KEY_ID", "private_key_path": "KALSHI_SANDBOX_PRIVATE_KEY_PATH"},
+            "production": {"api_key_id": "KALSHI_API_KEY_ID", "private_key_path": "KALSHI_PRIVATE_KEY_PATH"},
+        } if factory is KalshiClient else {})
         plugin = NativeMonitor(factory, settings_factory, credentials, engine, config_model=config_model,
                                credential_environments=environments)
         registry.register(plugin)

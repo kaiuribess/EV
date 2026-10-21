@@ -30,6 +30,26 @@ The launcher applies `setup_live_inputs.ps1` automatically: Parlay feed scopes
 and the research sportsbook-weight profiles are the same ones used by
 `start_live_paper.ps1`. Order ledgers stay separate, and the paper-only
 hypothetical sportsbook offer is never promoted to a native exchange book.
+
+Kalshi's [official demo account](https://help.kalshi.com/en/articles/13823775-creating-and-using-a-demo-account)
+and [demo API credentials](https://docs.kalshi.com/getting_started/demo_env)
+are separate from production. The Kalshi monitor now selects
+`KALSHI_SANDBOX_API_KEY_ID` and `KALSHI_SANDBOX_PRIVATE_KEY_PATH` for a sandbox
+workspace, while production keeps `KALSHI_API_KEY_ID` and
+`KALSHI_PRIVATE_KEY_PATH`. A production key is never borrowed for sandbox by
+the default monitor or the read-only account diagnostic. After a demo account
+and key exist, save the one-time private key in a local file, set those two
+sandbox variables in `.env`, restart the sandbox workspace, and run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_accounts.py --venues kalshi --environment sandbox
+```
+
+The [official API-key guide](https://docs.kalshi.com/getting_started/api_keys)
+documents creation from the demo account's settings and one-time private-key
+download. Kalshi says demo funds are not preloaded and provides mock-funding
+instructions on its demo help page. A successful read-only balance check would
+establish access only; it would not certify order or settlement behavior.
 For production monitoring, the corresponding command is:
 
 ```powershell
@@ -80,6 +100,10 @@ The [October 21 Kalshi NBA pilot](KALSHI_PILOT_2026-10-21.md) records a concrete
 live no-trade decision: the observed Orlando contract had no validated positive
 edge, and its reference quotes did not meet the current-status and settlement
 requirements. It did not place a real order.
+The [October 21 Parlay baseline probe](PARLAY_BASELINE_2026-10-21.md) found that
+the full-game, unfiltered NBA request can return a complete replacement board;
+adding an event filter produced an incomplete recent-row sample. Neither frame
+alone verifies each retained outcome's active status.
 
 As reviewed October 20, 2026, the working installation has connected real feeds
 but no reviewed real sportsbook/native market mappings. Displayed demo

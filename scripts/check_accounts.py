@@ -148,6 +148,8 @@ async def check_account(venue, environment="production", *, environ=None, transp
     names = CREDS[venue]
     if novig_credential_profile not in {"legacy", "environment"}:
         raise ValueError("Invalid Novig credential profile")
+    if venue == "kalshi" and environment == "sandbox":
+        names = ("KALSHI_SANDBOX_API_KEY_ID", "KALSHI_SANDBOX_PRIVATE_KEY_PATH")
     if venue == "novig" and novig_credential_profile == "environment":
         prefix = "NOVIG_PRODUCTION_TRADING" if environment == "production" else "NOVIG_PAPER_TRADING"
         names = (prefix + "_API_KEY", prefix + "_PRIVATE_KEY_PATH")

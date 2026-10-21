@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from evplatform.core.plugins import PluginRegistry
-from evplatform.plugins.external import register_external, NovigMonitorConfig
+from evplatform.plugins.external import register_external, KalshiMonitorConfig, NovigMonitorConfig
 
 
 @pytest.fixture
@@ -18,6 +18,55 @@ def monitor(monkeypatch):
                 'NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH'):
         monkeypatch.delenv(key, raising=False)
     return plugin
+
+
+@pytest.fixture
+def kalshi_monitor(monkeypatch):
+    registry = PluginRegistry()
+    register_external(registry, None)
+    plugin = registry.records['kalshi'].plugin
+    for key in ('KALSHI_API_KEY_ID', 'KALSHI_PRIVATE_KEY_PATH',
+                'KALSHI_SANDBOX_API_KEY_ID', 'KALSHI_SANDBOX_PRIVATE_KEY_PATH'):
+        monkeypatch.delenv(key, raising=False)
+    return plugin
+
+
+@pytest.mark.parametrize('environment,prefix', [('sandbox', 'KALSHI_SANDBOX'),
+                                             ('production', 'KALSHI')])
+async def test_kalshi_default_uses_separate_environment_pair(kalshi_monitor, monkeypatch, environment, prefix):
+    config = KalshiMonitorConfig(environment=environment).model_dump()
+    assert config['credential_profile'] == 'environment'
+    assert kalshi_monitor.credential_names(config) == {
+        'api_key_id': prefix+'_API_KEY_ID', 'private_key_path': prefix+'_PRIVATE_KEY_PATH'}
+    for name in ('KALSHI', 'KALSHI_SANDBOX'):
+        monkeypatch.setenv(name+'_API_KEY_ID', name+'-key')
+        monkeypatch.setenv(name+'_PRIVATE_KEY_PATH', name+'-path')
+    selected = []
+    kalshi_monitor.factory = lambda settings: selected.append(settings) or SimpleNamespace(
+        connect=AsyncMock(), disconnect=AsyncMock())
+    kalshi_monitor._run = AsyncMock()
+    await kalshi_monitor.start(SimpleNamespace(config=config))
+    try:
+        assert selected[0].api_key_id == prefix+'-key'
+        assert selected[0].private_key_path == prefix+'-path'
+        assert selected[0].environment == environment
+    finally:
+        await kalshi_monitor.stop()
+
+
+async def test_kalshi_sandbox_never_borrows_production_credentials(kalshi_monitor, monkeypatch):
+    monkeypatch.setenv('KALSHI_API_KEY_ID', 'production-key')
+    monkeypatch.setenv('KALSHI_PRIVATE_KEY_PATH', 'production-path')
+    kalshi_monitor.factory = lambda _: pytest.fail('Production credentials must not reach the demo host')
+    # Direct starts with a persisted pre-upgrade config must use the new safe default too.
+    await kalshi_monitor.start(SimpleNamespace(config={'environment': 'sandbox'}))
+    health = await kalshi_monitor.health_check()
+    assert health['status'] == 'blocked' and not health['authenticated']
+    assert 'production-key' not in str(health)
+
+
+def test_kalshi_profile_choice_is_in_manifest(kalshi_monitor):
+    assert kalshi_monitor.manifest.config_schema['properties']['credential_profile']['default'] == 'environment'
 
 
 def test_existing_configuration_keeps_exact_legacy_pair(monitor):
