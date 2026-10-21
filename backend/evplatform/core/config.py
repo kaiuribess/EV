@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     port: int = 8000
     demo_interval: float = Field(default=.5, ge=.05)
     demo_seed: int = 73
+    sample_feed_enabled: bool = True
     pricing: PricingConfig = Field(default_factory=PricingConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
 

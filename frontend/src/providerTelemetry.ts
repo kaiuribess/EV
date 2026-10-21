@@ -1,5 +1,19 @@
 export type ProviderFact = { label: string; value: string }
 
+// Source observation is distinct from a reported price-change clock and the
+// transport receipt clock. Never turn either of those into quote freshness.
+export function verifiedObservationAge(observation: Record<string, unknown>, now = Date.now()): string {
+  const value = observation.observation_verified === true ? observation.source_observed_at : null
+  if (typeof value !== 'string' || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return 'Unverified'
+  const observed = Date.parse(value)
+  if (!Number.isFinite(observed) || !Number.isFinite(now)) return 'Unverified'
+  const elapsed = now - observed
+  if (elapsed < -5000) return 'Future clock'
+  if (elapsed < 60000) return `${Math.max(0, Math.floor(elapsed / 1000))}s`
+  if (elapsed < 3600000) return `${Math.floor(elapsed / 60000)}m`
+  return `${Math.floor(elapsed / 3600000)}h`
+}
+
 const count = (value: unknown): string =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
     ? value.toLocaleString('en-US') : 'Unavailable'

@@ -14,11 +14,12 @@ export interface State extends Json {
   risk: Json
   events: Json[]
   signals: Json[]
+  quarantine: Json[]
 }
 export const emptyState: State = {
   mode: 'disconnected', auto_trade: false, kill_switch: false, plugins: [],
   markets: [], quotes: [], opportunities: [], orders: [], positions: [],
-  metrics: {}, risk: {}, events: [], signals: [],
+  metrics: {}, risk: {}, events: [], signals: [], quarantine: [],
 }
 export const normalizeState = (data: Json): State => ({
   ...emptyState, ...data,
@@ -30,6 +31,7 @@ export const normalizeState = (data: Json): State => ({
   positions: Array.isArray(data.positions) ? data.positions : [],
   events: Array.isArray(data.events) ? data.events : [],
   signals: Array.isArray(data.signals) ? data.signals : [],
+  quarantine: Array.isArray(data.quarantine) ? data.quarantine : [],
   metrics: {
     ...(data.metrics || {}),
     internal_latency_ms: data.metrics?.latency?.internal_processing_ms ?? data.metrics?.internal_latency_ms,

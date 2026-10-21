@@ -73,7 +73,11 @@ if (-not $ready) { throw "Backend did not become ready. See data\server-$Port.er
     ConvertTo-Json | Set-Content -LiteralPath "data\runtime-$Port.json" -Encoding UTF8
 Write-Host "EV Platform $Mode is running at $dashboardUrl (PID $($server.Id))." -ForegroundColor Green
 if ($Mode -in @("demo", "paper")) {
-    Write-Host "Every demo price and paper fill is synthetic. Paper automation: $([bool]$AutoTrade)."
+    if ($Mode -eq "paper" -and $env:EV_SAMPLE_FEED_ENABLED -eq "false") {
+        Write-Host "Sample odds are OFF; external quotes remain live observations and all paper fills are simulated. Paper automation: $([bool]$AutoTrade)."
+    } else {
+        Write-Host "Every demo price and paper fill is synthetic. Paper automation: $([bool]$AutoTrade)."
+    }
 } else {
     Write-Host "Native workspace started PAUSED. Review /api/readiness; credentials do not enable trading."
 }

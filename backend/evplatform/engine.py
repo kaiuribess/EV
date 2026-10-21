@@ -74,7 +74,8 @@ class Engine:
         self.events = deque(maxlen=100)
         self.registry = PluginRegistry()
         self.paper = PaperVenue(self.risk.authority)
-        self.registry.register(DemoInput(), enabled=self.settings.mode in {"demo", "paper"})
+        self.registry.register(DemoInput(), enabled=(self.settings.mode in {"demo", "paper"}
+                                                  and self.settings.sample_feed_enabled))
         self.registry.register(PositiveEV(), enabled=True)
         self.registry.register(NativePositiveEV(), enabled=False)
         self.registry.register(self.paper, enabled=True)
@@ -187,7 +188,9 @@ class Engine:
             record = self.registry.records[name]
             if record.enabled:
                 await self.registry.start(name, self.context(name))
-        mode_label = "SYNTHETIC mode active" if self.settings.mode in {"demo", "paper"} else f"Native {self.settings.mode} mode"
+        mode_label = ("SYNTHETIC mode active" if self.settings.mode in {"demo", "paper"} and self.settings.sample_feed_enabled
+                      else "PAPER live-input mode" if self.settings.mode == "paper"
+                      else f"Native {self.settings.mode} mode")
         await self.notice("info", mode_label + ". Automatic trading is " +
                           ("enabled for paper fills." if self.risk.auto_trade else "disabled."), "engine")
 
@@ -780,7 +783,9 @@ class Engine:
         return {
             "mode": self.settings.mode, "auto_trade": self.risk.auto_trade,
             "kill_switch": self.risk.kill_switch, "kill_reason": self.risk.kill_reason,
-            "synthetic": self.settings.mode in {"demo", "paper"}, "started_at": self.started_at.isoformat(),
+            "synthetic": self.settings.mode in {"demo", "paper"},
+            "sample_feed_enabled": self.settings.sample_feed_enabled,
+            "started_at": self.started_at.isoformat(),
             "timestamp": utcnow().isoformat(), "plugins": self.registry.public(),
             "markets": [m.model_dump(mode="json") for m in self.markets.values()],
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],

@@ -62,6 +62,26 @@ dashboard to generate simulated orders, or stop the demo and explicitly start:
 `kalshi_paper`, `novig_paper`, and `prophetx_paper` are **synthetic $1-contract
 scenarios**, not replicas of those exchanges' fees or native units.
 
+To open a separate paper workspace with connected real feeds and **no sample
+odds**, run this from PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start_live_paper.ps1
+```
+
+The launcher stops a paused demo instance on port 8001, opens
+`data/live-paper.db`, and restores its enabled input and account-monitor
+plugins. It never copies synthetic trade history or trading authorization.
+It enables **simulated paper automation** after provider setup unless you pass
+`-Paused` or an emergency stop is active. Native execution stays off. The Provider Center shows
+which live messages arrived and which quotes remain quarantined. A connection
+or message is not evidence of a current, comparable quote. The current feeds
+have no reviewed sportsbook-to-market mappings, and the native exchange monitors
+do not route orders into the paper simulator. This workspace therefore receives
+real data but cannot yet produce live-input paper trades. The synthetic demo
+remains available separately for end-to-end paper order testing.
+Running the launcher again retains its separate provider settings.
+
 Useful commands:
 
 ```powershell
