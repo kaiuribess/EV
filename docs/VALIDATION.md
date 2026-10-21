@@ -49,7 +49,9 @@ activation or financial transaction was performed.
 
 Rendered browser inspection confirmed changing sample opportunities and player
 props, the Trading desk launch-readiness panel, visible account/system blockers,
-and a separate empty native order ledger. The disabled automation control and
+and paper-specific labels. Separate native ledger/statistics rendering and the
+native Performance availability notice passed focused React render checks. The
+disabled automation control and
 active kill switch are visible. Screenshot: `artifacts/native-launch-readiness.png`.
 The dashboard is available at http://127.0.0.1:8001/.
 
