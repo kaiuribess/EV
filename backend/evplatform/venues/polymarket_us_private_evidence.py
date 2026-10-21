@@ -78,8 +78,16 @@ async def capture_private_evidence(client, *, seconds=15, max_frames=256, max_by
     except TimeoutError:
         pass
     finally:
+        # Capture before closing: the client clears connection-specific evidence
+        # on teardown. Expose only known subscription kinds and status enums.
+        health = client.health_check() if callable(getattr(client, "health_check", None)) else {}
+        known = {"SUBSCRIPTION_TYPE_ORDER", "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT",
+                 "SUBSCRIPTION_TYPE_POSITION", "SUBSCRIPTION_TYPE_ACCOUNT_BALANCE"}
+        subscriptions = {key: value for key, value in health.get("private_subscription_evidence", {}).items()
+                         if key in known and value in {"awaiting_data", "data_observed"}}
         await stream.aclose()
     return {"started_at": started.isoformat(), "finished_at": utcnow().isoformat(), "frames": frames,
         "summary": {"frame_count": len(frames), "counts": dict(counts), "field_presence": dict(presence),
             "stopped": stopped, "replay_coverage_verified": False, "cash_posting_join_verified": False,
+            "subscription_evidence": subscriptions,
             "orders_submitted": 0, "note": "Observed wire fields only; no account or settlement certification"}}

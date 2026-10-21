@@ -79,11 +79,26 @@ def codes(report):
     return {item.code for item in report.blockers}
 
 
+def test_unscoped_launch_does_not_misreport_missing_credentials_or_adapter():
+    report = evaluate_readiness(None, RuntimeReadiness())
+    assert {"runtime.scope_unassessed", "profile.missing", "runtime.persistence_healthy"} <= codes(report)
+    assert not {"runtime.native_credentials_present", "runtime.native_routing_supported"} & codes(report)
+    assert not report.technical_ready and not report.safe_to_arm
+
+
+def test_scoped_launch_still_requires_credentials_and_native_implementation():
+    profile, runtime, now = ready_fixture()
+    report = evaluate_readiness(profile, runtime.model_copy(update={
+        "native_credentials_present": False, "native_routing_supported": False}), now=now)
+    assert {"runtime.native_credentials_present", "runtime.native_routing_supported"} <= codes(report)
+    assert not report.safe_to_arm
+
+
 def test_empty_readiness_fails_closed():
     report = evaluate_readiness(None, RuntimeReadiness())
     assert not report.safe_to_arm and not report.live_trading_ready
     assert "profile.missing" in codes(report)
-    assert "runtime.native_routing_supported" in codes(report)
+    assert "runtime.scope_unassessed" in codes(report)
     assert report.performance.conclusion == "not_established"
 
 

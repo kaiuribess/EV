@@ -80,6 +80,17 @@ async def test_disconnect_evidence_retained_not_hidden_by_a_later_snapshot():
     assert not result["summary"]["replay_coverage_verified"]
 
 
+async def test_capture_retains_only_subscription_status_before_teardown():
+    client = ReadOnlyClient([frame()])
+    client.health_check = lambda: {"private_subscription_evidence": {
+        "SUBSCRIPTION_TYPE_ORDER": "data_observed", "SUBSCRIPTION_TYPE_POSITION": "awaiting_data",
+        "SUBSCRIPTION_TYPE_ACCOUNT_BALANCE": "secret-account-id", "private": "private-secret"}}
+    result = await capture_private_evidence(client)
+    assert result["summary"]["subscription_evidence"] == {
+        "SUBSCRIPTION_TYPE_ORDER": "data_observed", "SUBSCRIPTION_TYPE_POSITION": "awaiting_data"}
+    assert "secret" not in str(result["summary"])
+
+
 @pytest.mark.parametrize("change", [{"authenticated": False}, {"market_slugs": ["outside-scope"]},
     {"settings": SimpleNamespace(environment="sandbox")}, {"private_updates": False}])
 async def test_invalid_account_or_subscription_scope_rejected_before_read(change):

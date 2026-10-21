@@ -28,4 +28,15 @@ All 25 retained malformed real spread rows parsed successfully after the repair.
 
 ## Remaining requirements
 
+A new 30-second authenticated capture on October 21 observed **681 offers in 33
+provider/book/market groups**, including Pinnacle PRA props through Parlay.
+Parlay reported no transport errors; that does not certify its individual rows.
+Oddize's 58 distinct moneyline observations had usable observation clocks; 51
+also had synchronized complete opposing prices. All 58 lacked verified active
+status. No sampled provider group established market-status verification, and
+no TTL was approved. The single Oddize metered read consumed one credit.
+Artifact: `data/freshness-final-audit-20261021.json`. This supersedes any inference
+of absent Pinnacle coverage from an earlier shorter capture, without claiming
+complete sport/prop coverage.
+
 These fields do not supply a validated provider/book/market freshness limit, settlement match, active-status guarantee or native lifecycle evidence. Missing evidence still blocks strict profiles. An unchanged price can have a new verified observation; a newly received packet can contain an old price. Neither means an execution target is liquid or profitable.

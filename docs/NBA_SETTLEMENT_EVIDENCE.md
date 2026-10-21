@@ -25,6 +25,35 @@ A public `GET /trade-api/v2/series/KXNBAGAME` returned [BASKETBALLGAMEWIN contra
 
 ## Local observation evidence and unknowns
 
+### ProphetX follow-up, October 21
+
+The current [official filing index](https://www.prophetx.co/lobby/t-c/filings)
+links the July 9 NBA mainline and player-statistic filings. The
+[mainline terms](https://framerusercontent.com/assets/dPuLRtFql7mQm5oFvuAiCOzSAdk.pdf)
+include overtime by default, return collateral for tied full-game moneylines
+and exact spread/total pushes, and adjust expiration when an event is postponed,
+suspended or rescheduled (PDF pages 3–7). Page 7 was also rendered and visually
+checked. This does not establish Pinnacle's 12/30-hour cancellation windows or
+43-minute completion rule. Keep these contracts separate pending a reviewed
+pricing transformation or evidence of exact applicability and equivalence.
+
+The [player-statistic filing](https://framerusercontent.com/assets/xFIxMV69o6oKsLMzIkdlbTdqrTc.pdf)
+requires participation and allows official statistical corrections within 48
+hours to trigger resettlement. A normal payout is therefore insufficient to
+validate the correction path. The
+[NBA source amendment](https://framerusercontent.com/assets/5bm2KSelyDxp6fWU8MJ5u7KZJo.pdf)
+identifies futures in its operative scope; it was not silently applied as a
+new mainline rule. These are series-level findings, not approved bindings to
+individual live strike IDs or sportsbook jurisdictions.
+
+Local source hashes under `data/prophet-nba-filings-20261021/`:
+
+- Mainlines: `7fdce16ed1af6d3c82301382b17f55c327e53fae0b226b9561023fa9db329565`.
+- Player statistics: `9122dfc75db147cee69200285235617c8e9b684d60ab6fe38c4636730f218578`.
+- Futures amendment: `9581ebf6dc0b307f53c0473ff4d7a7d31bcc65dbeb1e3965926cc824c6dde63d`.
+
+### Earlier feed evidence
+
 - `data/mapping-novig-catalog.json`: 19 sampled moneyline markets all explicitly carry `voids: FMV`; no period or contract-document version field was present. Receipt was October 20 at 21:28 PDT. This bounded sample is not the full universe.
 - `data/parlay_rest_sample.json`: 14 events across `pinnacle`, `fanduel`, and `draftkings`; no per-market settlement, void, overtime, or period fields were present. Team names, event IDs, and scheduled times support candidate discovery; they do not establish settlement equivalence or sportsbook jurisdiction.
 - `data/mapping-public-catalogs.json`: 100 `KXNBAGAME` rows, sampled October 20 at 21:24 PDT, explicitly retain the 48-hour-start/fair-price cancellation condition.

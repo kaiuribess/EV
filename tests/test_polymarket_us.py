@@ -186,6 +186,26 @@ def test_unknown_subscription_does_not_establish_delivery_or_readiness():
     assert not client.books and not client.health_check()["streaming"]
 
 
+def test_order_snapshot_does_not_claim_balance_or_position_subscription_evidence():
+    client = PolymarketUSClient(settings())
+    client._ready = {"private": False}
+    requests = client.subscription_requests("private")
+    order = requests[0]["subscribe"]
+    client.observe_frame("private", {**order, "orderSubscriptionSnapshot": {"orders": [], "eof": True}})
+    health = client.health_check()
+    assert health["private_streaming"]  # Delivery is intentionally separate from reconciliation.
+    evidence = health["private_subscription_evidence"]
+    assert evidence["SUBSCRIPTION_TYPE_ORDER"] == "data_observed"
+    assert evidence["SUBSCRIPTION_TYPE_POSITION"] == evidence["SUBSCRIPTION_TYPE_ACCOUNT_BALANCE"] == "awaiting_data"
+    assert not health["reconciled"]
+    client.observe_frame("private", {"heartbeat": {}})
+    assert client.health_check()["private_subscription_evidence"] == evidence
+    client.subscription_requests("private")  # A new connection cannot inherit old delivery evidence.
+    assert set(client.health_check()["private_subscription_evidence"].values()) == {"awaiting_data"}
+    client.observe_frame("private", {**order, "orderSubscriptionSnapshot": {"orders": [], "eof": True}})
+    assert set(client.health_check()["private_subscription_evidence"].values()) == {"awaiting_data"}
+
+
 @pytest.mark.parametrize("mutation", ["wrong_slug", "wrong_type", "alias_conflict", "bad_currency", "negative_quantity"])
 def test_malformed_or_conflicting_market_evidence_fails_closed(mutation):
     client = PolymarketUSClient(settings())

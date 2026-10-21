@@ -54,6 +54,25 @@ The optional socket signs the documented private WebSocket route and sends subsc
 
 ## Institutional API is a separate integration
 
+### October 21 subscription isolation check
+
+The **16:11 UTC** authenticated recheck again parsed two balance activities and
+no trades/resolutions. The 30-second combined private subscription received one
+order snapshot. Separate 20-second balance-only and position-only subscriptions
+received no data. This rules out neither delayed delivery nor an idle account;
+it does not establish a missing permission or unsupported API. No account
+mutation was used to provoke an update.
+
+The monitor now reports `private_subscription_evidence` by subscription type,
+separating `awaiting_data` from `data_observed`. Evidence resets on disconnect,
+reconnect and teardown; heartbeats and old request IDs cannot satisfy a pending
+subscription. A streaming connection remains delivery health, never account
+reconciliation. Diagnostic captures preserve this allowlisted status before
+teardown. Protected artifacts: `data/polymarket-final-audit-20261021/` and
+`data/polymarket-isolated-scopes-20261021/`.
+
+### Institutional scope
+
 The [institutional balance ledger](https://docs.polymarket.us/api-reference/funding/get-account-balance-ledger) documents `GET https://api.prod.polymarketexchange.com/v1/funding/balance-ledger`, bearer JWT authentication, and an account such as `firms/{firm}/accounts/{id}`. Entries include a unique ID, account, symbol/security, typed before/after cash balances, and time; resolution and commission entries are supported. This is materially stronger cash-ledger evidence, but it uses a different host, identity model, credentials, and access scope. A personal retail Ed25519 key does not establish institutional eligibility. Do not route personal credentials to that API or claim its ledger is available to this account.
 
 ## Evidence needed to remove the remaining block

@@ -282,6 +282,14 @@ _RUNTIME_FLAGS = {
     "native_credentials_present": "Configure the required backend venue credentials",
     "account_identity_verified": "Read and bind the authenticated venue account identity",
 }
+# These facts are assessed for an explicitly selected venue/account. Without
+# that scope their default False values mean unassessed, not missing credentials
+# or an unimplemented adapter. Global risk/storage failures still show normally.
+_SCOPED_RUNTIME_FLAGS = frozenset({
+    "native_routing_supported", "private_stream_authenticated", "private_stream_synchronized",
+    "reconciliation_healthy", "cancellation_races_supported", "settlement_reconciliation_supported",
+    "native_credentials_present", "account_identity_verified",
+})
 _LIFECYCLE_CHECKS = {
     "submit_ack", "private_fill", "partial_fill", "cancel_race", "unknown_outcome",
     "duplicate_prevention", "fees_and_units", "sequence_gap_recovery",
@@ -307,12 +315,16 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         block("runtime.stale", "Current runtime facts are unavailable or stale",
               "Collect new runtime facts immediately before preflight")
     for flag, action in _RUNTIME_FLAGS.items():
+        if profile is None and flag in _SCOPED_RUNTIME_FLAGS:
+            continue
         if not getattr(runtime, flag):
             block(f"runtime.{flag}", action, action)
     if runtime.unresolved_unknown_orders or runtime.reconciliation_discrepancies:
         block("runtime.unresolved_orders", "Unknown orders or reconciliation discrepancies remain",
               "Resolve native order outcomes and positions without blindly resubmitting")
     if profile is None:
+        block("runtime.scope_unassessed", "Venue and account readiness have not been assessed for a launch scope",
+              "Select a reviewed venue, account and market scope; monitor authentication alone is insufficient")
         block("profile.missing", "No explicit venue launch profile is configured",
               "Create a reviewed, account-specific launch profile with explicit limits",
               category="authorization")

@@ -66,10 +66,10 @@ current trading authorization.
 
 ## Validation
 
-Latest full offline run: **1,817 backend tests passed in 52.39 seconds**, with
-**88.61% statement coverage** (11,712 of 13,217 statements), plus **89 frontend
+Latest full offline run: **1,821 backend tests passed in 48.15 seconds**, with
+**88.64% statement coverage** (11,729 of 13,232 statements), plus **89 frontend
 tests passed** and a successful TypeScript/Vite production build. The run is
-saved in `data/validation-prophet-fix-20261021.log`. This is software regression
+saved in `data/validation-readiness-coverage-20261021.log`. This is software regression
 evidence, not genuine native lifecycle or profitability validation. No new
 live fill latency was measured because no native order was placed.
 
@@ -96,6 +96,33 @@ All 25 retained failing rows replayed successfully. A fresh **15:34:58–15:35:2
 An offline replay benchmark of 200 batches of those 25 rows measured **0.765 ms median, 0.982 ms p95, and 1.090 ms p99** for parsing, failure isolation and quarantine. It excludes network, pricing, risk, routing and fills; it is not order latency. Artifact: `data/parser-replay-latency-20261021.json`.
 
 ## Official contracts rechecked
+
+### Follow-up at 16:11–16:16 UTC
+
+Authenticated current-history requests for Kalshi, Novig and ProphetX completed
+without errors. All served order/fill/settlement collections remained empty;
+Novig and ProphetX each returned one wallet transaction. The local OMS still
+had no native orders or lifecycle records. Polymarket's separate capture still
+had two balance activities and no trade/resolution history. These are scoped
+reads, not evidence that all historical archives or exceptional outcomes were
+covered. Artifacts: `data/native-final-audit-20261021/` and
+`data/polymarket-final-audit-20261021/`.
+
+Two status-reporting defects were corrected. Without a launch profile, venue
+and account flags are now reported as **unassessed scope**, rather than falsely
+asserting that credentials or adapter implementation are absent. Global risk,
+storage and unresolved-order checks still apply, technical readiness stays
+false, and selecting a profile restores every venue-specific gate. Polymarket
+also exposes per-subscription delivery evidence instead of allowing one order
+snapshot to imply balance/position coverage.
+
+The fresh feed sample and ProphetX NBA filings are recorded in
+[quote evidence](QUOTE_OBSERVATION_CONTRACT.md) and
+[settlement evidence](NBA_SETTLEMENT_EVIDENCE.md). No exact live mapping was
+approved. The API's bounded review contained 368 quarantined observations;
+all lacked verified market status and complete settlement/identity mappings.
+Completing local code cannot manufacture those upstream facts or a genuine
+paid settlement. Live execution remains disabled.
 
 - [Parlay streaming schema](https://parlay-api.com/v1/asyncapi.json): bounded
   recent-row snapshots differ from explicitly complete game-board baselines.

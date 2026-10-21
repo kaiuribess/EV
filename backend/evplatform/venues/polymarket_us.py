@@ -83,6 +83,7 @@ class PolymarketUSClient(NativeTransport):
         self._sockets: dict = {}
         self._ready: dict[str, bool] = {}
         self._subscriptions: dict[str, dict[str, str]] = {}
+        self._subscription_evidence: dict[str, dict[str, str]] = {}
 
     def _load_key(self):
         if not self.settings.api_key_id or not self.settings.secret_key:
@@ -206,10 +207,12 @@ class PolymarketUSClient(NativeTransport):
             "SUBSCRIPTION_TYPE_ORDER", "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT",
             "SUBSCRIPTION_TYPE_POSITION", "SUBSCRIPTION_TYPE_ACCOUNT_BALANCE"]
         self._subscriptions[channel] = {}
+        self._subscription_evidence[channel] = {}
         requests = []
         for kind in kinds:
             request_id = str(uuid4())
             self._subscriptions[channel][request_id] = kind
+            self._subscription_evidence[channel][kind] = "awaiting_data"
             subscribe = {"requestId": request_id, "subscriptionType": kind}
             # Empty private order/position scope means the whole authenticated
             # account; never use empty public scope to request the entire venue.
@@ -276,6 +279,7 @@ class PolymarketUSClient(NativeTransport):
                 return "unknown"
             self.private_messages += 1
             self._ready[channel] = True
+        self._subscription_evidence.setdefault(channel, {})[expected] = "data_observed"
         self._refresh_health()
         return "data"
 
@@ -323,6 +327,7 @@ class PolymarketUSClient(NativeTransport):
             finally:
                 self._sockets.pop(channel, None)
                 self._ready[channel] = False
+                self._subscription_evidence[channel] = {}
                 if not terminal and not self._closed:
                     self.health = "reconnecting"
                 if channel == "markets":
@@ -351,6 +356,7 @@ class PolymarketUSClient(NativeTransport):
             # retried. The other channel is stopped by the consumer's finally.
             pass
         self._ready[channel] = False
+        self._subscription_evidence[channel] = {}
         self.books.clear()
         self.book_received_at.clear()
         self.error_count += 1
@@ -382,6 +388,7 @@ class PolymarketUSClient(NativeTransport):
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self._ready = {}
+            self._subscription_evidence = {}
             self.books.clear()
             self.book_received_at.clear()
 
@@ -393,6 +400,7 @@ class PolymarketUSClient(NativeTransport):
         self.books.clear()
         self.book_received_at.clear()
         self._ready = {}
+        self._subscription_evidence = {}
         await super().disconnect()
 
     def health_check(self):
@@ -402,6 +410,8 @@ class PolymarketUSClient(NativeTransport):
                 "configured_markets": len(self.market_slugs), "monitored_books": len(self.books),
                 "market_messages": self.market_messages, "private_messages": self.private_messages,
                 "heartbeat_messages": self.heartbeat_messages, "unknown_messages": self.unknown_messages,
+                "private_subscription_evidence": dict(self._subscription_evidence.get("private", {})),
+                "private_delivery_note": "Observed subscription data only; no complete account or replay certification",
                 "private_streaming": self._ready.get("private", False), "market_streaming": self._ready.get("markets", False)}
 
     @staticmethod
