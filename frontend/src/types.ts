@@ -47,6 +47,6 @@ export const duration = (v: any) => v === undefined || v === null ? '—' : num(
 export const clockTime = (v: any) => !v ? '—' : new Date(v).toLocaleTimeString('en-US', { hour12: false })
 export const marketName = (m: Json) => m.player ? `${text(m.player)} · ${human(m.player_stat ?? m.statistic ?? m.market_type)} ${m.line ?? ''}` : `${human(m.market_type)}${m.line != null ? ` ${m.line}` : ''}`
 export const eventName = (m: Json) => text(m.event_name ?? m.name ?? m.event_id ?? m.id)
-export const isPositive = (s: any) => ['healthy', 'connected', 'ok', 'running', 'ready', 'active', 'valid', 'qualified', 'approved', 'filled', 'positive ev', 'live'].includes(String(s).toLowerCase())
+export const isPositive = (s: any) => ['healthy', 'connected', 'streaming', 'ok', 'running', 'ready', 'active', 'valid', 'qualified', 'approved', 'filled', 'positive ev', 'live'].includes(String(s).toLowerCase())
 export const isNegative = (s: any) => ['error', 'failed', 'blocked', 'rejected', 'stale', 'suspended', 'disconnected', 'unknown', 'invalid', 'negative ev', 'missing_credentials'].includes(String(s).toLowerCase())
 export const qualifies = (o: Json) => o.status === 'POSITIVE EV' || (!o.status && num(o.ev_per_contract) > 0)

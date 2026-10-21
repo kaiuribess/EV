@@ -47,8 +47,30 @@ class CashRefreshBody(BaseModel):
 def local_origin(value, port=8000):
     if value is None:
         return True
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port in {port, 5173}
+    if not isinstance(value, str) or not value or any(char.isspace() or ord(char) < 32 for char in value):
+        return False
+    try:
+        parsed = urlparse(value)
+        return (parsed.scheme in {"http", "https"}
+                and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                and parsed.port in {port, 5173}
+                and parsed.username is None and parsed.password is None
+                and not (parsed.path or parsed.params or parsed.query or parsed.fragment))
+    except ValueError:
+        return False
+
+
+def local_host(value):
+    if not isinstance(value, str) or not value or any(char.isspace() or ord(char) < 32 for char in value):
+        return False
+    try:
+        parsed = urlparse("//" + value)
+        return (parsed.hostname in {"localhost", "127.0.0.1", "::1", "testserver"}
+                and parsed.username is None and parsed.password is None
+                and parsed.port != 0
+                and not (parsed.path or parsed.params or parsed.query or parsed.fragment))
+    except ValueError:
+        return False
 
 
 def create_app(settings=None):
@@ -74,15 +96,20 @@ def create_app(settings=None):
 
     @app.middleware("http")
     async def loopback_guard(request: Request, call_next):
-        if request.url.hostname not in {"localhost", "127.0.0.1", "::1", "testserver"}:
-            return JSONResponse({"detail": "Local access only"}, status_code=403)
-        if not local_origin(request.headers.get("origin"), engine.settings.port):
-            return JSONResponse({"detail": "Untrusted origin"}, status_code=403)
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.headers.get("X-EV-Control") != "local":
-            return JSONResponse({"detail": "Local control header required"}, status_code=403)
-        response = await call_next(request)
+        if not local_host(request.headers.get("host")):
+            response = JSONResponse({"detail": "Local access only"}, status_code=403)
+        elif not local_origin(request.headers.get("origin"), engine.settings.port):
+            response = JSONResponse({"detail": "Untrusted origin"}, status_code=403)
+        elif request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.headers.get("X-EV-Control") != "local":
+            response = JSONResponse({"detail": "Local control header required"}, status_code=403)
+        else:
+            response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.get("/api/health")
@@ -282,7 +309,7 @@ def create_app(settings=None):
 
     @app.websocket("/ws")
     async def websocket(socket: WebSocket):
-        if not local_origin(socket.headers.get("origin"), engine.settings.port):
+        if not local_host(socket.headers.get("host")) or not local_origin(socket.headers.get("origin"), engine.settings.port):
             await socket.close(code=1008)
             return
         await socket.accept()

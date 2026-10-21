@@ -19,6 +19,11 @@ are unsupported. Credentials stay in the protected backend environment. See
 Provider Center remembers external feed and account-monitor enable settings
 across restarts. Trading activation remains separate and starts paused.
 
+Provider Center also shows the last message age, received-message and market-payload
+counts, mapped quotes, quarantined quotes, and monitored books when an adapter
+reports them. These are transport diagnostics. A connected socket or recent
+message does not establish that an individual quote is current or active.
+
 The supplied 11 sport/market weighting profiles are available as provisional
 research settings, with the first four prop profiles selected for initial testing.
 They use power devig plus proportional sensitivity checks, distinct-book and
