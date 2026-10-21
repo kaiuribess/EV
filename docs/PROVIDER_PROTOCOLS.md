@@ -125,6 +125,15 @@ catalog coverage. Null coverage stays unknown. [Account capabilities](https://od
 reference. The market catalog is needed to verify period, threshold, player and
 outcome IDs. [Market catalog](https://oddspapi.io/en/docs/get-markets)
 
+The odds response also declares `bookmakerIsActive`, fixture suspension,
+`marketActive` and selection `active`. An explicit false bookmaker flag now
+blocks the offer even when the nested market and selections say true. This is
+negative availability evidence, not proof that a returned active selection was
+re-observed recently or is executable. The adapter still leaves
+`market_status_verified=false` for strict live references. The current account
+has no OddsPapi API key, so this behavior is covered by offline protocol tests,
+not a live account probe. [Odds response fields](https://oddspapi.io/us/docs/get-odds)
+
 Quota accounting reserves requests before transmission, because failure
 responses can consume the provider allowance. Account usage refresh is
 unmetered locally, while a local minute limit still protects against runaway

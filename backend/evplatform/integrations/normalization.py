@@ -409,7 +409,8 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                 ):
                     continue
                 prices = {key: decimal_price(row["price"], "decimal") for key, row in outcomes.items()}
-                active = (book.get("suspended") is not True and market.get("marketActive") is True
+                active = (book.get("bookmakerIsActive") is not False
+                          and book.get("suspended") is not True and market.get("marketActive") is True
                           and all(row.get("active") is True for row in outcomes.values()))
                 # Provider recorded-change time and bookmaker clock are kept separate.
                 source_time = _oldest([parse_timestamp(row.get("bookmakerChangedAt")) for row in outcomes.values()])

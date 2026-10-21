@@ -414,6 +414,22 @@ def test_oddspapi_price_and_bookmaker_clocks_are_distinct():
     assert offer.prices == {"11": Decimal("1.91"), "12": Decimal("1.91")}
 
 
+def test_oddspapi_explicit_inactive_bookmaker_blocks_its_active_market():
+    selection = {"price": 1.91, "active": True, "changedAt": NOW.isoformat()}
+    raw = replace(envelope(), provider_id="oddspapi_rest", kind="snapshot", payload={
+        "fixtureId": "fixture1", "statusId": 0, "bookmakerOdds": {
+            "pinnacle": {"bookmakerIsActive": False, "suspended": False,
+                         "markets": {"10": {"marketActive": True, "outcomes": {
+                             "11": {"players": {"0": selection}},
+                             "12": {"players": {"0": selection}},
+                         }}}},
+        },
+    })
+    offer = extract_offers(raw)[0]
+    assert offer.status == "suspended"
+    assert offer.market_status_verified is False
+
+
 async def test_sse_multiline_comments_and_truncated_event():
     async def lines():
         for line in [": heartbeat", "id: 12", "event: projection", 'data: {"x":',
