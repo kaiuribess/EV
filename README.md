@@ -93,7 +93,7 @@ For frontend development, run `npm.cmd run dev` in `frontend/`; Vite proxies to
 - Uses proportional or power devigging, per-market configuration, required
   references, freshness, disagreement limits, and explicit `NO SIGNAL` states.
 - Checks fresh executable best-price depth, fees, duplicate orders, stake,
-  event/player/venue/correlated exposure, daily realized loss, and a kill switch.
+  event/player/venue/correlated exposure, an optional daily realized-loss stop, and a kill switch.
 - Locks each position family across venues and strategies, including alternate
   lines. Filled, partial and unknown positions remain reserved until settlement.
   Submission caps and monetary limits are rechecked after durable writes.

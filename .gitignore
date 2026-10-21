@@ -18,4 +18,5 @@ artifacts/
 .research*/
 .pytest-*/
 .pytest_tmp*/
+.pytest_native_*/
 

@@ -8,8 +8,8 @@ Executed on this Windows PC with Python 3.12.0:
 .\run_tests.ps1
 ```
 
-**839 tests passed in 29.01 seconds with coverage enabled.** Backend statement
-coverage is **86.49%** (7,142 of 8,258 statements). TypeScript checking and the Vite
+**1,162 tests passed in 32.58 seconds with coverage enabled.** Backend statement
+coverage is **87.24%** (8,739 of 10,017 statements). TypeScript checking and the Vite
 production build passed. One upstream Starlette/httpx TestClient deprecation
 warning remains. Coverage measures executed statements, not exchange certification.
 
@@ -63,6 +63,46 @@ The public dashboard state contained none of the configured API credentials.
 Local evidence: `data/accounts-before-restart.json` and
 `data/accounts-after-restart.json`. Startup preferences restore only inputs and
 native monitors; they cannot restore strategy or execution authorization.
+
+## Latest paused restart and authenticated read check
+
+The final build restarted on port 8001 with the saved $5 including-fee limit,
+`daily_loss_limit: null`, and event/player overlap guards enabled. Demo mode
+retains its finite simulated bankroll; native account-cash limits are prepared
+in `data/operator_launch_limits.json` and do not arm trading. Automation stayed
+off, the persisted kill switch stayed on, and the native ledger contained zero
+orders. The dashboard visibly showed these controls and unreviewed real-market
+observations. Screenshot: `artifacts/operator-risk-policy.png`.
+
+On October 21, 2026 at 04:13:21 UTC (October 20, 9:13:21 PM PDT), an independent
+GET/subscription-only Kalshi production check confirmed `fill`, `user_orders`
+and `market_positions` subscriptions. The authenticated account probe verified
+identity, spendable cash, coherent empty order/position inventory, and private
+connection/revision synchronization. Its order gate remained disabled. Local
+evidence: `data/kalshi-private-readonly-check.json`. This validates read-side
+account synchronization; it does not certify native placement, fills or payouts.
+
+## Operator policy rehearsal — October 20 PDT / October 21 UTC
+
+An isolated 15-second synthetic run used the requested $5 including-fee cap,
+no daily-loss stop, one active event/player, and a finite simulated bankroll.
+It produced nine markets, 36 quotes, 18 positive and nine negative offers.
+Three paper orders received fills. The overlap guard rejected 717 subsequent
+same-event candidates; other price, freshness and duplicate checks also rejected
+candidates. No native credentials or external connections were enabled.
+
+Across 2,190 calculations, internal processing measured median **0.205 ms**,
+p95 **0.379 ms**, p99 **0.559 ms**. Receipt-to-calculation measured median
+**10.000 ms**, p95 **18.227 ms**, p99 **21.102 ms** (1,800 samples).
+Seven simulated fill events had median **1,106.218 ms**; that is insufficient
+for p95/p99. Three durable intents had median **3.498 ms** persistence delay.
+This is synthetic execution behavior, not live queue position, live fills or
+profitability evidence. Local evidence: `data/operator-policy-benchmark.json`.
+
+The new checks also cover account reads racing with private updates or settlement,
+complete and incomplete private-fill recovery, contradictory execution IDs,
+queued dispatch after pause/expiry, cross-process execution locking, optional
+daily-loss stops, and cash-only caps requiring verified available balance.
 
 ## Measured local latency
 

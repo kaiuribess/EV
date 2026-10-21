@@ -35,15 +35,24 @@ class RiskConfig(BaseModel):
     max_order_stake: Decimal = Field(default=Decimal("10"), gt=0)
     max_event_exposure: Decimal = Field(default=Decimal("50"), gt=0)
     max_player_exposure: Decimal = Field(default=Decimal("25"), gt=0)
-    max_venue_exposure: Decimal = Field(default=Decimal("100"), gt=0)
+    max_venue_exposure: Decimal | None = Field(default=Decimal("100"), gt=0)
     max_correlated_exposure: Decimal = Field(default=Decimal("50"), gt=0)
-    max_total_exposure: Decimal = Field(default=Decimal("200"), gt=0)
-    daily_loss_limit: Decimal = Field(default=Decimal("50"), gt=0)
+    max_total_exposure: Decimal | None = Field(default=Decimal("200"), gt=0)
+    daily_loss_limit: Decimal | None = Field(default=Decimal("50"), gt=0)
+    available_cash_only: bool = False
+    block_overlapping_events: bool = False
+    block_overlapping_players: bool = False
     duplicate_window_seconds: int = Field(default=30, ge=1)
     max_candidate_age_ms: int = Field(default=1000, ge=10)
     live_max_order_stake: Decimal | None = Field(default=None, gt=0)
     max_open_orders: int = Field(default=20, ge=1)
     max_orders_per_minute: int = Field(default=30, ge=1)
+
+    @model_validator(mode="after")
+    def require_cash_policy(self):
+        if not self.available_cash_only and (self.max_venue_exposure is None or self.max_total_exposure is None):
+            raise ValueError("Uncapped exposure requires authenticated available-cash enforcement")
+        return self
 
 
 class Settings(BaseSettings):

@@ -34,10 +34,13 @@ class LiveLimits(StrictRecord):
     max_order_stake_usd: Decimal = Field(gt=0)
     max_event_exposure_usd: Decimal = Field(gt=0)
     max_player_exposure_usd: Decimal = Field(gt=0)
-    max_venue_exposure_usd: Decimal = Field(gt=0)
+    max_venue_exposure_usd: Decimal | None = Field(gt=0)
     max_correlated_exposure_usd: Decimal = Field(gt=0)
-    max_total_exposure_usd: Decimal = Field(gt=0)
-    daily_loss_limit_usd: Decimal = Field(gt=0)
+    max_total_exposure_usd: Decimal | None = Field(gt=0)
+    daily_loss_limit_usd: Decimal | None = Field(gt=0)
+    available_cash_only: bool = False
+    block_overlapping_events: bool = False
+    block_overlapping_players: bool = False
     max_open_orders: int = Field(ge=1)
     max_orders_per_minute: int = Field(ge=1)
 
@@ -46,17 +49,19 @@ class LiveLimits(StrictRecord):
                      "max_total_exposure_usd", "daily_loss_limit_usd")
     @classmethod
     def finite_money(cls, value: Decimal) -> Decimal:
-        if not value.is_finite():
+        if value is not None and not value.is_finite():
             raise ValueError("Limits must be finite")
         return value
 
     @model_validator(mode="after")
     def coherent_limits(self):
-        if self.max_order_stake_usd > min(
+        if not self.available_cash_only and (self.max_venue_exposure_usd is None or self.max_total_exposure_usd is None):
+            raise ValueError("Exposure without fixed caps requires available-cash enforcement")
+        if self.max_order_stake_usd > min(value for value in (
             self.max_event_exposure_usd, self.max_player_exposure_usd,
             self.max_venue_exposure_usd, self.max_correlated_exposure_usd,
             self.max_total_exposure_usd,
-        ):
+        ) if value is not None):
             raise ValueError("Per-order stake cannot exceed an exposure limit")
         return self
 
@@ -120,7 +125,9 @@ class LaunchProfile(StrictRecord):
     max_orderbook_age_ms: int = Field(gt=0)
     # Full settlement support stays the default requirement. The narrow Novig
     # policy requires explicit operator authorization bound to this profile.
-    settlement_policy: Literal["full", "novig_ioc_win_loss_halt_on_exception"] = "full"
+    settlement_policy: Literal["full", "novig_ioc_win_loss_halt_on_exception",
+                               "kalshi_ioc_binary_halt_on_exception",
+                               "prophetx_funded_cash_win_loss_halt_on_exception"] = "full"
     evidence: tuple[LaunchEvidence, ...] = ()
 
     @field_validator("market_ids", "strategy_ids", "provider_ids")

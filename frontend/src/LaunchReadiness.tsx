@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { CheckCircle2, CirclePause, LockKeyhole, RefreshCw, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { request } from './api'
 import './LaunchReadiness.css'
+import { MarketReview } from './MarketReview'
 
 type Category = 'technical' | 'authorization' | 'arming'
 type Blocker = { code: string; category: Category; scope: string; message: string; action: string }
@@ -76,7 +77,7 @@ export function LaunchReadiness() {
   const sandbox = current && report.sandbox_trading_ready
   const heading = !current ? 'Readiness unconfirmed' : live ? 'Production gate passed' : sandbox ? 'Sandbox gate passed' : report.safe_to_arm ? 'Checks passed · activation required' : 'Finish the launch checks'
   const blockedCount = report?.blockers.filter(item => item.category !== 'arming').length ?? 0
-  return <section className="launch-readiness panel" aria-labelledby={headingId}>
+  return <><section className="launch-readiness panel" aria-labelledby={headingId}>
     <div className="launch-head">
       <div className="launch-title"><span className="launch-icon"><ShieldCheck size={22} strokeWidth={1.5} /></span><div><span className="eyebrow">LIVE LAUNCH READINESS</span><h2 id={headingId}>{heading}</h2><p>{report?.venue ? `${report.venue} · ${report.environment}` : 'Choose a reviewed venue and account profile to begin.'}</p></div></div>
       <div className="launch-head-actions"><span className={`launch-state ${live || sandbox ? 'is-ready' : ''}`}><span />{!current ? 'UNCONFIRMED' : live ? 'LIVE GATE PASSED' : sandbox ? 'SANDBOX GATE PASSED' : 'LIVE NOT READY'}</span><button className="icon-button" aria-label="Refresh launch readiness" disabled={loading} onClick={() => setRefreshKey(value => value + 1)}><RefreshCw size={16} className={loading ? 'launch-spin' : ''} /></button></div>
@@ -100,5 +101,5 @@ export function LaunchReadiness() {
     })}</div>}
     <footer className="launch-footer"><span>Checks refresh every 5 seconds while visible. This panel does not enable trading.</span><span>{lastSuccess ? `Checked ${new Date(lastSuccess).toLocaleTimeString()}` : 'Awaiting current evidence'}</span></footer>
     <p className="launch-performance-note">Technical readiness does not prove a profitable strategy. Actual fills, fees and verified settlements remain separate from simulated results.</p>
-  </section>
+  </section><MarketReview /></>
 }

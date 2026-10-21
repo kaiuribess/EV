@@ -240,7 +240,8 @@ async def test_extended_bridge_native_request_units_and_one_use_authority(venue,
         client = client_type(client=http)
         if venue == "prophetx":
             client.set_verified_price_ladder([120, 150])
-        async def submit(body):
+        async def submit(body, *, before_send):
+            before_send()
             seen.append(body)
             client.settings.gate.require(CLIENT, "sandbox")
             return ({"order_id": "native"} if venue == "kalshi" else {"orderId": "native", "clientId": CLIENT}
@@ -263,7 +264,8 @@ async def test_unknown_native_transmission_never_retries_and_gate_resets():
     order, authority = intent("novig"), RiskAuthority()
     async with httpx.AsyncClient() as http:
         client, calls = NovigClient(client=http), []
-        async def unknown(body):
+        async def unknown(body, *, before_send):
+            before_send()
             calls.append(body)
             raise UnknownOrderOutcome(CLIENT)
         client.submit_order = unknown

@@ -4,9 +4,10 @@ from __future__ import annotations
 import base64
 import json
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -20,6 +21,7 @@ from .common import (
     CredentialsMissing, NativeSettings, NativeTransport, SequenceTracker,
     SequenceGap, VenueError, VenueHTTPError, decimal_value, json_body,
 )
+from .dispatch import authenticated_request_guard, placement_guard
 
 
 class KalshiSettings(NativeSettings):
@@ -117,6 +119,84 @@ class KalshiBook:
         return sorted((Decimal(1) - p, q) for p, q in self.books[ticker][opposite].items())
 
 
+class KalshiPrivateState:
+    """Account invalidation fence, NOT an invented exchange sequence.
+
+    Kalshi's private channels have no documented contiguous sequence. Require
+    all-account subscriptions and a fresh REST inventory on this connection;
+    every private notification invalidates that inventory before publication.
+    A REST data timestamp is only an additional approximate freshness check.
+    """
+    CHANNELS = frozenset({"fill", "user_orders", "market_positions"})
+    KINDS = {"fill": "fill", "user_order": "user_orders", "market_position": "market_positions"}
+
+    def __init__(self):
+        self.generation = 0
+        self.revision = 0
+        self.connected = False
+        self.commands: dict[int, str] = {}
+        self.channels: dict[str, int] = {}
+        self.barrier: datetime | None = None
+
+    def begin(self):
+        self.generation += 1
+        self.revision = 0
+        self.connected = True
+        self.commands.clear()
+        self.channels.clear()
+        self.barrier = datetime.now(timezone.utc)
+
+    def invalidate(self):
+        self.connected = False
+        self.channels.clear()
+        self.revision += 1
+
+    @property
+    def ready(self):
+        return self.connected and set(self.channels) == self.CHANNELS
+
+    def fence(self):
+        return (self.generation, self.revision) if self.ready else None
+
+    def apply(self, frame):
+        kind = frame.get("type")
+        if kind == "subscribed":
+            msg = frame.get("msg", {})
+            channel, sid, command = msg.get("channel"), msg.get("sid"), frame.get("id")
+            if channel not in self.CHANNELS:
+                return
+            # A channel name alone is not acknowledgement of our unfiltered
+            # subscription. Unmatched acknowledgements cannot establish ready.
+            if type(command) is not int or self.commands.get(command) != channel:
+                return
+            if type(sid) is not int or sid <= 0 or sid in self.channels.values():
+                raise ValueError("Invalid Kalshi private subscription acknowledgement")
+            self.channels[channel] = sid
+            self.barrier = datetime.now(timezone.utc)
+        elif kind in self.KINDS:
+            self.revision += 1  # Invalidate before any caller can consume event.
+            self.barrier = datetime.now(timezone.utc)
+            channel = self.KINDS[kind]
+            if (not isinstance(frame.get("msg"), dict) or type(frame.get("sid")) is not int
+                    or self.channels.get(channel) != frame["sid"]):
+                raise ValueError("Unbound Kalshi private notification")
+            published = frame.get("sending_ts_ms")
+            if published is not None:
+                if type(published) is not int or published < 0:
+                    raise ValueError("Invalid Kalshi private publication timestamp")
+                source_time = datetime.fromtimestamp(published / 1000, timezone.utc)
+                # This is a publication barrier, never a fill/source-price time.
+                if source_time > self.barrier:
+                    self.barrier = source_time
+
+    def matches(self, snapshot):
+        return (snapshot is not None and snapshot.venue == "kalshi" and snapshot.reconciled
+                and type(snapshot.private_connection_generation) is int and type(snapshot.private_revision) is int
+                and self.fence() == (snapshot.private_connection_generation, snapshot.private_revision)
+                and self.ready and self.barrier is not None and snapshot.private_as_of is not None
+                and snapshot.private_as_of >= self.barrier)
+
+
 class KalshiClient(NativeTransport):
     venue_id = "kalshi"
     HOSTS = {
@@ -132,6 +212,7 @@ class KalshiClient(NativeTransport):
         super().__init__(settings or KalshiSettings(), client)
         self._key = None
         self.book = KalshiBook()
+        self.private = KalshiPrivateState()
         self.tickers: list[str] = []
         self._command_id = 0
         self.authenticated = False
@@ -157,13 +238,23 @@ class KalshiClient(NativeTransport):
             "KALSHI-ACCESS-SIGNATURE": sign_kalshi(self._load_key(), timestamp, method, path),
         }
 
-    async def request(self, method: str, path: str, *, params=None, body=None, authenticated=True, mutation_id=None):
+    async def request(self, method: str, path: str, *, params=None, body=None, authenticated=True, mutation_id=None,
+                      before_send: Callable[[], None] | None = None):
         url = self.HOSTS[self.settings.environment] + "/trade-api/v2" + path
         headers = self.headers(method, urlsplit(url).path) if authenticated else {}
         headers["Content-Type"] = "application/json"
         request = self.http.build_request(method, url, params=params, headers=headers, content=json_body(body))
+        guard = authenticated_request_guard(self, before_send)
+
+        def dispatch():
+            guard()
+            # A queued placement may outlive the signature's permitted clock
+            # window. Re-sign only after the current authorization succeeds.
+            request.headers.update(self.headers(method, urlsplit(url).path))
+
         try:
-            result = await self._request(request, mutation_id=mutation_id)
+            result = await self._request(request, mutation_id=mutation_id,
+                                         before_send=dispatch if guard is not None else None)
         except VenueHTTPError as exc:
             if authenticated and exc.status_code in {401, 403, 451}:
                 self.authenticated = False
@@ -186,6 +277,7 @@ class KalshiClient(NativeTransport):
 
     async def disconnect(self) -> None:
         self.authenticated = False
+        self.private.invalidate()
         try:
             await super().disconnect()
         finally:
@@ -234,10 +326,11 @@ class KalshiClient(NativeTransport):
             "cancel_order_on_pause": True,
         }
 
-    async def submit_order(self, body: dict) -> dict:
+    async def submit_order(self, body: dict, *, before_send: Callable[[], None] | None = None) -> dict:
         client_id = body.get("client_order_id", "")
-        self.settings.gate.require(client_id, self.settings.environment)
-        return await self.request("POST", "/portfolio/events/orders", body=body, mutation_id=client_id)
+        guard = placement_guard(self, client_id, before_send)
+        return await self.request("POST", "/portfolio/events/orders", body=body, mutation_id=client_id,
+                                  before_send=guard)
 
     async def cancel_order(self, order_id: str, *, market_ticker: str) -> dict:
         # Cancellation reduces risk, so remains usable after the placement gate closes.
@@ -254,10 +347,16 @@ class KalshiClient(NativeTransport):
             self._command_id += 1
             await self._send_ws({"id": self._command_id, "cmd": "subscribe",
                                  "params": {"channels": ["orderbook_delta"], "market_tickers": self.tickers}})
-        self._command_id += 1
-        await self._send_ws({"id": self._command_id, "cmd": "subscribe", "params": {"channels": ["fill"]}})
+        for channel in sorted(self.private.CHANNELS):
+            if channel in self.private.channels or channel in self.private.commands.values():
+                continue
+            self._command_id += 1
+            self.private.commands[self._command_id] = channel
+            await self._send_ws({"id": self._command_id, "cmd": "subscribe", "params": {"channels": [channel]}})
 
     async def unsubscribe(self, subscription_ids: list[int]):
+        if set(subscription_ids).intersection(self.private.channels.values()):
+            self.private.invalidate()
         self._command_id += 1
         await self._send_ws({"id": self._command_id, "cmd": "unsubscribe", "params": {"sids": subscription_ids}})
 
@@ -272,6 +371,7 @@ class KalshiClient(NativeTransport):
                                       additional_headers=self.headers("GET", "/trade-api/ws/v2"),
                                       ping_interval=20, max_size=8 * 1024 * 1024) as socket:
                     self.authenticated = True  # Successful signed WebSocket handshake.
+                    self.private.begin()
                     self._ws, self.health = socket, "subscribing"
                     self.health_reason = "Kalshi WebSocket authenticated; waiting for subscription data"
                     await self._subscribe_current()
@@ -283,21 +383,24 @@ class KalshiClient(NativeTransport):
                         if frame.get("type") == "error":
                             self.error_count += 1
                             self.book.reset()
+                            self.private.invalidate()
                             self.health = "subscription_rejected"
                             self.health_reason = "Kalshi rejected a WebSocket command; review subscription scope and permissions"
                             yield {"type": "transport_invalidated", "venue": self.venue_id,
                                    "reason": "subscription_rejected", "all_books_invalid": True}
                             return
                         self.book.apply(frame)
-                        if frame.get("type") in {"subscribed", "orderbook_snapshot", "orderbook_delta", "fill"}:
+                        self.private.apply(frame)
+                        if frame.get("type") in {"subscribed", "orderbook_snapshot", "orderbook_delta", "fill", "user_order", "market_position"}:
                             self.health = "streaming"
                             self.health_reason = "Kalshi authenticated subscription is receiving native messages"
                         failures = 0
                         yield frame
                     raise VenueError("Kalshi stream closed; reconcile and resubscribe")
-            except (OSError, TimeoutError, ConnectionClosed, InvalidHandshake, VenueError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            except (OSError, TimeoutError, OverflowError, ConnectionClosed, InvalidHandshake, VenueError, ValueError, KeyError, TypeError, AttributeError) as exc:
                 self.error_count += 1
                 self.book.reset()
+                self.private.invalidate()
                 status = exc.response.status_code if isinstance(exc, InvalidStatus) else None
                 if status in {401, 403, 451}:
                     self.authenticated = False
@@ -317,6 +420,7 @@ class KalshiClient(NativeTransport):
                     await self._backoff(failures)
                     failures += 1
             finally:
+                self.private.invalidate()
                 self._ws = None
                 if self.health in {"streaming", "subscribing"}:
                     self.health = "disconnected"

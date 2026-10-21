@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .core.config import PricingConfig, RiskConfig, Settings
 from .core.models import Envelope, SettlementResult
+from .core.market_review import ContractReview, compare_contracts, pending_market_reviews
 from .core.signals import SignalResultImport
 from .engine import Engine
 
@@ -28,6 +29,12 @@ class ToggleBody(BaseModel):
 class ConfigBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     config: dict
+
+
+class ContractComparisonBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: ContractReview
+    target: ContractReview
 
 
 def local_origin(value, port=8000):
@@ -111,6 +118,15 @@ def create_app(settings=None):
     @app.get("/api/readiness/runtime")
     async def runtime_readiness():
         return engine.native.runtime_facts().model_dump(mode="json")
+
+    @app.get("/api/market-review")
+    async def market_review(provider: str | None = None, offset: int = Query(0, ge=0),
+                            limit: int = Query(100, ge=1, le=1000)):
+        return pending_market_reviews(engine, provider=provider, offset=offset, limit=limit)
+
+    @app.post("/api/market-review/compare")
+    async def compare_review(body: ContractComparisonBody):
+        return compare_contracts(body.source, body.target)
 
     @app.get("/api/native/orders")
     async def native_orders():

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..core.models import Envelope
 from ..core.plugins import InputPlugin, Manifest, Plugin
+from ..venues.prophetx_financial import ProphetXAccountReview
 
 
 def normalize_manifest(raw):
@@ -135,6 +136,8 @@ class ProphetXMonitorConfig(BaseModel):
     environment: Literal["sandbox", "production"] = "sandbox"
     event_ids: list[str] = Field(default_factory=list, description="Native ProphetX event IDs; empty monitors private/system channels only")
     prop_subtypes: dict[str, list[str]] = Field(default_factory=dict, description="Event ID to discovered prop sub_type values")
+    account_review: ProphetXAccountReview | None = Field(default=None,
+        description="Non-secret account inception/funded-cash evidence; does not authorize orders")
     legacy_market_ids: list[str] = Field(default_factory=list, deprecated=True,
                                        description="Unverified IDs migrated from older settings; replace with event_ids and clear this list")
 
@@ -189,6 +192,9 @@ class NativeMonitor(Plugin):
         self.client = self.factory(self.settings_factory(
             environment=context.config.get("environment", "sandbox"),
             **{key: os.environ[env] for key, env in self.credentials.items()}))
+        if self.manifest.name == "prophetx":
+            review = context.config.get("account_review")
+            self.client.account_review = ProphetXAccountReview.model_validate(review) if review else None
         try:
             await self.client.connect()
         except Exception:
@@ -208,7 +214,8 @@ class NativeMonitor(Plugin):
     async def _run(self):
         try:
             async for frame in self.client.stream_updates():
-                if not self.manifest.capabilities.get("monitor_only"):
+                if (not self.manifest.capabilities.get("monitor_only")
+                        or self.manifest.capabilities.get("native_event_forwarding")):
                     await self.engine.native.on_frame(self.manifest.name, self.client, frame)
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
@@ -222,7 +229,8 @@ class NativeMonitor(Plugin):
         except Exception as exc:
             await self.engine.notice("error", f"Native monitor stopped: {type(exc).__name__}", self.manifest.name)
         finally:
-            if not self.manifest.capabilities.get("monitor_only"):
+            if (not self.manifest.capabilities.get("monitor_only")
+                    or self.manifest.capabilities.get("native_event_forwarding")):
                 await self.engine.native.on_frame(self.manifest.name, self.client, {"type": "transport_invalidated"})
 
     async def stop(self):

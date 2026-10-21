@@ -2,7 +2,8 @@
 
 This is not the international wallet/CLOB API or the institutional API. Public
 discovery is unsigned; account REST and both WebSockets use Ed25519 signatures.
-Native payloads stay backend-only and cannot enter pricing or order routing.
+Native payloads stay backend-only; canonical pricing needs separately reviewed
+mappings. Only the separate risk-gated executor can issue order operations.
 """
 from __future__ import annotations
 
@@ -110,7 +111,9 @@ class PolymarketUSClient(NativeTransport):
 
     @staticmethod
     def _allowed_path(path):
-        return path in {"/v1/account/balances", "/v1/portfolio/positions", "/v1/ws/private", "/v1/ws/markets"}
+        return path in {"/v1/account/balances", "/v1/portfolio/positions", "/v1/portfolio/activities",
+                        "/v1/orders/open", "/v1/rfqs/user-id", "/v1/ws/private", "/v1/ws/markets"} or bool(
+                            re.fullmatch(r"/v1/order/[A-Za-z0-9_-]{1,128}", path))
 
     async def _get(self, path: str, *, private=False, params=None):
         if private and not self._allowed_path(path):
@@ -128,9 +131,25 @@ class PolymarketUSClient(NativeTransport):
             raise VenueError("Invalid Polymarket US account balance envelope")
         return response
 
-    async def positions(self):
+    async def positions(self, **params):
         # Raw account evidence only: this does not claim a complete risk inventory.
-        return await self._get("/v1/portfolio/positions", private=True)
+        return await self._get("/v1/portfolio/positions", private=True, params=params)
+
+    async def reconcile_order(self, order_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", order_id):
+            raise ValueError("Invalid exchange order identity")
+        return await self._get(f"/v1/order/{order_id}", private=True)
+
+    async def open_orders(self):
+        return await self._get("/v1/orders/open", private=True)
+
+    async def activities(self, **params):
+        return await self._get("/v1/portfolio/activities", private=True, params=params)
+
+    async def authenticated_participant(self):
+        # This documented participant identifier may require RFQ read access.
+        # Failure never falls back to treating a configured key as account proof.
+        return await self._get("/v1/rfqs/user-id", private=True)
 
     async def connect(self):
         self._closed = False
@@ -393,11 +412,12 @@ class PolymarketUSClient(NativeTransport):
                 "authentication": {"credential_env": ["POLYMARKET_US_API_KEY_ID", "POLYMARKET_US_SECRET_KEY"]},
                 "capabilities": {"monitor_only": True, "discovery": True, "orderbook": True, "private_updates": True,
                                  "limit_orders": False, "cancel": False, "reconcile": False, "sandbox": False,
-                                 "native_execution": False, "pricing": False, "streaming": True, "polling": True},
+                                 "native_execution": False, "pricing": False, "streaming": True, "polling": True,
+                                 "native_event_forwarding": True},
                 "permissions": ["network", "secret:polymarket_us", "account:read"],
                 "rate_limits": {"local_default_rps": 2, "documented_retail_general_rps": 25, "shared_by_source_ip": True},
                 "limitations": ["Personal US API only; international and institutional APIs are separate",
-                                "No orders, cancellations, canonical pricing, account risk reconciliation or settlement support",
+                                "Monitor is read-only; separate guarded executor remains blocked by account identity, available cash and settlement proof",
                                 "Streaming health is delivery evidence, not complete order/position reconciliation",
                                 "Bounded discovery; explicit market slugs required for market streaming"],
                 "config_schema": PolymarketUSMonitorConfig.model_json_schema(),

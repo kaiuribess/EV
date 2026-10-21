@@ -211,7 +211,10 @@ class Engine:
         await asyncio.gather(*self.tasks, return_exceptions=True)
         if clean and not self.storage.failure:
             await self.storage.save_config("unclean_shutdown", False)
-        await self.storage.close()
+        try:
+            await self.storage.close()
+        finally:
+            self.native.close()
 
     async def _drain_worker(self, queue, worker):
         if not any(task.get_name() == worker and not task.done() for task in self.tasks):

@@ -157,7 +157,7 @@ requires all of the following; there is no default stake authorization:
   account identity, and software build identity. Do not hash a credential.
 - Explicit canonical market IDs, enabled strategy IDs and required provider IDs.
 - Digests of the complete reviewed mapping configuration and pricing model.
-- Every monetary exposure limit, daily loss limit, order-count/rate limit,
+- Every exposure policy, an explicit daily-loss limit or `null` to disable it, order-count/rate limit,
   minimum independent reference count and quote/book freshness limit.
 - Reviewed `LaunchEvidence` records bound to `LaunchProfile.digest()` and the
   same build, venue and account. The digest excludes only the evidence list.
@@ -167,6 +167,11 @@ pricing digests and runtime checks. Use actual authenticated account identity
 from the relevant native account probe. A successful REST response or a
 credential's presence does not prove write permission or geographical
 eligibility. No ready-to-trade profile is shipped with sample money limits.
+
+The requested $5, available-account-cash and no-overlap settings are documented
+in [OPERATOR_LIMITS.md](OPERATOR_LIMITS.md). Venue/total monetary caps may be
+`null` only with `available_cash_only: true`; current authenticated spendable
+cash is still mandatory. The local limits draft is not genuine launch evidence.
 
 Evidence records contain the kind, actual environment/account, observation and
 expiry timestamps, reviewer, source class, original artifact SHA-256, passed

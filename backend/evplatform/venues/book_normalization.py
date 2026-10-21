@@ -21,7 +21,8 @@ from ..core.models import Market, utcnow
 from ..core.native_accounting import NativeContract, NativeInstrument
 from ..core.native_pricing import NativeBook, NativeFeeBound, NativeLevel, instrument_fingerprint
 from ..core.readiness import digest_json
-from .common import decimal_value
+from .common import VenueError, decimal_value
+from .polymarket_us import alias
 from .prophetx import executable_level
 
 
@@ -50,8 +51,8 @@ class NativeMarketMapping(NativeContract):
             raise ValueError("Opposing liquidity requires an exactly binary canonical market")
         if i.venue == "novig" and (not self.opposing_outcome or self.opposing_outcome == i.native_outcome):
             raise ValueError("Novig requires a distinct, reviewed opposing outcome ID")
-        if i.venue == "kalshi" and i.native_outcome not in {"yes", "no"}:
-            raise ValueError("Kalshi native outcome must be yes or no")
+        if i.venue in {"kalshi", "polymarket_us"} and i.native_outcome not in {"yes", "no"}:
+            raise ValueError("Native outcome must be yes or no")
         if i.venue == "prophetx" and (not self.source_event_id or not self.source_market_id):
             raise ValueError("ProphetX mappings require native event and market scope")
         if self.source_timestamp_unit != "unknown" and not self.timestamp_unit_evidence.strip():
@@ -163,11 +164,79 @@ class NativeBookMapper:
                 return self._novig(client, frame, received)
             if venue == "prophetx":
                 return self._prophetx(frame, received)
+            if venue == "polymarket_us":
+                return self._polymarket_us(client, frame, received)
             return []
-        except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError):
+        except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError, VenueError):
             # A malformed update must invalidate already-published usable books.
             self.errors += 1
             return self.invalidate(venue)
+
+    def _polymarket_us(self, client, frame, received):
+        # A full MARKET_DATA frame is a replacement of the advertised top
+        # levels. Lite/trade/heartbeat delivery is never executable depth.
+        if (frame.get("type") != "polymarket_us_monitor" or frame.get("channel") != "markets"
+                or frame.get("kind") != "data"):
+            return []
+        data = alias(frame["payload"], "marketData", "market_data")
+        if data is None:
+            return []
+        slug = alias(data, "marketSlug", "market_slug")
+        mappings = self._index.get(("polymarket_us", slug), [])
+        if not mappings:
+            self.unmapped_updates += 1
+            return []
+        if (not client._ready.get("markets") or slug not in client.market_slugs
+                or client.books.get(slug) != data):
+            return self.invalidate("polymarket_us")
+        source = _clock(alias(data, "transactTime", "transact_time"), "unknown")
+        key = ("polymarket_us", slug)
+        prior = self._clocks.get(key, {}).get("snapshot")
+        if source is None or source > received or (prior is not None and source < prior):
+            return self.invalidate("polymarket_us")
+        self._clocks[key] = {"snapshot": source}
+        state = data.get("state")
+        if state == "MARKET_STATE_OPEN":
+            status = "active"
+        elif state in {"MARKET_STATE_PREOPEN", "MARKET_STATE_SUSPENDED", "MARKET_STATE_HALTED",
+                       "MARKET_STATE_MATCH_AND_CLOSE_AUCTION"}:
+            status = "suspended"
+        elif state in {"MARKET_STATE_EXPIRED", "MARKET_STATE_TERMINATED"}:
+            status = "closed"
+        else:
+            raise ValueError("Unknown Polymarket US market state")
+        sides = {}
+        for side in ("bids", "offers"):
+            rows = data[side]
+            if not isinstance(rows, list):
+                raise ValueError("Invalid Polymarket US depth")
+            prices, levels = set(), []
+            for row in rows:
+                if not isinstance(row, dict) or row.get("px", {}).get("currency") != "USD":
+                    raise ValueError("Invalid Polymarket US book currency")
+                p, q = row["px"]["value"], row["qty"]
+                if isinstance(p, (bool, float)) or isinstance(q, (bool, float)):
+                    raise ValueError("Inexact Polymarket US book values")
+                p, q = decimal_value(p), decimal_value(q)
+                if not p.is_finite() or not q.is_finite() or not 0 < p < 1 or q <= 0 or p in prices:
+                    raise ValueError("Invalid or duplicated Polymarket US depth level")
+                prices.add(p)
+                levels.append((p, q))
+            sides[side] = levels
+        if sides["bids"] and sides["offers"] and max(p for p, _ in sides["bids"]) >= min(p for p, _ in sides["offers"]):
+            raise ValueError("Crossed Polymarket US advertised book")
+        result = []
+        for mapping in mappings:
+            i = mapping.instrument
+            if (i.quantity_unit != "contracts" or i.price_format != "probability"
+                    or i.payout_per_unit_usd != 1 or i.instrument_id.startswith("caoc-")):
+                raise ValueError("Unsupported Polymarket US executable instrument")
+            levels = sides["offers"] if i.native_outcome == "yes" else [(Decimal(1)-p, q) for p, q in sides["bids"]]
+            # No exchange sequence exists in this retail schema; _book supplies
+            # only a monotonic LOCAL revision, never a sequence-gap claim.
+            result.append(self._book(mapping, levels if status == "active" else [], [source], 0,
+                                     received, status=status))
+        return result
 
     def _kalshi(self, client, frame, received):
         kind = frame.get("type")

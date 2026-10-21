@@ -1,6 +1,6 @@
 # Native venue implementation and validation status
 
-Protocol documentation was checked on **2026-10-20**. Native modules are implemented under `backend/evplatform/venues/`. Kalshi public discovery/books passed on sandbox and production; the primary personal production account also passed signed balance/key/inventory reads and authenticated order-book streaming. Its server-reported location attestation was current at that check and expires October 27, 2026 at 8:15:55 PM PDT. Novig paper testing verified signed echo, key scopes, catalog discovery, and authenticated WebSocket market/private snapshots, public book deltas, and private heartbeats. An unfunded paper subaccount and separate monitoring key were provisioned with account-owner authorization. ProphetX production testing verified key authentication, catalog and market reads, Talaria sign-in, five channel acknowledgements, and real market messages. Personal Polymarket US signed balance, public discovery/book, and authenticated market/private streams also passed; that plugin is monitoring only, without execution or account-risk reconciliation. No native sandbox fill or production order has been validated. Creating a client opens no connection. Demo liquidity and paper fills remain explicitly synthetic. See [current connection evidence](PROVIDER_PROTOCOLS.md).
+Protocol documentation was checked on **2026-10-20**. Native modules are implemented under `backend/evplatform/venues/`. Kalshi public discovery/books passed on sandbox and production; the primary personal production account also passed signed balance/key/inventory reads and authenticated order-book streaming. Its server-reported location attestation was current at that check and expires October 27, 2026 at 8:15:55 PM PDT. Novig paper testing verified signed echo, key scopes, catalog discovery, and authenticated WebSocket market/private snapshots, public book deltas, and private heartbeats. An unfunded paper subaccount and separate monitoring key were provisioned with account-owner authorization. ProphetX production testing verified key authentication, catalog and market reads, Talaria sign-in, five channel acknowledgements, and real market messages. Personal Polymarket US signed balance, public discovery/book, and authenticated market/private streams also passed; that running monitor is read-only. A separate guarded retail IOC executor is now implemented and tested offline; account identity, spendable cash and settlement proof still block native launch. No native sandbox fill or production order has been validated. Creating a client opens no connection. Demo liquidity and paper fills remain explicitly synthetic. See [current connection evidence](PROVIDER_PROTOCOLS.md).
 
 The dashboard does not arm a native venue just because credentials exist. The shipped risk engine blocks native execution until native market mappings, account permissions, fee schedules, unit conversions, settlement equivalence, and reconciliation have been validated. A transport implementation is not proof that an account may trade.
 
@@ -76,7 +76,7 @@ The legacy paper `Order`/`Fill` contract represents whole $1 units. Native routi
 
 The bridge returns `acknowledged`, with reconciliation required, for accepted placement. Cancel acknowledgement returns `cancel_pending`; it never releases exposure before reconciling racing fills. Uncertain network outcomes remain unknown and are never retried automatically. Restart restores these reservations and requires account reconciliation. Authoritative cumulative quantities, cost, payout and actual fees must agree before a position can settle; later contradictory evidence invalidates settlement durably and stops automation.
 
-Authenticated read-only account probes bind account identity and inventory for Novig and Kalshi. The current private snapshot/sequence comparison supports Novig; other venues remain blocked until equivalent private-state evidence is implemented and validated. ProphetX identity/balance can be read, but incomplete inventory and actual fill-fee evidence block financial completion. Numeric ProphetX quote clocks require a reviewed unit declaration because the inspected official schema does not specify the unit.
+Authenticated read-only account probes bind account identity and inventory for Novig and Kalshi. Private synchronization uses Novig sequences, Kalshi local connection/revision fences with authenticated REST watermarks, and ProphetX private revision checks. The new ProphetX inventory/fill/fee/settlement readers require an explicit funded-cash account review and complete authoritative records; genuine account-backed validation remains outstanding. Numeric ProphetX quote clocks require a reviewed unit declaration because the inspected official schema does not specify the unit.
 
 Unsupported in this release: automatic account/geo certification, automatic fee-schedule verification, live cross-provider mapping verification, production preflight evidence acquisition, native replacement/amend orchestration, RFQs/FIX, and general settlement across arbitrary/shared positions. These are visible launch blockers, not conditions bypassed by supplying an API key. See [the launch guide](GO_LIVE.md) for required evidence and configuration.
 
@@ -117,3 +117,33 @@ Neither adding a key nor starting demo mode sends a native order. The `.env` pla
 ```
 
 Tests cover signature verification, official Novig canonicalization vectors, exact signed request bytes, native price units/grids, complementary asks, sequence gaps/reconnects, private heartbeat loss, Talaria parsing/scopes/sign-in, native guards, partial fills, cancel races, unknown outcomes, and shared bridge authority. Every HTTP/WebSocket exchange is mocked. No test calls production.
+
+## Additional guarded lifecycle adapters
+
+Kalshi now includes a primary-account, buy-only binary IOC settlement adapter
+that checks complete actual fill accounting and paid settlement revenue. Shared
+positions, scalar/FMV settlements, special subaccounts and absent cash history
+remain blocked. Its fee-bound helper expires at the next scheduled fee change
+and includes fractional-fill rounding. See [Kalshi lifecycle](KALSHI_LIFECYCLE.md).
+
+ProphetX now joins matched details to actual wallet debits and commissions,
+validates complete paginated account history, and supports narrowly reviewed
+funded-cash normal win/loss payouts. It does not infer absent fees as zero or
+assume that exposure credits are cash. The account inception window and lack of
+GEC/LEC funding require explicit evidence. Pushes, voids, manual grades, credits
+and shared positions remain unsupported. These paths have offline fault tests;
+no real fill or payout has certified them.
+
+Polymarket US has a separate risk-gated retail IOC executor and cancel/reconcile
+interface; the public/account monitor itself remains GET-only. YES/NO mappings
+retain exact decimal prices and USD accounting. No undocumented client-order-ID
+or automatic resend is used after an unknown outcome. Exact private executions
+are required to establish cost and commissions; average price is insufficient.
+No authoritative retail endpoint has established the stable wallet identity,
+spendable-cash semantics and order-attributed actual settlement needed for a
+launch, so those checks remain false. Public settlement prices and unlinked
+account activities cannot stand in for cash settlement.
+
+See [operator limits](OPERATOR_LIMITS.md) for the $5/no-overlap policy and
+per-environment controller lock. Protocol implementation and passing offline
+tests do not establish permission or genuine execution certification.

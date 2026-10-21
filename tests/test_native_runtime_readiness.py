@@ -50,7 +50,7 @@ def runtime(market, quotes):
     strategy = SimpleNamespace(enabled=True)
     records = {"parlay_rest": provider, "novig": venue, "native_positive_ev": strategy}
     risk = SimpleNamespace(config=RiskConfig(live_max_order_stake=Decimal("1")), native_orders={},
-                           auto_trade=False, kill_switch=True)
+                           auto_trade=False, kill_switch=True, settled=set())
     engine = SimpleNamespace(registry=SimpleNamespace(records=records), risk=risk,
         settings=Settings(mode="sandbox"), markets={market.id: market},
         quotes={market.id: {str(index): q.model_copy(update={"provider": "parlay_rest", "source_time": utcnow()})
@@ -61,6 +61,7 @@ def runtime(market, quotes):
         signal_ledger=SimpleNamespace(started=True))
     native = NativeRuntime.__new__(NativeRuntime)
     native.engine, native.profile, native.profile_error, native.build_id = engine, profile, "", "OFFLINE fixture"
+    native.execution_lease = SimpleNamespace(held=True, scope=(profile.venue, profile.environment))
     native.books = {(market.id, "novig", "home"): book}
     native.mapper = SimpleNamespace(mapping_digest=profile.mapping_digest, mappings=())
     native.account_snapshots = {"novig": NativeAccountSnapshot(venue="novig", environment="sandbox",
@@ -69,6 +70,7 @@ def runtime(market, quotes):
     adapter = SimpleNamespace(client=client, bound_account_fingerprint=profile.account_fingerprint,
                                submit_intent=lambda *a: None, reconcile_native=lambda *a: None, cancel_native=lambda *a: None)
     native.manager = SimpleNamespace(adapters={"novig": adapter}, recovered=True, invalidated_settlements=set())
+    native._account_snapshot_fences = {"novig": native._ledger_fence()}
     return native
 
 
@@ -166,6 +168,31 @@ def test_adapter_account_and_connection_binding_are_required(runtime):
     adapter.bound_account_fingerprint = runtime.profile.account_fingerprint
     adapter.client = object()
     assert not runtime.runtime_facts().native_routing_supported
+
+
+def test_missing_or_wrong_execution_lease_blocks_native_routing(runtime):
+    runtime.execution_lease.held = False
+    assert not runtime.runtime_facts().native_routing_supported
+    runtime.execution_lease.held = True
+    runtime.execution_lease.scope = ("novig", "production")
+    assert not runtime.runtime_facts().native_routing_supported
+
+
+def test_available_cash_policy_requires_verified_cash_in_readiness(runtime):
+    runtime.engine.risk.config.available_cash_only = True
+    assert not runtime.runtime_facts().account_identity_verified
+    runtime.account_snapshots["novig"] = runtime.account_snapshots["novig"].model_copy(update={"cash_available_verified": True})
+    assert runtime.runtime_facts().account_identity_verified
+
+
+def test_missing_ledger_fence_or_probe_in_progress_never_looks_ready(runtime):
+    runtime._account_snapshot_fences.clear()
+    assert not runtime.runtime_facts().account_identity_verified
+    runtime._account_snapshot_fences["novig"] = runtime._ledger_fence()
+    runtime._account_probes = {"novig"}
+    assert not runtime.runtime_facts().account_identity_verified
+    runtime._account_probes.clear()
+    assert runtime.runtime_facts().account_identity_verified
 
 
 def test_private_missing_sequences_must_not_compare_equal(runtime):

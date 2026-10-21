@@ -44,6 +44,7 @@ def bind_offline_launch(engine, market, monkeypatch):
         "build_id": engine.native.build_id, "verified_by": "OFFLINE fixture; not real account evidence"})
         for item in profile.evidence)
     engine.native.profile = profile.model_copy(update={"evidence": evidence})
+    engine.native.execution_lease = SimpleNamespace(held=True, scope=("novig", "sandbox"), release=lambda: None)
     engine.native.mapper = SimpleNamespace(mapping_digest=profile.mapping_digest, mappings=())
     for name in ("parlay_rest", "novig"):
         record = engine.registry.records[name]
@@ -70,6 +71,7 @@ def bind_offline_launch(engine, market, monkeypatch):
         identity_verified=True, observed_at=utcnow(), balance_usd="10", open_order_count=0,
         position_count=0, reconciled=True, order_sequence=0, position_sequence=0,
         reason="OFFLINE account inventory fixture")
+    engine.native._account_snapshot_fences["novig"] = engine.native._ledger_fence()
     original_facts = engine.native.runtime_facts
     # The fake adapter supplies settlement/reconciliation fixtures. It cannot
     # satisfy the real native adapter capability and account-evidence checks.

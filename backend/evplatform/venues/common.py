@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -28,6 +28,17 @@ class CredentialsMissing(VenueError):
 
 class PreflightRequired(VenueError):
     pass
+
+
+class DispatchRejected(PreflightRequired):
+    """Synchronous final guard rejected before any transport write occurred.
+
+    Emitted only by the final before_send boundary, never for a response,
+    timeout, cancellation or exception raised by the actual transport send.
+    """
+
+    def __init__(self):
+        super().__init__("Native dispatch rejected before transmission")
 
 
 class VenueHTTPError(VenueError):
@@ -153,11 +164,24 @@ class NativeTransport:
             await self.http.aclose()
         self.health = "disconnected"
 
-    async def _request(self, request: httpx.Request, *, mutation_id: str | None = None) -> dict:
+    async def _request(self, request: httpx.Request, *, mutation_id: str | None = None,
+                       before_send: Callable[[], None] | None = None) -> dict:
         async with self._request_lock:
             wait = self._next_request - time.monotonic()
-            if wait > 0:
+            while wait > 0:
                 await asyncio.sleep(wait)
+                # Windows timer resolution can wake asyncio slightly before
+                # its deadline. Do not dispatch early or check a future guard
+                # against the wrong side of the actual pacing boundary.
+                wait = self._next_request - time.monotonic()
+            # Pacing/lock waits can outlive preflight, a quote, or an execution
+            # lease. Revalidate synchronously at the final transport boundary.
+            # Cancellation callers omit the placement guard deliberately.
+            if before_send is not None:
+                try:
+                    before_send()
+                except Exception:
+                    raise DispatchRejected() from None
             self._next_request = time.monotonic() + 1 / self.settings.requests_per_second
             self.request_count += 1
             try:
@@ -207,10 +231,15 @@ class NativeTransport:
                 raise VenueError(f"{self.venue_id}: unexpected response envelope")
             return parsed
 
-    async def _send_ws(self, payload: dict) -> None:
+    async def _send_ws(self, payload: dict, *, before_send: Callable[[], None] | None = None) -> None:
         if self._ws is None:
             raise VenueError("WebSocket is not connected")
         async with self._write_lock:
+            if before_send is not None:
+                try:
+                    before_send()
+                except Exception:
+                    raise DispatchRejected() from None
             await self._ws.send(json.dumps(payload, separators=(",", ":"), allow_nan=False))
 
     async def _backoff(self, failures: int) -> None:

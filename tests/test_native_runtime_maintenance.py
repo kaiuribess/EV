@@ -18,6 +18,7 @@ def runtime_for(system):
     engine = SimpleNamespace(risk=risk, storage=storage, bus=manager.bus,
                              metrics=manager.metrics, oms=SimpleNamespace(lock=manager.lock))
     runtime = NativeRuntime(engine)
+    runtime.execution_lease = SimpleNamespace(held=True, scope=("novig", "sandbox"))
     runtime.manager = manager
     adapter.client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
     return runtime
@@ -121,6 +122,7 @@ async def test_first_private_snapshot_binds_adapter_before_account_probe(tmp_pat
     engine = Engine(Settings(database_path=str(tmp_path / "unused-first-frame.db")))
     native = engine.native
     native.profile = SimpleNamespace(venue="novig", environment="sandbox")
+    native.execution_lease = SimpleNamespace(held=True, scope=("novig", "sandbox"))
     native.mapper = NativeBookMapper([mapping(market, "novig")])
     def no_network(request):
         raise AssertionError("First frame binding must do no network work")

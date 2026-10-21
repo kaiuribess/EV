@@ -74,7 +74,7 @@ class RiskEngine:
         if not self.auto_trade:
             raise RiskRejected("Automatic trading is disabled")
         self.roll_day()
-        if self.daily_realized <= -self.config.daily_loss_limit:
+        if self.config.daily_loss_limit is not None and self.daily_realized <= -self.config.daily_loss_limit:
             raise RiskRejected("Daily realized loss limit reached")
 
     def check_native_reservation(self, order, *, reserved=False):
@@ -111,7 +111,7 @@ class RiskEngine:
         if order.player_id:
             limits.append(([o for o in others if o.player_id == order.player_id], self.config.max_player_exposure, "player"))
         for orders, limit, label in limits:
-            if sum((self.cost(o) for o in orders), Decimal(0)) + cost > limit:
+            if limit is not None and sum((self.cost(o) for o in orders), Decimal(0)) + cost > limit:
                 raise RiskRejected(f"Native {label} exposure limit reached")
 
     def roll_day(self):
@@ -175,7 +175,7 @@ class RiskEngine:
             limits.append((sum(self.cost(o) for o in self.all_orders() if o.player_id == order.player_id),
                            self.config.max_player_exposure, "player"))
         for exposure, limit, label in limits:
-            if exposure > limit:
+            if limit is not None and exposure > limit:
                 raise RiskRejected(f"Current {label} exposure limit is below reserved exposure")
 
     def check_position_conflicts(self, candidate, market: Market, exclude_order_id: str | None = None):
@@ -202,6 +202,11 @@ class RiskEngine:
                 continue
             same_event = order.event_id == market.event_id
             same_market = order.market_id == market.id
+            same_player = bool(market.player_id and order.player_id == market.player_id)
+            if self.config.block_overlapping_events and same_event:
+                raise RiskRejected("Overlapping event already reserved across accounts and venues")
+            if self.config.block_overlapping_players and same_player:
+                raise RiskRejected("Overlapping player already reserved across accounts and venues")
             # All built-in and reviewed families are event scoped. Avoid
             # repeatedly hashing unrelated event snapshots in the hot path.
             if not same_event and not same_market:
@@ -233,6 +238,8 @@ class RiskEngine:
             raise RiskRejected("Invalid candidate economics")
         if mode not in {"demo", "paper"}:
             raise RiskRejected("Native routing requires a verified venue mapping and live preflight")
+        if self.config.max_venue_exposure is None or self.config.max_total_exposure is None:
+            raise RiskRejected("Paper trading requires explicit simulated exposure caps")
         if (market.settlement.contract_type != "binary" or market.settlement.payout != 1 or
                 market.settlement.push_rule != "not_applicable" or market.settlement.currency != "USD"):
             raise RiskRejected("Current paper sizing requires a verified USD 1 binary payout without pushes")
@@ -275,7 +282,7 @@ class RiskEngine:
             limits.append((sum(self.cost(o) for o in self.all_orders() if o.player_id == market.player_id),
                            self.config.max_player_exposure, "player"))
         for exposure, limit, label in limits:
-            if exposure + cost > limit:
+            if limit is not None and exposure + cost > limit:
                 raise RiskRejected(f"{label.title()} exposure limit reached")
         order_id = str(uuid4())
         order = Order(

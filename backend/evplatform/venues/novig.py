@@ -9,7 +9,7 @@ import time
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 from urllib.parse import quote, quote_from_bytes, unquote_to_bytes
 from uuid import UUID
 
@@ -22,8 +22,9 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 
 from .common import (
     CredentialsMissing, NativeSettings, NativeTransport, SequenceGap,
-    SequenceTracker, UnknownOrderOutcome, VenueError, VenueHTTPError, decimal_value, json_body,
+    SequenceTracker, UnknownOrderOutcome, VenueError, VenueHTTPError, PreflightRequired, decimal_value, json_body,
 )
+from .dispatch import authenticated_request_guard, placement_guard
 
 
 class NovigSettings(NativeSettings):
@@ -222,13 +223,22 @@ class NovigClient(NativeTransport):
             "Content-Type": "application/json",
         }
 
-    async def request(self, method: str, path: str, *, params=None, body=None, mutation_id=None):
+    async def request(self, method: str, path: str, *, params=None, body=None, mutation_id=None,
+                      before_send: Callable[[], None] | None = None):
         raw_body = json_body(body)
         request = self.http.build_request(method, self.HOSTS[self.settings.environment] + path,
                                           params=params, content=raw_body)
         raw_path = request.url.raw_path.decode("ascii").split("?")[0]
         request.headers.update(self.headers(method, raw_path, request.url.query.decode("ascii"), raw_body))
-        return await self._request(request, mutation_id=mutation_id)
+        guard = authenticated_request_guard(self, before_send)
+
+        def dispatch():
+            guard()
+            # Recompute the exact signed request timestamp after rate pacing.
+            request.headers.update(self.headers(method, raw_path, request.url.query.decode("ascii"), raw_body))
+
+        return await self._request(request, mutation_id=mutation_id,
+                                   before_send=dispatch if guard is not None else None)
 
     async def connect(self) -> dict:
         result = await self.request("POST", "/v3/echo", body={"probe": "evplatform"})
@@ -293,15 +303,16 @@ class NovigClient(NativeTransport):
         return {"outcomeId": outcome_id, "price": format(price, ".3f"),
                 "qty": quantity, "clientId": client_order_id, "tif": tif}
 
-    async def submit_order(self, body: dict) -> dict:
+    async def submit_order(self, body: dict, *, before_send: Callable[[], None] | None = None) -> dict:
         client_id = body.get("clientId", "")
-        self.settings.gate.require(client_id, self.settings.environment)
-        return await self.request("POST", "/v3/orders", body=body, mutation_id=client_id)
+        guard = placement_guard(self, client_id, before_send)
+        return await self.request("POST", "/v3/orders", body=body, mutation_id=client_id, before_send=guard)
 
     async def cancel_order(self, order_id: str) -> dict:
         return await self.request("DELETE", f"/v3/orders/{quote(order_id, safe='')}", mutation_id=order_id)
 
-    async def _command(self, verb: str, payload, *, mutation_id: str | None = None, wait=True):
+    async def _command(self, verb: str, payload, *, mutation_id: str | None = None, wait=True,
+                       before_send: Callable[[], None] | None = None):
         if self._ws is None:
             raise VenueError("Novig stream must be running before sending WebSocket commands")
         self._nonce += 1
@@ -310,10 +321,16 @@ class NovigClient(NativeTransport):
         if wait:
             self._pending[nonce] = future
         try:
-            await self._send_ws({"nonce": nonce, verb: payload})
+            command = {"nonce": nonce, verb: payload}
+            if before_send is None:
+                await self._send_ws(command)
+            else:
+                await self._send_ws(command, before_send=before_send)
             if not wait:
                 return nonce
             return await asyncio.wait_for(future, self.settings.timeout_seconds)
+        except PreflightRequired:
+            raise  # The synchronous guard rejected before any socket write.
         except (TimeoutError, ConnectionClosed, OSError, VenueError):
             if mutation_id:
                 raise UnknownOrderOutcome(mutation_id) from None
@@ -321,10 +338,18 @@ class NovigClient(NativeTransport):
         finally:
             self._pending.pop(nonce, None)
 
-    async def submit_ws(self, body: dict) -> dict:
+    async def submit_ws(self, body: dict, *, before_send: Callable[[], None] | None = None) -> dict:
         client_id = body.get("clientId", "")
-        self.settings.gate.require(client_id, self.settings.environment)
-        return await self._command("place", {"orders": [body]}, mutation_id=client_id)
+        guard = placement_guard(self, client_id, before_send)
+        socket = self._ws
+        signed_guard = authenticated_request_guard(self, guard)
+
+        def dispatch():
+            if self._ws is not socket:
+                raise PreflightRequired("Native WebSocket connection changed before placement")
+            signed_guard()
+
+        return await self._command("place", {"orders": [body]}, mutation_id=client_id, before_send=dispatch)
 
     async def cancel_ws(self, order_id: str) -> dict:
         return await self._command("cancel", {"orderIds": [order_id]}, mutation_id=order_id)

@@ -366,7 +366,7 @@ async def test_unexpected_child_termination_wakes_consumer_and_clears_readiness(
     await client.disconnect()
 
 
-async def test_monitor_registration_disabled_and_private_frames_never_enter_pricing(monkeypatch):
+async def test_monitor_registration_disabled_and_private_frames_remain_backend_only(monkeypatch):
     monkeypatch.delenv("POLYMARKET_US_API_KEY_ID", raising=False)
     monkeypatch.delenv("POLYMARKET_US_SECRET_KEY", raising=False)
     engine = SimpleNamespace(metrics=SimpleNamespace(counters=Counter()),
@@ -382,6 +382,8 @@ async def test_monitor_registration_disabled_and_private_frames_never_enter_pric
         yield {"type": "transport_invalidated"}
     record.plugin.client = SimpleNamespace(stream_updates=updates)
     await record.plugin._run()
-    engine.native.on_frame.assert_not_called()
+    assert engine.native.on_frame.await_count == 3
+    assert engine.native.on_frame.await_args_list[0].args[0] == "polymarket_us"
+    assert record.plugin.manifest.capabilities["native_execution"] is False
     assert record.plugin.frames == 1
     assert "private_account_data" not in json.dumps(registry.public())

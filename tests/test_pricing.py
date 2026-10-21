@@ -52,11 +52,13 @@ def test_duplicate_is_not_independent(market, quotes, pricing):
 
 
 @pytest.mark.parametrize("update", [
-    {"source_time": None}, {"source_time": utcnow() - timedelta(seconds=20)},
-    {"source_time": utcnow() + timedelta(seconds=20)}, {"status": "suspended"},
+    {"source_time": None}, {"source_time": timedelta(seconds=-20)},
+    {"source_time": timedelta(seconds=20)}, {"status": "suspended"},
     {"status": "withdrawn"},
 ])
 def test_invalid_references(market, quotes, pricing, update):
+    if isinstance(update.get("source_time"), timedelta):
+        update = {**update, "source_time": utcnow() + update["source_time"]}
     config = pricing.model_copy(update={"required_books": ["circa"]})
     quotes[1] = quotes[1].model_copy(update=update)
     with pytest.raises(NoSignal):

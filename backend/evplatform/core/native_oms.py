@@ -6,6 +6,7 @@ are injected; importing or recovering this module never submits an order.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -14,7 +15,7 @@ from pydantic import Field, model_validator
 
 from .conflicts import UNRESOLVED, reviewed_correlations, risk_family
 from .models import Contract, Envelope, Market, OrderStatus, utcnow
-from .native_accounting import NativeAccounting, NativeCumulativeSnapshot, NativeOrderIntent
+from .native_accounting import NativeAccounting, NativeCumulativeSnapshot, NativeFill, NativeOrderIntent
 from .risk import RiskRejected
 
 
@@ -107,6 +108,8 @@ class NativeOrderManager:
         self.invalidated_settlements: set[str] = set()
         self._accounted_settlements: set[tuple[str, str]] = set()
         self._reconcile_reads: dict[str, asyncio.Task] = {}
+        self._fill_evidence: dict[str, dict[str, NativeFill]] = {}
+        self._fill_conflicts: set[str] = set()
         self.recovered = False
 
     async def start(self):
@@ -115,6 +118,8 @@ class NativeOrderManager:
             ("CREATE TABLE IF NOT EXISTS native_reconciliations (seq INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, data TEXT NOT NULL)", ()),
             ("CREATE TABLE IF NOT EXISTS native_settlements (order_id TEXT PRIMARY KEY, data TEXT NOT NULL)", ()),
             ("CREATE TABLE IF NOT EXISTS native_settlement_invalidations (order_id TEXT PRIMARY KEY, reason TEXT NOT NULL)", ()),
+            ("CREATE TABLE IF NOT EXISTS native_fill_evidence (order_id TEXT NOT NULL, fill_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(order_id,fill_id))", ()),
+            ("CREATE TABLE IF NOT EXISTS native_fill_conflicts (order_id TEXT PRIMARY KEY, reason TEXT NOT NULL)", ()),
         ], (), True)
         rows = await (await self.storage.connection.execute("SELECT data FROM native_orders")).fetchall()
         for row in rows:
@@ -125,6 +130,7 @@ class NativeOrderManager:
                 await self._save(order)
                 self.risk.halt("Native orders need restart reconciliation")
             self.risk.native_orders[order.id] = order
+        await self._recover_fill_evidence()
         invalid = await (await self.storage.connection.execute("SELECT order_id FROM native_settlement_invalidations")).fetchall()
         self.invalidated_settlements = {row[0] for row in invalid}
         if self.invalidated_settlements:
@@ -145,10 +151,199 @@ class NativeOrderManager:
                 self._accounted_settlements.add(accounting_key)
         self.recovered = True
 
+    def recovered_fills(self, order_id: str) -> tuple[NativeFill, ...]:
+        """Exact journal evidence for adapter restoration; never synthetic fills."""
+        if order_id in self._fill_conflicts:
+            raise ValueError("Conflicting durable native fill evidence requires review")
+        return tuple(sorted(self._fill_evidence.get(order_id, {}).values(),
+                            key=lambda fill: (fill.cumulative_quantity_after or Decimal(0), fill.fill_id)))
+
+    def _stage_fills(self, order, fills):
+        staged = dict(self._fill_evidence.get(order.id, {}))
+        new = []
+        for raw in fills:
+            fill = NativeFill.model_validate(raw)
+            if fill.observed_at > utcnow() or (fill.filled_at and fill.filled_at > fill.observed_at):
+                raise ValueError("Future native execution evidence")
+            # Validate individual economics even when intervening executions
+            # are still missing. Keep its ORIGINAL cumulative watermark in the
+            # journal; removing it here permits only isolated validation.
+            NativeAccounting(order.intent, order.venue_order_id).apply_fill(
+                fill.model_copy(update={"cumulative_quantity_after": None}))
+            watermark = fill.cumulative_quantity_after
+            if watermark is not None and not fill.quantity <= watermark <= order.quantity:
+                raise ValueError("Invalid native fill watermark")
+            old = staged.get(fill.fill_id)
+            if old:
+                if old.model_dump(exclude={"observed_at"}) != fill.model_dump(exclude={"observed_at"}):
+                    raise ValueError("Conflicting duplicate native fill ID")
+                continue
+            if watermark is not None:
+                for known in staged.values():
+                    end = known.cumulative_quantity_after
+                    if end is not None and max(watermark-fill.quantity, end-known.quantity) < min(watermark, end):
+                        raise ValueError("Native execution intervals overlap")
+            staged[fill.fill_id] = fill
+            new.append(fill)
+        if sum((fill.quantity for fill in staged.values()), Decimal(0)) > order.quantity:
+            raise ValueError("Journaled fills exceed durable order quantity")
+        if sum((fill.fee_usd for fill in staged.values()), Decimal(0)) > order.intent.max_fee_usd:
+            raise ValueError("Journaled fill fees exceed reserved order bound")
+        return staged, new
+
+    async def _persist_fill_evidence(self, order, fills):
+        if order.id in self._fill_conflicts:
+            raise ValueError("Conflicting durable native fill evidence requires review")
+        staged, new = self._stage_fills(order, fills)
+        if new:
+            try:
+                await self.storage.write([
+                    ("INSERT INTO native_fill_evidence VALUES(?,?,?)", (order.id, fill.fill_id, fill.model_dump_json()))
+                    for fill in new], (), True)
+            except BaseException:
+                self.risk.halt("Native fill evidence persistence failed")
+                raise
+            self._fill_evidence[order.id] = staged
+
+    def _validate_fill_snapshot(self, order, snapshot):
+        fills = self.recovered_fills(order.id)
+        if not fills:
+            return
+        pairs = (("quantity", "cumulative_quantity"), ("cost_usd", "cumulative_cost_usd"),
+                 ("gross_payout_usd", "cumulative_gross_payout_usd"), ("fee_usd", "cumulative_fee_usd"))
+        totals = {source: sum((getattr(fill, source) for fill in fills), Decimal(0)) for source, _ in pairs}
+        if any(totals[source] > getattr(snapshot, target) for source, target in pairs):
+            raise ValueError("Journaled executions exceed aggregate financial evidence")
+        if totals["quantity"] == snapshot.cumulative_quantity and any(
+                totals[source] != getattr(snapshot, target) for source, target in pairs):
+            raise ValueError("Complete execution journal differs from aggregate cash")
+        if any(fill.cumulative_quantity_after is not None and fill.cumulative_quantity_after > snapshot.cumulative_quantity
+               for fill in fills):
+            raise ValueError("Journaled execution is newer than aggregate quantity")
+
+    async def _fill_conflict(self, order, report=None):
+        self.risk.halt("Conflicting native execution evidence requires review")
+        exposure = order.reserved_cost
+        if report:
+            exposure = max(exposure, sum((fill.cost_usd+fill.fee_usd for fill in report.fills), Decimal(0)))
+        updated = order.model_copy(update={"status": OrderStatus.UNKNOWN, "reconciliation_complete": False,
+            "reason": "Conflicting durable native fill evidence", "unverified_exposure_usd": exposure})
+        statements = [
+            ("INSERT OR REPLACE INTO native_fill_conflicts VALUES(?,?)", (order.id, updated.reason)),
+            ("UPDATE native_orders SET status=?,data=? WHERE id=?", (updated.status.value,updated.model_dump_json(),order.id)),
+            ("INSERT OR REPLACE INTO native_settlement_invalidations SELECT ?,? WHERE EXISTS(SELECT 1 FROM native_settlements WHERE order_id=?)",
+             (order.id,updated.reason,order.id)),
+        ]
+        if report is not None:
+            statements.append(("INSERT INTO native_reconciliations VALUES(NULL,?,?)", (order.id,report.model_dump_json())))
+        await self.storage.write(statements, (), True)
+        self._fill_conflicts.add(order.id)
+        self.risk.native_orders[order.id] = updated
+        if order.id in self.risk.settled:
+            self._invalidate_settlement_memory(order)
+        await self.bus.publish(Envelope(schema_name="native.order",source="native_oms",payload=updated))
+        return updated
+
+    async def _recover_fill_evidence(self):
+        self._fill_evidence = {}
+        self._fill_conflicts = {row[0] for row in await (await self.storage.connection.execute(
+            "SELECT order_id FROM native_fill_conflicts")).fetchall()}
+        rows = await (await self.storage.connection.execute("SELECT order_id,data FROM native_fill_evidence")).fetchall()
+        for order_id, data in rows:
+            order = self.risk.native_orders.get(order_id)
+            if order is None:
+                self.risk.halt("Native fill journal has no durable order binding")
+                raise ValueError("Orphaned native fill journal")
+            try:
+                staged, _ = self._stage_fills(order, [NativeFill.model_validate_json(data)])
+                self._fill_evidence[order_id] = staged
+            except ValueError:
+                await self._fill_conflict(order)
+        # Backward-compatible migration: older versions stored exact fills only
+        # inside complete reconciliation reports. Preserve them before the
+        # adapters reconnect; incomplete reports now use the same journal.
+        rows = await (await self.storage.connection.execute("SELECT order_id,data FROM native_reconciliations ORDER BY seq")).fetchall()
+        for order_id, data in rows:
+            if order_id in self._fill_conflicts:
+                continue
+            raw = json.loads(data)
+            if not raw.get("fills"):
+                continue
+            order = self.risk.native_orders.get(order_id)
+            if order is None:
+                self.risk.halt("Native reconciliation has no durable order binding")
+                raise ValueError("Orphaned native reconciliation")
+            try:
+                if raw.get("native_order_id") != order.venue_order_id or raw.get("client_order_id") != order.client_order_id:
+                    raise ValueError("Historical fill identity mismatch")
+                await self._persist_fill_evidence(order, raw["fills"])
+            except ValueError:
+                await self._fill_conflict(order)
+        for order_id in set(self._fill_evidence) | self._fill_conflicts:
+            order = self.risk.native_orders[order_id]
+            if order_id in self._fill_conflicts:
+                self.risk.halt("Conflicting durable native fill evidence requires review")
+                continue
+            # A crash can happen after exact fill journaling and before its
+            # aggregate order update. Never keep a stale terminal/settled flag.
+            accounting = NativeAccounting(order.intent, order.venue_order_id)
+            try:
+                if order.last_snapshot is None:
+                    raise ValueError("Journaled executions require a fresh aggregate")
+                accounting.apply_cumulative(order.last_snapshot)
+                self._validate_fill_snapshot(order, order.last_snapshot)
+                if accounting.totals.quantity != order.filled_quantity or accounting.totals.cost_usd != order.filled_cost_usd or accounting.totals.fee_usd != order.fees or accounting.totals.gross_payout_usd != order.gross_payout_usd:
+                    raise ValueError("Unapplied journaled executions")
+            except ValueError:
+                self.risk.halt("Journaled native executions need fresh reconciliation")
+                await self._save(order.model_copy(update={"status":OrderStatus.UNKNOWN,"reconciliation_complete":False,
+                    "reason":"Journaled native executions need fresh reconciliation"}))
+                await self.storage.write("INSERT OR REPLACE INTO native_settlement_invalidations SELECT ?,? WHERE EXISTS(SELECT 1 FROM native_settlements WHERE order_id=?)",
+                    (order_id,"Journaled executions differ from durable aggregate",order_id),True)
+
     def register(self, venue: str, adapter):
         if venue in self.adapters:
             raise ValueError("Native adapter already registered")
         self.adapters[venue] = adapter
+
+    async def record_private_fills(self, order_id, fills, *, adapter):
+        """Durably retain owned executions before aggregate reconciliation.
+
+        Caller supplies the actual registered adapter so a replaced account's
+        private stream cannot write into a previous account's durable ledger.
+        This never fills an order or releases its reservation by itself.
+        """
+        fills = tuple(fills)
+        async with self.lock:
+            order = self.risk.native_orders[order_id]
+            if (self.adapters.get(order.venue) is not adapter or
+                    getattr(adapter,"bound_account_fingerprint",None) != order.account_fingerprint):
+                self.risk.halt("Private execution account binding is not verified")
+                return order
+            try:
+                await self._persist_fill_evidence(order, fills)
+            except ValueError:
+                from ..venues.reconciliation import NativeOrderReport
+                evidence = NativeOrderReport(native_order_id=order.venue_order_id,client_order_id=order.client_order_id,
+                    status="unknown",fills=tuple(fills),reason="Conflicting private execution evidence")
+                return await self._fill_conflict(order,evidence)
+            try:
+                if order.last_snapshot is None:
+                    return order
+                self._validate_fill_snapshot(order, order.last_snapshot)
+            except ValueError:
+                # A late execution must reopen a formerly terminal liability
+                # until its updated aggregate is independently reconciled.
+                updated = order.model_copy(update={"status":OrderStatus.UNKNOWN,"reconciliation_complete":False,
+                    "reason":"Private execution requires updated financial reconciliation"})
+                await self._save(updated)
+                if order.id in self.risk.settled:
+                    self.risk.halt("Private execution changed after settlement")
+                    await self.storage.write("INSERT OR REPLACE INTO native_settlement_invalidations VALUES(?,?)",
+                        (order.id,"Private execution changed after settlement"),True)
+                    self._invalidate_settlement_memory(order)
+                return updated
+            return order
 
     async def _save(self, order):
         try:
@@ -197,12 +392,33 @@ class NativeOrderManager:
                 order = await self._save(order.model_copy(update={"status": OrderStatus.OPEN,
                     "venue_order_id": native_id, "acknowledged_at": utcnow(),
                     "reconciliation_complete": False, "reason": "Acknowledged; private financial reconciliation pending"}))
+                adapter = self.adapters[order.venue]
+                if hasattr(adapter,"execution_fills"):
+                    # A WS fill may precede the HTTP acknowledgement. Once its
+                    # exact native ID is durable, flush buffered evidence before
+                    # releasing the routing lock or waiting for a later poll.
+                    fills=adapter.execution_fills(native_id,order.intent)
+                    try:
+                        await self._persist_fill_evidence(order,fills)
+                    except ValueError:
+                        from ..venues.reconciliation import NativeOrderReport
+                        order=await self._fill_conflict(order,NativeOrderReport(native_order_id=native_id,
+                            client_order_id=order.client_order_id,status="unknown",fills=tuple(fills)))
                 self.metrics.observe("native_order_ack_ms", (order.acknowledged_at-order.submitted_at).total_seconds()*1000)
             except (Exception, asyncio.CancelledError) as exc:
-                state = OrderStatus.UNKNOWN if transmission_started else OrderStatus.REJECTED
+                from ..venues.common import DispatchRejected
+                adapter = self.adapters[order.venue]
+                known_bindings = getattr(adapter,"_native_intents",{})
+                known_unsent = (isinstance(exc,DispatchRejected) and order.venue_order_id is None
+                    and order.acknowledged_at is None and not order.filled_quantity
+                    and not self._fill_evidence.get(order.id) and order.id not in self._fill_conflicts
+                    and not any(intent.client_order_id == order.client_order_id for intent in known_bindings.values()))
+                uncertain = transmission_started and not known_unsent
+                state = OrderStatus.UNKNOWN if uncertain else OrderStatus.REJECTED
                 order = await asyncio.shield(self._save(order.model_copy(update={"status": state,
-                    "reason": f"Native transmission outcome uncertain: {type(exc).__name__}" if transmission_started else "Native pre-transmission validation rejected"})))
-                if transmission_started:
+                    "reconciliation_complete": known_unsent,
+                    "reason": f"Native transmission outcome uncertain: {type(exc).__name__}" if uncertain else "Native pre-transmission validation rejected"})))
+                if uncertain:
                     self.risk.halt("Unknown native outcome; reconcile without retrying placement")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
@@ -268,6 +484,13 @@ class NativeOrderManager:
         async def read_and_apply():
             async with self.lock:
                 captured = self.risk.native_orders[order_id]
+                # A locally confirmed unsent rejection has no exchange order
+                # to discover. Periodic account maintenance must not turn it
+                # into a permanently unknown transmission after restart.
+                if (captured.status == OrderStatus.REJECTED and captured.reconciliation_complete
+                        and captured.venue_order_id is None and not captured.filled_quantity
+                        and not self._fill_evidence.get(order_id) and order_id not in self._fill_conflicts):
+                    return captured
                 adapter = self.adapters.get(captured.venue)
                 client = getattr(adapter, "client", None)
                 if adapter is None or getattr(adapter, "bound_account_fingerprint", None) != captured.account_fingerprint:
@@ -337,10 +560,21 @@ class NativeOrderManager:
         if (report.native_order_id != order.venue_order_id or report.client_order_id != order.client_order_id):
             self.risk.halt("Native reconciliation identity mismatch")
             raise ValueError("Native reconciliation identity mismatch")
+        try:
+            await self._persist_fill_evidence(order, report.fills)
+        except ValueError:
+            return await self._fill_conflict(order, report)
         if not report.financial_complete or report.snapshot is None:
             self.risk.halt("Native execution fees/fills require complete reconciliation")
-            return await self._save(order.model_copy(update={"status": OrderStatus.UNKNOWN,
-                "reconciliation_complete": False, "reason": report.reason or "Incomplete native financial evidence"}))
+            updated = order.model_copy(update={"status": OrderStatus.UNKNOWN,
+                "reconciliation_complete": False, "reason": report.reason or "Incomplete native financial evidence"})
+            await self.storage.write([
+                ("INSERT INTO native_reconciliations VALUES(NULL,?,?)", (order.id,report.model_dump_json())),
+                ("UPDATE native_orders SET status=?,data=? WHERE id=?", (updated.status.value,updated.model_dump_json(),order.id)),
+            ],(),True)
+            self.risk.native_orders[order.id]=updated
+            await self.bus.publish(Envelope(schema_name="native.order",source="native_oms",payload=updated))
+            return updated
         return await self._apply_snapshot(order, report)
 
     async def _apply_snapshot(self, order, report):
@@ -359,6 +593,7 @@ class NativeOrderManager:
             if order.last_snapshot:
                 accounting.apply_cumulative(order.last_snapshot)
             accounting.apply_cumulative(snapshot)
+            self._validate_fill_snapshot(order, snapshot)
             if report.status != snapshot.status:
                 raise ValueError("Native status and financial snapshot disagree")
             if report.terminal != (snapshot.status in {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED}):

@@ -3,7 +3,7 @@ import pytest
 from decimal import Decimal
 from types import SimpleNamespace
 
-from evplatform.core.models import OrderStatus
+from evplatform.core.models import OrderStatus, utcnow
 
 from evplatform.venues.account_probe import probe_native_account, novig_wallet_fingerprint
 from evplatform.venues.novig import NovigClient, NovigSettings
@@ -133,10 +133,14 @@ async def test_prophetx_signed_registration_identity_does_not_claim_inventory_re
         client = ProphetXClient(client=http)
         client._signin_confirmed = True
         client._authenticated_user_id = "account"
+        client.health_check = lambda: {"authenticated": True}
         async def request(method, path):
             assert method == "GET" and path == "/v4/mm/get_balance"
-            return {"data": {"balance": "50.23"}}
+            return {"data": {"balance": "50.23", "gec_balance": "0",
+                "matched_order_balance": "0", "unmatched_order_balance": "0",
+                "unmatched_order_balance_status": "succeed",
+                "unmatched_order_last_synced_at": utcnow().isoformat()}}
         client.request = request
         snapshot = await probe_native_account(client)
     assert snapshot.identity_verified and str(snapshot.balance_usd) == "50.23"
-    assert not snapshot.reconciled
+    assert not snapshot.reconciled and not snapshot.cash_available_verified

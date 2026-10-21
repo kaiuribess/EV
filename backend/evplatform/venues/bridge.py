@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 from decimal import Decimal
-from typing import Literal
+from typing import Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -90,6 +90,9 @@ class NativeExecutionVenue(ExecutionVenue):
         self._private_sequences = SequenceTracker()
         self._confirmed_filled: dict[str, Decimal] = {}
         self._private_cancelled: set[str] = set()
+        # Runtime injects the current risk, lease, readiness and pricing checks.
+        # This runs synchronously after transport pacing, for placements only.
+        self.dispatch_guard: Callable[[NativeOrderIntent], None] | None = None
 
     def _mapping(self, order: Order) -> VerifiedVenueMapping:
         mapping = self.mappings.get((order.market_id, order.outcome))
@@ -130,7 +133,8 @@ class NativeExecutionVenue(ExecutionVenue):
                 raise PreflightRequired("Core native quantity normalization is not yet supported for this venue")
             body = self.client.order_body(mapping.native_instrument_id, mapping.native_outcome,
                                           order.price, Decimal(order.quantity), order.client_order_id)
-            self.client.settings.gate = NativeTradingGate(
+            client, settings, authority = self.client, self.client.settings, self.authority
+            settings.gate = NativeTradingGate(
                 enabled=True, preflight_valid_until=self.preflight.valid_until,
                 account_authorized=self.preflight.account_authorized,
                 geographic_eligibility_verified=self.preflight.geographic_eligibility_verified,
@@ -139,10 +143,16 @@ class NativeExecutionVenue(ExecutionVenue):
             # Remember even an unknown outcome. Durable deduplication/restart
             # remains the OMS's responsibility; this is a second local guard.
             self._transmitted.add(order.client_order_id)
+
+            def before_send():
+                if self.client is not client or self.authority is not authority or self._mapping(order) != mapping:
+                    raise PreflightRequired("Native adapter or reviewed mapping changed before placement")
+                self._preflight(order)
+
             try:
-                response = await self.client.submit_order(body)
+                response = await client.submit_order(body, before_send=before_send)
             finally:
-                self.client.settings.gate = NativeTradingGate()
+                settings.gate = NativeTradingGate()
             native_id = response.get("order_id")
             if not native_id:
                 raise UnknownOrderOutcome(order.client_order_id)
@@ -250,7 +260,9 @@ class NativeExecutionVenue(ExecutionVenue):
             body = self.build_native_request(intent)
             if intent.client_order_id in self._transmitted:
                 raise UnknownOrderOutcome(intent.client_order_id)
-            self.client.settings.gate = NativeTradingGate(
+            client, settings, authority = self.client, self.client.settings, self.authority
+            dispatch_guard = self.dispatch_guard
+            settings.gate = NativeTradingGate(
                 enabled=True, preflight_valid_until=self.preflight.valid_until,
                 account_authorized=self.preflight.account_authorized,
                 geographic_eligibility_verified=self.preflight.geographic_eligibility_verified,
@@ -258,13 +270,25 @@ class NativeExecutionVenue(ExecutionVenue):
             )
             self._transmitted.add(intent.client_order_id)
             self._native_client_intents[intent.client_order_id] = intent
+
+            def before_send():
+                if (self.client is not client or self.authority is not authority
+                        or self.dispatch_guard is not dispatch_guard
+                        or self._native_client_intents.get(intent.client_order_id) != intent):
+                    raise PreflightRequired("Native adapter or durable intent binding changed before placement")
+                self._native_preflight(intent)
+                if self.build_native_request(intent) != body:
+                    raise PreflightRequired("Reviewed native request changed before placement")
+                if dispatch_guard is not None:
+                    dispatch_guard(intent)
+
             try:
-                response = await self.client.submit_order(body)
-                report = normalize_ack(self.client.venue_id, response, intent)
+                response = await client.submit_order(body, before_send=before_send)
+                report = normalize_ack(client.venue_id, response, intent)
                 self.bind_native_intent(report.native_order_id, intent)
                 return report
             finally:
-                self.client.settings.gate = NativeTradingGate()
+                settings.gate = NativeTradingGate()
 
     async def cancel_native(self, native_order_id: str, intent: NativeOrderIntent) -> NativeCancelReport:
         self._native_mapping(intent)
@@ -295,6 +319,9 @@ class NativeExecutionVenue(ExecutionVenue):
         self._native_mapping(intent)
         self.bind_native_intent(native_order_id, intent)
         try:
+            if isinstance(self.client, ProphetXClient):
+                from .prophetx_financial import reconcile_prophetx_financial
+                return await reconcile_prophetx_financial(self.client, intent, native_order_id)
             raw = await self.client.reconcile_order(native_order_id)
             if isinstance(self.client, KalshiClient):
                 return normalize_kalshi_order(intent, raw, expected_order_id=native_order_id, observed_at=utcnow())
@@ -305,11 +332,6 @@ class NativeExecutionVenue(ExecutionVenue):
                                              observed_at=utcnow(), fills=fills, history_complete=complete,
                                              confirmed_filled_quantity=self._confirmed_filled.get(native_order_id)
                                              if native_order_id in self._private_cancelled else None)
-            if isinstance(self.client, ProphetXClient):
-                # REST's order.price is the limit, never a blended execution
-                # price, and matched-detail lacks an actual fee field. Leave
-                # financial completeness false until private/account evidence.
-                return normalize_prophetx_order(intent, raw, expected_order_id=native_order_id, observed_at=utcnow())
         except (VenueError, ValueError, KeyError, TypeError):
             pass
         return NativeOrderReport(native_order_id=native_order_id, client_order_id=intent.client_order_id,
@@ -461,8 +483,17 @@ class NativeExecutionVenue(ExecutionVenue):
 
 def native_execution_factories(authority) -> dict:
     """Return dependency-injected factories without opening connections."""
+    def polymarket_factory(**kwargs):
+        # The executor imports the shared reviewed mapping/preflight contracts.
+        # Defer this import until requested to avoid a circular module import.
+        from .polymarket_us import PolymarketUSClient
+        from .polymarket_us_execution import PolymarketUSExecutionVenue
+        client = kwargs.pop("client", None) or PolymarketUSClient()
+        return PolymarketUSExecutionVenue(client, authority, **kwargs)
+
     return {
         "kalshi": lambda **kwargs: NativeExecutionVenue(KalshiClient(), authority, **kwargs),
         "novig": lambda **kwargs: NativeExecutionVenue(NovigClient(), authority, **kwargs),
         "prophetx": lambda **kwargs: NativeExecutionVenue(ProphetXClient(), authority, **kwargs),
+        "polymarket_us": polymarket_factory,
     }

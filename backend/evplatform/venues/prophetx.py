@@ -12,7 +12,7 @@ import math
 import re
 import time
 from decimal import Decimal
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -24,6 +24,7 @@ from .common import (
     CredentialsMissing, NativeSettings, NativeTransport, VenueError, VenueHTTPError,
     decimal_value, json_body,
 )
+from .dispatch import authenticated_request_guard, placement_guard
 
 
 class ProphetXSettings(NativeSettings):
@@ -190,7 +191,8 @@ class ProphetXClient(NativeTransport):
                 "access_key": self.settings.api_key, "secret_key": self.settings.secret_key.get_secret_value(),
             })
 
-    async def request(self, method: str, path: str, *, params=None, body=None, mutation_id=None):
+    async def request(self, method: str, path: str, *, params=None, body=None, mutation_id=None,
+                      before_send: Callable[[], None] | None = None):
         await self.connect()
         request = self.http.build_request(
             method, self.HOSTS[self.settings.environment] + path, params=params, content=json_body(body),
@@ -198,7 +200,8 @@ class ProphetXClient(NativeTransport):
                      "X-CFTC-Terminology": "true"},
         )
         try:
-            return await self._request(request, mutation_id=mutation_id)
+            return await self._request(request, mutation_id=mutation_id,
+                                       before_send=authenticated_request_guard(self, before_send))
         except VenueHTTPError as exc:
             self._http_failure(exc)
             raise
@@ -255,6 +258,16 @@ class ProphetXClient(NativeTransport):
     async def fetch_fills(self, **params) -> dict:
         return await self.request("GET", "/v4/mm/get_order_matched_detail", params=params)
 
+    async def fetch_balance(self) -> dict:
+        return await self.request("GET", "/v4/mm/get_balance")
+
+    async def fetch_transactions(self, **params) -> dict:
+        """Authenticated wallet ledger; never infer commission from a rate."""
+        return await self.request("GET", "/v4/mm/get_transactions", params=params)
+
+    async def fetch_trades(self, **params) -> dict:
+        return await self.request("GET", "/v4/mm/get_trades", params=params)
+
     @staticmethod
     def order_body(strike_id: str, american_price: int, stake_usd: Decimal, client_order_id: str,
                    strategy: str | None = None) -> dict:
@@ -273,12 +286,19 @@ class ProphetXClient(NativeTransport):
             body["order_strategy"] = strategy
         return body
 
-    async def submit_order(self, body: dict) -> dict:
+    async def submit_order(self, body: dict, *, before_send: Callable[[], None] | None = None) -> dict:
         client_id = body.get("external_id", "")
-        self.settings.gate.require(client_id, self.settings.environment)
+        guard = placement_guard(self, client_id, before_send)
         if body.get("price") not in self.price_ladder:
             raise VenueError("Price must be validated against the current native price ladder")
-        return await self.request("POST", "/v4/mm/submit_order", body=body, mutation_id=client_id)
+
+        def dispatch():
+            guard()
+            if body.get("price") not in self.price_ladder:
+                raise VenueError("Native price ladder changed before placement")
+
+        return await self.request("POST", "/v4/mm/submit_order", body=body, mutation_id=client_id,
+                                  before_send=dispatch)
 
     async def cancel_order(self, order_id: str, *, external_id: str) -> dict:
         # 409/425 and eventually consistent 404 are not interpreted as cancellation.

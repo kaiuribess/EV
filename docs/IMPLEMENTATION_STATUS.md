@@ -12,10 +12,10 @@ It is **not a completed production autonomous trading release**.
 | Strategies | Positive EV, independent strategy interface, required input and market metadata | Arbitrage, cross-exchange multi-leg execution, middles, steam and ML strategies |
 | Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
 | Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger | Genuine sandbox lifecycle certification; supported venue settlement proof; no native orders have been sent |
-| Kalshi | Current native clients, fractional-contract accounting, normalized book adapter, cumulative cost/fee reconciliation; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, authenticated private-state synchronization and settlement certification |
+| Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
 | Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper book/private subscriptions verified | Account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
-| ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, bounded cancellation retries; production read-only subscriptions and market messages verified | Complete authenticated inventory and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
-| Polymarket US | Personal US retail read-only client; actual signed production balance read, bounded public discovery/book and authenticated market/private WebSocket messages verified | Monitor only: no canonical pricing, execution, cancellation, reconciled risk inventory or settlement support; no retail sandbox assumed |
+| ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, matched-fill/wallet accounting and restricted funded-cash win/loss settlement; production read-only subscriptions and market messages verified | Genuine complete history, funded-cash and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
+| Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; earlier actual signed production read/stream checks passed | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, actionable launch blockers and separate native order ledger | Broader browser/device QA; native arming remains an explicit backend operation behind preflight |
 | Analytics | Durable all-signal episodes and transitions even while paused; first-entry hypothetical grading from explicit results; origin-separated groups/calibration; processing/receipt/intent/ack/fill timings and paper positions/settlements | Automatic verified result ingestion, live slippage calibration, CLV from verified closing data, production returns and independently clustered uncertainty estimates |
 | Storage | Async batched WAL SQLite audit, configurations, orders and fill IDs | Retention/compaction policy for long unattended runs; database upgrade migrations beyond version 1 |
@@ -65,9 +65,10 @@ The observed key scopes were `read` and `write::trade`, without transfer scope.
 The returned location attestation expires October 27, 2026 at 8:15:55 PM PDT;
 this is an expiring account observation, not an authorization to start this
 application's trading. No native orders or cancellations were sent, and the
-trade gate remained false. Authenticated private-state synchronization, genuine
-order lifecycle testing, reviewed mappings/fees and settlement certification
-still block a Kalshi launch.
+trade gate remained false. A later GET/subscription-only check at 04:13:21 UTC
+confirmed all three private channels, reconciled spendable cash and private-state
+synchronization (see VALIDATION.md). Genuine order lifecycle testing, reviewed
+mappings/fees and settlement certification still block a Kalshi launch.
 
 The personal Polymarket US retail connection also passed read-only production
 checks on October 20, 2026 at 20:19:57 PDT: signed balance access returned one
@@ -76,18 +77,25 @@ and private sockets delivered `marketData` and `orderSubscriptionSnapshot`.
 The observed stream reported zero errors and zero unknown messages. Local
 evidence is `data/polymarket-us-connection.json` (October 21, 03:19:57 UTC).
 This is the personal US API, not the international wallet/CLOB service. The
-client is monitor-only: `execution_supported: false`, `reconciled: false`, and
+monitor client is read-only: `execution_supported: false`, `reconciled: false`, and
 zero native orders sent. Private stream delivery does not establish complete
 account-risk reconciliation or permission to trade through this application.
 
 Missing credentials never silently trigger mock data. The separately named
 synthetic plugin runs in demo/paper mode and all its prices/fills are labeled.
 
+## Requested operator limits
+
+The saved operator policy is up to $5 per bet including fees, no daily-loss stop,
+and one active/unsettled event or player across accounts. Native cash-only caps
+require verified spendable cash for that exact account. The launch profile still
+selects one account at a time, with a cross-venue process lock and durable shared
+risk ledger. See [operator limits](OPERATOR_LIMITS.md) for configuration and scope.
+
 ## Measured local validation
 
-The latest Windows suite passed **755 tests**, with **85.74% backend statement
-coverage**. The TypeScript/Vite build and actual paused native Windows startup
-also passed. All automated provider/venue protocol exchanges use controlled
+Current Windows test totals and coverage are recorded in [VALIDATION.md](VALIDATION.md).
+The TypeScript/Vite build and actual paused native Windows startup have also been tested. All automated provider/venue protocol exchanges use controlled
 responses; real connection checks above were separate read-only observations.
 
 An isolated 15-second synthetic run measured 2,190 internal calculations:

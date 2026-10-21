@@ -430,6 +430,12 @@ class VerifiedProviderMapper:
         self.quarantine[key] = {
             "signature": key, "provider": provider, "reason": reason,
             "identity": offer.identity() if offer else None,
+            "observation": ({
+                "source_time": offer.observed_at.isoformat() if offer.observed_at else None,
+                "provider_time": offer.provider_time.isoformat() if offer.provider_time else None,
+                "status": offer.status,
+                "decimal_odds": {name: str(value) for name, value in offer.prices.items()},
+            } if offer else None),
         }
         self.quarantine.move_to_end(key)
         while len(self.quarantine) > self.quarantine_limit:

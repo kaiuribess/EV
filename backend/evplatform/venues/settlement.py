@@ -35,6 +35,12 @@ def supports_settlement_scope(profile, adapter, mappings, managed_orders) -> boo
     require audited cash repair. Callers checking a new intent must include it
     in managed_orders before transmission. Never omit settled historical orders.
     """
+    if getattr(profile, "venue", None) == "kalshi":
+        from .kalshi_settlement import supports_kalshi_settlement_scope
+        return supports_kalshi_settlement_scope(profile, adapter, mappings, managed_orders)
+    if getattr(profile, "venue", None) == "prophetx":
+        from .prophetx_settlement import supports_prophetx_settlement_scope
+        return supports_prophetx_settlement_scope(profile, adapter, mappings, managed_orders)
     # Local imports avoid the adapter/accounting module graph at import time.
     from ..core.readiness import LaunchProfile
     from .book_normalization import NativeBookMapper, NativeMarketMapping

@@ -416,7 +416,8 @@ async def test_native_bridge_requires_single_use_authority_and_returns_ack_only(
     authority, calls, order = RiskAuthority(), [], native_order()
     async with httpx.AsyncClient() as http:
         client = KalshiClient(client=http)
-        async def submit(body):
+        async def submit(body, *, before_send):
+            before_send()
             client.settings.gate.require(body["client_order_id"], "sandbox")
             calls.append(body)
             return {"order_id": "exchange-order", "fill_count": "3.00"}

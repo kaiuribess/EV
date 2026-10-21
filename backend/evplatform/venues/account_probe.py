@@ -21,7 +21,7 @@ from .novig import NovigClient
 from .kalshi import KalshiClient
 from .prophetx import ProphetXClient
 from .common import decimal_value
-from .reconciliation import ReconciliationError, _number, _object, _text
+from .reconciliation import ReconciliationError, _number, _object, _text, _time, normalize_kalshi_order
 
 
 class NativeAccountSnapshot(BaseModel):
@@ -32,6 +32,7 @@ class NativeAccountSnapshot(BaseModel):
     identity_verified: bool = False
     observed_at: datetime
     balance_usd: Decimal | None = None
+    cash_available_verified: bool = False
     open_order_count: int | None = None
     position_count: int | None = None
     reconciled: bool = False
@@ -43,11 +44,21 @@ class NativeAccountSnapshot(BaseModel):
     api_key_scopes: tuple[str, ...] = ()
     trading_permission_verified: bool = False
     geographic_attestation_expires_at: datetime | None = None
+    # Kalshi private messages do not expose exchange sequence numbers. These
+    # local invalidation fences must never be presented as source sequences.
+    private_connection_generation: int | None = None
+    private_revision: int | None = None
+    private_as_of: datetime | None = None
 
 
 def novig_wallet_fingerprint(environment: str, server_key_id: str) -> str:
     UUID(server_key_id)
     return hashlib.sha256(f"novig:{environment}:wallet-key:{server_key_id}".encode()).hexdigest()
+
+
+def kalshi_account_fingerprint(environment: str, api_key_id: str) -> str:
+    """Key-bound primary account identity; NOT stable across key rotation."""
+    return hashlib.sha256(f"kalshi:{environment}:api-key:{api_key_id}:subaccount:0".encode()).hexdigest()
 
 
 def _sequence(value):
@@ -56,7 +67,7 @@ def _sequence(value):
     return value
 
 
-async def probe_native_account(client, managed_orders=(), *, settled_order_ids=frozenset()) -> NativeAccountSnapshot:
+async def probe_native_account(client, managed_orders=(), *, settled_order_ids=frozenset(), adapter=None) -> NativeAccountSnapshot:
     """No connection/login management; use an already authenticated client.
 
     Managed orders are the native OMS's durable records. Account snapshots are
@@ -67,17 +78,16 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
     if isinstance(client, KalshiClient):
         return await _probe_kalshi(client, managed_orders, settled_order_ids)
     if isinstance(client, ProphetXClient):
-        # The server-signed registration identity is available only after the
-        # private sign-in succeeds; balance alone carries no identity field.
-        user_id = getattr(client, "_authenticated_user_id", "")
-        if not client._signin_confirmed or not user_id:
+        if not client._signin_confirmed or not client.health_check().get("authenticated"):
             return NativeAccountSnapshot(venue=venue, environment=environment, observed_at=utcnow(),
-                reason="ProphetX confirmed private account identity is required")
-        data = _object(_object(await client.request("GET", "/v4/mm/get_balance"), "balance").get("data"), "balance data")
-        return NativeAccountSnapshot(venue=venue, environment=environment, observed_at=utcnow(),
-            account_fingerprint=hashlib.sha256(f"prophetx:{environment}:user:{user_id}".encode()).hexdigest(),
-            identity_verified=True, balance_usd=_number(data.get("balance"), "account balance"),
-            reconciled=False, reason="Complete ProphetX account position and actual-fee inventory reconciliation is required")
+                reason="ProphetX confirmed authenticated private identity is required")
+        from .prophetx_account import probe_prophetx_account
+        return await probe_prophetx_account(client, managed_orders, settled_order_ids=settled_order_ids,
+                                             review=getattr(client, "account_review", None))
+    if client.venue_id == "polymarket_us":
+        from .polymarket_us_account import probe_polymarket_us_account
+        return await probe_polymarket_us_account(client, managed_orders,
+            settled_order_ids=settled_order_ids, adapter=adapter)
     if not isinstance(client, NovigClient):
         return NativeAccountSnapshot(venue=venue, environment=environment, observed_at=utcnow(),
             reason="Authenticated account identity/inventory probe is not implemented for this venue")
@@ -174,6 +184,12 @@ async def _kalshi_pages(client, path, collection, **params):
 
 async def _probe_kalshi(client, managed_orders, settled_order_ids):
     environment = client.settings.environment
+    private_fence = client.private.fence()
+    private_barrier = client.private.barrier
+    private_as_of = None
+    if private_fence is not None:
+        stamp = _object(await client.request("GET", "/exchange/user_data_timestamp"), "user data timestamp")
+        private_as_of = _time(stamp.get("as_of_time"))
     response = _object(await client.request("GET", "/api_keys"), "authenticated keys")
     keys = response.get("api_keys")
     if not isinstance(keys, list):
@@ -206,17 +222,20 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids):
     if isinstance(subaccount, bool) or not isinstance(subaccount, int) or subaccount != 0 or key.get("fcm_subtrader_id"):
         return NativeAccountSnapshot(venue="kalshi", environment=environment, observed_at=utcnow(),
             reason="Kalshi non-primary or FCM execution account routing is not implemented")
-    fingerprint = hashlib.sha256(f"kalshi:{environment}:api-key:{key['api_key_id']}:subaccount:0".encode()).hexdigest()
+    fingerprint = kalshi_account_fingerprint(environment, key["api_key_id"])
     balance = _object(await client.request("GET", "/portfolio/balance", params={"subaccount": 0}), "balance")
     cash = _number(balance.get("balance_dollars"), "fixed-point balance")
     orders = await _kalshi_pages(client, "/portfolio/orders", "orders", subaccount=0, status="resting")
     positions = await _kalshi_pages(client, "/portfolio/positions", "market_positions", subaccount=0,
-                                     settlement_status="unsettled", count_filter="position")
-    owned = {o.venue_order_id: o for o in managed_orders
-             if o.venue == "kalshi" and o.mode == environment and o.id not in settled_order_ids}
+                                     settlement_status="unsettled", count_filter="position,total_traded")
+    inventory = [o for o in managed_orders
+                 if o.venue == "kalshi" and o.mode == environment and o.id not in settled_order_ids]
+    owned = {o.venue_order_id: o for o in inventory if o.venue_order_id}
     reasons = []
-    if any(o.account_fingerprint != fingerprint or not o.reconciliation_complete for o in owned.values()):
+    if any(o.account_fingerprint != fingerprint or not o.reconciliation_complete for o in inventory):
         reasons.append("Managed order account/financial reconciliation is incomplete")
+    if len(owned) != sum(bool(o.venue_order_id) for o in inventory):
+        reasons.append("Duplicate managed Kalshi native order identity")
     seen = set()
     for raw in orders:
         row = _object(raw, "order")
@@ -236,30 +255,69 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids):
                 or row.get("subaccount_number") != 0
                 or _number(row.get("remaining_count_fp"), "remaining contracts") != order.quantity-order.filled_quantity):
             reasons.append("Kalshi resting order differs from durable intent")
+        report = normalize_kalshi_order(order.intent, {"order": row}, expected_order_id=oid, observed_at=utcnow())
+        financial = report.snapshot
+        if (financial.cumulative_quantity != order.filled_quantity
+                or financial.cumulative_cost_usd != order.filled_cost_usd
+                or financial.cumulative_fee_usd != order.fees):
+            reasons.append("Kalshi resting order financials differ from durable fills")
     if seen != {oid for oid, o in owned.items() if o.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}}:
         reasons.append("Native and local Kalshi resting inventory differs")
     expected = defaultdict(Decimal)
+    expected_cost, expected_fees = defaultdict(Decimal), defaultdict(Decimal)
+    expected_sides = defaultdict(set)
     for order in owned.values():
         if order.filled_quantity:
-            expected[order.intent.instrument.instrument_id] += order.filled_quantity * (1 if order.intent.instrument.native_outcome == "yes" else -1)
+            ticker = order.intent.instrument.instrument_id
+            expected[ticker] += order.filled_quantity * (1 if order.intent.instrument.native_outcome == "yes" else -1)
+            expected_cost[ticker] += order.filled_cost_usd
+            expected_fees[ticker] += order.fees
+            expected_sides[ticker].add(order.intent.instrument.native_outcome)
+    if any(len(sides) != 1 for sides in expected_sides.values()):
+        reasons.append("Netted Kalshi exposure requires explicit cash allocation")
     actual = defaultdict(Decimal)
     seen_positions = set()
     for raw in positions:
         row = _object(raw, "position")
         ticker = _text(row.get("ticker"), "position ticker")
         identity = ticker, row.get("exchange_index")
-        if identity in seen_positions:
+        if identity in seen_positions or ticker in actual:
             raise ReconciliationError("Duplicate Kalshi account position")
         seen_positions.add(identity)
         if isinstance(row.get("position_fp"), bool):
             raise ReconciliationError("Invalid signed Kalshi position")
         quantity = decimal_value(row.get("position_fp"))
-        if quantity:
-            actual[ticker] += quantity
+        if type(row.get("exchange_index")) is not int or row["exchange_index"] < 0:
+            raise ReconciliationError("Invalid Kalshi exchange shard")
+        actual[ticker] = quantity
+        cost = _number(row.get("market_exposure_dollars"), "position cost")
+        traded = _number(row.get("total_traded_dollars"), "position total traded")
+        fees = _number(row.get("fees_paid_dollars"), "position fees")
+        pnl = decimal_value(row.get("realized_pnl_dollars"))
+        updated = _time(row.get("last_updated_ts"))
+        if (cost != expected_cost[ticker] or traded != expected_cost[ticker]
+                or fees != expected_fees[ticker] or pnl != 0 or updated > utcnow()):
+            reasons.append("Kalshi position cash/fees or realized activity differ from managed buys")
     if dict(actual) != dict(expected):
         reasons.append("Unmanaged or netted Kalshi positions require review")
+    private_reason = ""
+    if private_fence is not None and (private_fence != client.private.fence()
+            or private_barrier is None or private_as_of < private_barrier or private_as_of > utcnow()):
+        # Inventory agreement and private freshness are separate facts. Normal
+        # read-model lag must block placement via private.matches(), without
+        # falsely classifying a coherent inventory as unexplained external cash.
+        private_reason = "Kalshi private state changed or REST data has not reached the account barrier"
+        private_fence, private_as_of = None, None
     return NativeAccountSnapshot(venue="kalshi", environment=environment, account_fingerprint=fingerprint,
         identity_verified=True, observed_at=utcnow(), balance_usd=cash, open_order_count=len(orders),
-        position_count=len(actual), reconciled=not reasons, reason="; ".join(dict.fromkeys(reasons)),
+        position_count=len(actual), reconciled=not reasons,
+        reason="; ".join(dict.fromkeys([*reasons, *([private_reason] if private_reason else [])])),
+        # Official balance_dollars is available cash; portfolio_value is a
+        # different field and is never funding capacity. Runtime still requires
+        # a fresh synchronized snapshot and reserves concurrent order intents.
+        cash_available_verified=not reasons,
         api_key_scopes=scopes, trading_permission_verified=trading_scope,
-        geographic_attestation_expires_at=expiry)
+        geographic_attestation_expires_at=expiry,
+        private_connection_generation=private_fence[0] if private_fence else None,
+        private_revision=private_fence[1] if private_fence else None,
+        private_as_of=private_as_of)
