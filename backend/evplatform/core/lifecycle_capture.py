@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import quote
 
@@ -22,7 +23,7 @@ from ..venues.account_probe import probe_native_account
 from ..venues.kalshi import KalshiClient, KalshiSettings
 from ..venues.novig import NovigClient, NovigSettings
 from ..venues.prophetx import ProphetXClient, ProphetXSettings
-from ..venues.prophetx_financial import authenticated_identity
+from ..venues.prophetx_financial import authenticated_identity, reporting_cursor, source_time
 
 
 _HOSTS = {"kalshi": set(KalshiClient.HOSTS.values()), "novig": set(NovigClient.HOSTS.values()),
@@ -113,6 +114,19 @@ async def _pages(client, path, collection, *, params=None, envelope=None, cursor
         cursor = body.get(cursor_key)
         rows = [row for page in pages for row in
                 ((page["response"].get(envelope) if envelope else page["response"])[collection])]
+        if (getattr(client, "venue_id", None) == "prophetx" and path == "/v4/mm/get_order_history"
+                and collection == "orders" and envelope == "data" and cursor_key == "next_cursor"):
+            try:
+                cursor, end_marker = reporting_cursor(body, endpoint=path, collection=collection)
+                if end_marker == "observed_empty_order_null":
+                    # This compatibility path must retain real reporting time;
+                    # local receipt must never manufacture a fresh empty result.
+                    source_time(raw.get("last_synced_at"), observed_at=utcnow(),
+                                name="Empty history reporting watermark", max_age=timedelta(seconds=10))
+                if cursor is None:
+                    return {"pages": pages, "rows": rows, "complete": True, "pagination_end": end_marker}
+            except (ValueError, TypeError):
+                return {"pages": pages, "rows": rows, "complete": False, "error": "invalid_history_cursor_or_clock"}
         if cursor == "" or cursor is None and missing_cursor_ends and cursor_key not in body:
             return {"pages": pages, "rows": rows, "complete": True}
         if not isinstance(cursor, str) or not cursor.strip() or cursor in cursors:
@@ -217,7 +231,8 @@ def capture_summary(artifact):
             "account_fingerprint": record["account_fingerprint"], "errors": record["errors"],
             "history_scope": record.get("history_scope"),
             "collections": {name: {"rows": len(value.get("rows", [])), "complete": value["complete"],
-                "error": value.get("error"), "http_status": value.get("http_status")}
+                "error": value.get("error"), "http_status": value.get("http_status"),
+                "pagination_end": value.get("pagination_end")}
                 for name, value in record["collections"].items()}} for record in artifact["venues"]],
         "local_oms_counts": {name: {"available": table["available"], "rows": len(table["rows"]),
             "complete": table.get("complete", False)} for name, table in artifact["local_oms"]["tables"].items()},

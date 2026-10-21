@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 import sqlite3
 
 import httpx
@@ -69,6 +70,22 @@ async def test_kalshi_missing_cursor_is_not_exhaustion():
     result = await _pages(Pages([{"orders": []}]), "/portfolio/orders", "orders",
                           cursor_key="cursor", cursor_param="cursor", missing_cursor_ends=False)
     assert not result["complete"]
+
+
+@pytest.mark.parametrize("age,nonempty,accepted", [(0, False, True), (11, False, False),
+    (-1, False, False), (None, False, False), (0, True, False)])
+async def test_prophetx_observed_null_only_accepts_empty_current_order_window(monkeypatch, age, nonempty, accepted):
+    now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+    monkeypatch.setattr("evplatform.core.lifecycle_capture.utcnow", lambda: now)
+    client = Pages([{"data": {"orders": [{"order_id": "offline"}] if nonempty else [], "next_cursor": None},
+                     "last_synced_at": None if age is None else (now-timedelta(seconds=age)).isoformat()}])
+    client.venue_id = "prophetx"
+    result = await _pages(client, "/v4/mm/get_order_history", "orders", envelope="data",
+                          cursor_key="next_cursor", cursor_param="next_cursor")
+    assert result["complete"] is accepted
+    if accepted:
+        assert result["pagination_end"] == "observed_empty_order_null"
+    assert all(call[0] == "GET" for call in client.calls)
 
 
 def test_auth_material_redacted_but_order_linkage_retained():

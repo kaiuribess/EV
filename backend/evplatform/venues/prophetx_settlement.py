@@ -11,7 +11,7 @@ from ..core.models import OrderStatus, utcnow
 from ..core.native_oms import NativeSettlement
 from .prophetx_financial import (
     ProphetXAccountReview, authenticated_identity, normalize_financial_order,
-    reporting_pages, source_time, validate_wallet_rows,
+    reporting_pages, source_time, validate_wallet_rows, owned_financial_order,
 )
 from .reconciliation import ReconciliationError, _number, _object
 from .prophetx_account import balance_facts
@@ -90,6 +90,8 @@ async def reconcile_prophetx_settlement(client, order, managed_orders, *,
     grade = row.get("winning_status")
     if grade not in {"won", "lost", "profit", "loss"}:
         raise ReconciliationError("Unsupported ProphetX settlement grade")
+    row = await owned_financial_order(client, order.intent, order.venue_order_id,
+                                    user_id=user, observed_at=observed_at, row=row)
     settled = source_time(row.get("settled_at"), observed_at=now, name="Actual settlement")
     if settled < order.created_at:
         raise ReconciliationError("Settlement precedes owned order")

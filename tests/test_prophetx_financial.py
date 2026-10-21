@@ -125,6 +125,78 @@ async def test_actual_fills_and_cash_commission_make_cumulative_evidence(case):
     assert all("order_id" in args or "trade_id" in args for _, args in client.calls)
 
 
+async def test_observed_empty_order_null_cursor_ends_only_timestamped_window(case):
+    client = case[1]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
+    result = await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
+    assert result.rows == () and result.last_synced_at == NOW
+    assert result.end_marker == "observed_empty_order_null"
+
+
+@pytest.mark.parametrize("clock", [None, iso(-11), iso(1), 12345])
+async def test_empty_order_null_cannot_bypass_reporting_clock(case, clock):
+    client = case[1]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": clock}
+    with pytest.raises((ReconciliationError, ValueError)):
+        await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+                              observed_at=NOW, require_clock=False)
+
+
+@pytest.mark.parametrize("cursor,nonempty", [(None, True), (False, False), (0, False), (" ", False)])
+async def test_empty_history_compatibility_does_not_weaken_other_cursors(case, cursor, nonempty):
+    client = case[1]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [deepcopy(client.row)] if nonempty else [], "next_cursor": cursor},
+        "last_synced_at": iso()}
+    with pytest.raises(ReconciliationError):
+        await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
+
+
+def fee_only_in_history(client):
+    history_row = deepcopy(client.row)
+    del client.row["fee"]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [deepcopy(history_row)], "next_cursor": ""}, "last_synced_at": iso()}
+    return history_row
+
+
+async def test_fee_omitted_by_get_order_uses_exact_history_and_wallet(case):
+    order, client, _ = case
+    fee_only_in_history(client)
+    result = await reconcile_prophetx_financial(client, order.intent, OID, observed_at=NOW)
+    assert result.financial_complete and result.snapshot.cumulative_fee_usd == D(".2")
+    history_args = client.calls[0][1]
+    assert history_args["market_id"] == "219" and history_args["from"] <= (NOW-timedelta(seconds=10)).timestamp()
+
+
+@pytest.mark.parametrize("field,value", [("fee", None), ("fee", "0"), ("fee", "-.1"),
+    ("external_id", "other"), ("user_id", "other"), ("strike_id", "other"),
+    ("order_id", "other"), ("updated_at", iso(-2)), ("filled_quantity", "9")])
+async def test_fee_history_must_identify_exact_revision_and_reconcile_cash(case, field, value):
+    order, client, _ = case
+    history = fee_only_in_history(client)
+    history[field] = value
+    with pytest.raises((ReconciliationError, ValueError)):
+        await reconcile_prophetx_financial(client, order.intent, OID, observed_at=NOW)
+
+
+async def test_explicit_invalid_fee_is_not_replaced_with_history_value(case):
+    order, client, _ = case
+    client.row["fee"] = None
+    with pytest.raises((ReconciliationError, ValueError)):
+        await reconcile_prophetx_financial(client, order.intent, OID, observed_at=NOW)
+    assert all(not path.endswith("get_order_history") for path, _ in client.calls)
+
+
+async def test_missing_history_fee_cannot_default_to_zero(case):
+    order, client, _ = case
+    del fee_only_in_history(client)["fee"]
+    with pytest.raises((ReconciliationError, ValueError)):
+        await reconcile_prophetx_financial(client, order.intent, OID, observed_at=NOW)
+
+
 @pytest.mark.parametrize("field,value", [("fee", None), ("fee", "0"), ("fee", ".6"),
     ("user_id", "other"), ("strike_id", "other"), ("original_quantity", "11"),
     ("filled_quantity", "9"), ("updated_at", iso(1)), ("created_at", iso(-30))])
@@ -317,6 +389,14 @@ async def test_settlement_uses_actual_cash_and_stable_revision(case):
     assert result.settled_at == NOW-timedelta(seconds=2)
     again = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
     assert result.settlement_id == again.settlement_id
+
+
+async def test_closed_settlement_can_obtain_fee_from_exact_history(case):
+    order, client, review = case
+    close_win(case)
+    fee_only_in_history(client)
+    result = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
+    assert result.payout_usd == 22 and result.additional_fee_usd == 0
 
 
 async def test_closed_loss_has_zero_cash_and_not_potential_profit(case):

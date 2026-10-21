@@ -144,6 +144,12 @@ GEC/LEC funding require explicit evidence. Pushes, voids, manual grades, credits
 and shared positions remain unsupported. These paths have offline fault tests;
 no real fill or payout has certified them.
 
+The October 21 production recheck completed the seven-day order/fill/wallet
+history after fixing timestamped empty-order null cursors. Get-order fee
+omissions now use exact-revision order-history evidence plus actual wallet
+commissions. This does not certify a genuine executed lifecycle or complete
+cash-only account scope. See [ProphetX reconciliation](PROPHETX_RECONCILIATION.md).
+
 Polymarket US has a separate risk-gated retail IOC executor and cancel/reconcile
 interface; the public/account monitor itself remains GET-only. YES/NO mappings
 retain exact decimal prices and USD accounting. No undocumented client-order-ID

@@ -50,6 +50,7 @@ class ProphetXAccountReview(BaseModel):
 class ProphetXHistory:
     rows: tuple[dict, ...]
     last_synced_at: datetime | None
+    end_marker: str | None = None
 
 
 def prophetx_fingerprint(environment: str, user_id: str) -> str:
@@ -76,6 +77,27 @@ def source_time(value, *, observed_at: datetime, name: str, max_age: timedelta |
     return result
 
 
+def reporting_cursor(data: dict, *, endpoint: str, collection: str) -> tuple[str | None, str | None]:
+    """Interpret the cursor, separately from account/history reconciliation.
+
+    The wallet guide documents an absent final cursor. The authenticated order
+    history service also returns an empty orders array with an explicit null
+    cursor. Support that observed representation only for this endpoint/shape;
+    never generalize it to nonempty pages or another venue's pagination.
+    """
+    if "next_cursor" not in data:
+        return None, "absent"
+    cursor = data["next_cursor"]
+    if cursor == "":
+        return None, "empty_string"
+    if (cursor is None and endpoint == "/v4/mm/get_order_history" and collection == "orders"
+            and data.get("orders") == []):
+        return None, "observed_empty_order_null"
+    if not isinstance(cursor, str) or not cursor.strip():
+        raise ReconciliationError("Invalid ProphetX reporting cursor")
+    return cursor, None
+
+
 async def reporting_pages(client, endpoint: str, collection: str, *, params=None,
                           observed_at: datetime | None = None, require_clock=True,
                           max_age=timedelta(seconds=10), max_pages=20) -> ProphetXHistory:
@@ -93,7 +115,7 @@ async def reporting_pages(client, endpoint: str, collection: str, *, params=None
         raw = _object(await client.request("GET", endpoint,
             params={**params, "limit": 100, **({"next_cursor": cursor} if cursor else {})}), "report")
         now = observed_at or utcnow()
-        if require_clock:
+        if require_clock or endpoint == "/v4/mm/get_order_history":
             clocks.append(source_time(raw.get("last_synced_at"), observed_at=now,
                                       name="Reporting watermark", max_age=max_age))
         data = _object(raw.get("data"), "report data")
@@ -101,12 +123,10 @@ async def reporting_pages(client, endpoint: str, collection: str, *, params=None
         if not isinstance(page, list):
             raise ReconciliationError("Incomplete ProphetX reporting collection")
         rows.extend(_object(row, "report row") for row in page)
-        cursor = data.get("next_cursor")
-        # Wallet docs explicitly allow absence on the last page. Empty string
-        # is the documented string cursor's exhausted representation.
-        if "next_cursor" not in data or cursor == "":
-            return ProphetXHistory(tuple(rows), min(clocks) if clocks else None)
-        if not isinstance(cursor, str) or not cursor.strip() or cursor in cursors:
+        cursor, end_marker = reporting_cursor(data, endpoint=endpoint, collection=collection)
+        if cursor is None:
+            return ProphetXHistory(tuple(rows), min(clocks) if clocks else None, end_marker)
+        if cursor in cursors:
             raise ReconciliationError("Invalid or repeated ProphetX reporting cursor")
         cursors.add(cursor)
     raise ReconciliationError("ProphetX reporting exceeds page bound; history is incomplete")
@@ -259,8 +279,7 @@ async def reconcile_prophetx_financial(client, intent, native_order_id, *, obser
     user, _ = authenticated_identity(client)
     if client.settings.environment != intent.mode:
         raise ReconciliationError("ProphetX intent environment mismatch")
-    raw = _object(await client.reconcile_order(native_order_id), "order response")
-    row = _object(raw.get("data"), "owned order")
+    row = await owned_financial_order(client, intent, native_order_id, user_id=user, observed_at=observed_at)
     matched = await reporting_pages(client, "/v4/mm/get_order_matched_detail", "matching_details",
         params={"order_id": native_order_id}, observed_at=observed_at)
     wallet = await reporting_pages(client, "/v4/mm/get_transactions", "transactions",
@@ -271,3 +290,43 @@ async def reconcile_prophetx_financial(client, intent, native_order_id, *, obser
     if authenticated_identity(client)[0] != user:
         raise ReconciliationError("ProphetX authenticated account changed during reconciliation")
     return report
+
+
+async def owned_financial_order(client, intent, native_order_id, *, user_id, observed_at=None, row=None):
+    """Read the owned order, obtaining an omitted fee from exact order history.
+
+    The order-history guide documents `fee`; the get-order schema does not.
+    A matching history row must attest the same revision and all order facts.
+    A newer/older row requires a later reconciliation, never an approximate join.
+    """
+    if row is None:
+        raw = _object(await client.reconcile_order(native_order_id), "order response")
+        row = _object(raw.get("data"), "owned order")
+    row = _object(row, "owned order")
+    _identity(intent, row, "order_id", "external_id", native_order_id)
+    if row.get("user_id") != user_id or row.get("strike_id") != intent.instrument.instrument_id:
+        raise ReconciliationError("ProphetX order account/instrument mismatch")
+    if "fee" in row:
+        return row
+    now = observed_at or utcnow()
+    created = source_time(row.get("created_at"), observed_at=now, name="Order creation")
+    if created < intent.created_at-timedelta(seconds=1):
+        raise ReconciliationError("Order creation precedes durable intent")
+    history = await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+        params={"from": math.floor(created.timestamp()), "to": math.ceil(now.timestamp()),
+                "market_id": str(_number(row.get("market_id"), "market identity", positive=True, whole=True))},
+        observed_at=observed_at)
+    matches = [item for item in unique_rows(history.rows, "order_id") if item.get("order_id") == native_order_id]
+    if len(matches) != 1:
+        raise ReconciliationError("Owned order fee is missing from reporting history")
+    reference = matches[0]
+    # Every field served by get_order must agree. Additional history-only fields
+    # do not weaken identity. JSON numeric types may differ, but Decimal/int
+    # comparisons remain exact; conflicting strings conservatively fail.
+    if any(key not in reference or reference[key] != value for key, value in row.items()):
+        raise ReconciliationError("Order history revision differs from owned order")
+    updated = source_time(row.get("updated_at"), observed_at=observed_at or utcnow(), name="Order update")
+    if updated > history.last_synced_at:
+        raise ReconciliationError("Order fee history watermark does not cover order revision")
+    fee = _number(reference.get("fee"), "explicit order-history fee")
+    return {**row, "fee": fee}

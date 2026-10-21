@@ -31,7 +31,7 @@ stale. Price-change clocks must not substitute for quote observations.
 | Executable size and fees | Bind current native instrument quantity/price grids, minimum cash cost, fee bounds, payout rules and order permissions to each reviewed mapping. Never substitute $5 units for venue minima. |
 | Account and inventory | Verify spendable cash, identity, permissions, eligibility and private-state reconciliation for each selected account. Use the quarter-Kelly draft only after those facts and scope are approved. |
 | Genuine lifecycle | Retain an application-managed intent, native acknowledgement, fills/fees, restart recovery and paid settlement with exact IDs. Offline tests and empty native histories cannot supply this. |
-| ProphetX reporting | Establish the end-of-history meaning of the observed `next_cursor: null`, reporting watermark/recovery behavior, and complete funded-cash history. A null cursor remains unverified rather than silently treated as exhaustion. |
+| ProphetX reporting | Empty order-history null cursors now have a narrowly scoped, timestamp-checked compatibility path verified against production. Complete funded-cash account scope and genuine financial lifecycle evidence remain required. See [the repair and its limits](PROPHETX_RECONCILIATION.md). |
 | Polymarket US | Implement authoritative retail account/trade-to-posted-cash reconciliation after its identity, cash-only collateral/reservation semantics and replay contract are established. Resolution events alone do not establish paid account cash. See [the detailed gap analysis](POLYMARKET_US_SETTLEMENT_GAPS.md). |
 
 These are separate dependencies. Adding a credential, changing a `verified` flag,
@@ -50,7 +50,10 @@ Authenticated captures started at **2026-10-21 14:48:52 UTC**:
   empty; one wallet transaction was present. Pagination completed.
 - ProphetX: the seven-day diagnostic window contained zero fills and one wallet
   transaction. Order history had zero rows but an unverified null cursor, so it
-  was **not** marked complete. Reporting history is eventually consistent.
+  was **not** marked complete in the initial capture. After the compatibility
+  repair, the **15:45:52 UTC** authenticated recheck completed all three requested
+  collections without errors, still with zero orders/fills and one transaction.
+  Reporting remains eventually consistent; this is bounded window evidence.
 - Polymarket US: two balance activities, zero trades, zero resolutions; activity
   pagination and parsing completed. No trade-to-cash settlement join was proven.
 - The local native OMS contained zero orders, fills, reconciliations or settlements.
@@ -63,10 +66,10 @@ current trading authorization.
 
 ## Validation
 
-Latest full offline run: **1,790 backend tests passed in 49.22 seconds**, with
-**88.59% statement coverage** (11,667 of 13,169 statements), plus **89 frontend
+Latest full offline run: **1,817 backend tests passed in 52.39 seconds**, with
+**88.61% statement coverage** (11,712 of 13,217 statements), plus **89 frontend
 tests passed** and a successful TypeScript/Vite production build. The run is
-saved in `data/validation-feed-spreads-20261021.log`. This is software regression
+saved in `data/validation-prophet-fix-20261021.log`. This is software regression
 evidence, not genuine native lifecycle or profitability validation. No new
 live fill latency was measured because no native order was placed.
 
@@ -79,7 +82,7 @@ protection. It remains unapplied until a reviewed launch scope passes.
 
 - Detailed contingency rules now participate in runtime market identity and durable serialization. Mapping evidence validation rejects omitted or contradictory runtime rules. Existing identities remain stable when this extension is absent; missing evidence stays missing.
 - The official Polymarket US Python SDK reveals private balance identifiers omitted by the prose example. A bounded private capture now preserves these fields and reports their presence without exposing values. The real 20-second account capture contained only an order snapshot, so settlement identifiers and cash joins were not established. See [the SDK comparison and capture](POLYMARKET_US_SETTLEMENT_GAPS.md).
-- Read the full ProphetX order-history OpenAPI schema, wallet guide, and its GitHub integration guide. The reviewed history schema declares a string cursor; the wallet guide says the cursor is absent on the last page. Neither establishes the observed order-history null-cursor semantics. No undocumented history-completeness assertion was added.
+- Read ProphetX's full order-history/get-order OpenAPI schemas, wallet, integration, lifecycle, enum and WebSocket guides. Added a narrow compatibility rule for the observed timestamped empty-order/null-cursor response and exact-revision history lookup for fees omitted by get-order. The published cursor schema still differs from that observed empty response; no whole-account or lifecycle certification follows. See [the implementation evidence](PROPHETX_RECONCILIATION.md).
 - No new support messages were sent. GitHub examples and official documentation were inspected directly; Chrome was unavailable through this session's browser connection.
 
 After loading these changes at approximately **15:11 UTC**, the local dashboard was healthy in demo mode with automation off, the kill switch active and zero native orders. All four native monitors authenticated and reached streaming; Novig retained nine startup request errors, so this is not a claim of an error-free session. Parlay's server reported `tier: scale`, `push_mode: raw`, and `min_push_interval_s: 0` for the NBA subscription, confirming the previously transferred temporary trial. That interval is a coalescing setting, not measured end-to-end latency. Real quote mappings still numbered zero.
