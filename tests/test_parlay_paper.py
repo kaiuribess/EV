@@ -186,6 +186,8 @@ async def test_existing_parlay_frame_to_risk_and_simulated_fill(tmp_path):
         assert all(order.synthetic and order.mode == "paper" for order in engine.risk.orders.values())
         assert any(order.status in {OrderStatus.PARTIAL, OrderStatus.FILLED} for order in engine.risk.orders.values())
         assert not engine.risk.kill_switch, engine.risk.kill_reason
+        public = engine.state()["opportunities"]
+        assert any(item["paper_only"] and item["target_quote_age_ms"] is not None for item in public)
         assert engine.state()["metrics"]["latency"]["internal_processing_ms"]["count"] > 0
         await engine.bus.publish(Envelope(schema_name="provider.frame", source="parlay_game_ws",
             payload=ProviderFrame(provider_id="parlay_game_ws", kind="feed_invalidated",

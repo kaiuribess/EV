@@ -741,13 +741,16 @@ class Engine:
     def candidate_public(self, candidate):
         market = self.markets[candidate.market_id]
         config = market_config(self.settings.pricing, market)
+        paper_only = market.extensions.get("paper_only", False)
+        target = candidate.venue.removeprefix("parlay_paper:") if paper_only else None
+        target_quote = next((quote for quote in self.quotes.get(candidate.market_id, {}).values()
+            if quote.provider == "parlay_paper_input" and quote.bookmaker == target), None)
         return {**candidate.model_dump(mode="json"), "event_name": market.event_name,
                 "sport": market.sport, "league": market.league, "market_type": market.market_type,
                 "player": market.player, "line": str(market.line) if market.line is not None else None,
-                "paper_only": market.extensions.get("paper_only", False),
-                "target_bookmaker": (candidate.venue.removeprefix("parlay_paper:")
-                    if market.extensions.get("paper_only") else None),
-                "capacity_kind": "simulated" if market.extensions.get("paper_only") else "observed",
+                "paper_only": paper_only, "target_bookmaker": target,
+                "target_quote_age_ms": target_quote.age_ms() if target_quote else None,
+                "capacity_kind": "simulated" if paper_only else "observed",
                 "status": "RESEARCH ONLY" if not candidate.reference_inputs_eligible else "POSITIVE EV" if candidate.execution_eligible and candidate.ev_per_contract >= config.min_ev and candidate.roi >= config.min_roi else "NEGATIVE EV"}
 
     def quote_public(self, quote):
