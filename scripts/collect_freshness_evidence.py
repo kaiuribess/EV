@@ -14,12 +14,14 @@ from evplatform.integrations.parlay import ParlayWebSocket
 
 
 async def collect(*, seconds: int, parlay_sport: str, oddize_sport: str,
-                  parlay_books: list[str], oddize_books: list[str]):
+                  parlay_books: list[str], oddize_books: list[str],
+                  parlay_markets: list[str] | None = None,
+                  parlay_kinds: list[str] | None = None, skip_oddize: bool = False):
     evidence = FreshnessEvidence()
     diagnostics = {}
     async def parlay():
         adapter = ParlayWebSocket({"enabled": True, "sports": [parlay_sport], "bookmakers": parlay_books,
-            "markets": [], "stream_kinds": ["game", "prop"], "max_age_seconds": 30,
+            "markets": parlay_markets or [], "stream_kinds": parlay_kinds or ["game", "prop"], "max_age_seconds": 30,
             "stream_limit": 1000, "session_request_budget": 1})
         last_health = None
         try:
@@ -38,6 +40,9 @@ async def collect(*, seconds: int, parlay_sport: str, oddize_sport: str,
             diagnostics["parlay"]["capture_closed"] = True
             await adapter.disconnect()
     async def oddize():
+        if skip_oddize:
+            diagnostics["oddize"] = {"snapshot_skipped": "operator_selected_parlay_only", "requests": 0}
+            return
         adapter = OddizeRest({"enabled": True, "sports": [oddize_sport], "bookmakers": oddize_books,
                               "markets": ["ml"], "session_request_budget": 1, "limit": 100})
         try:
@@ -62,6 +67,8 @@ async def collect(*, seconds: int, parlay_sport: str, oddize_sport: str,
     report = evidence.report()
     report["capture"] = {"mode": "authenticated_read_only", "requested_seconds": seconds,
                           "parlay_sport": parlay_sport, "oddize_sport": oddize_sport,
+                          "parlay_books": parlay_books, "parlay_markets": parlay_markets or [],
+                          "parlay_kinds": parlay_kinds or ["game", "prop"], "skip_oddize": skip_oddize,
                           "diagnostics": diagnostics}
     report["artifact_sha256_without_this_field"] = evidence_digest(report)
     return report
@@ -75,13 +82,18 @@ def main():
     parser.add_argument("--oddize-sport", default="nba")
     parser.add_argument("--parlay-books", default="pinnacle,fanduel,draftkings")
     parser.add_argument("--oddize-books", default="pin,circa,dk,fd")
+    parser.add_argument("--parlay-markets", default="", help="Comma-separated documented native market keys")
+    parser.add_argument("--parlay-kinds", nargs="+", choices=["game", "prop"], default=["game", "prop"])
+    parser.add_argument("--skip-oddize", action="store_true", help="No Oddize calls or credits for a Parlay-only diagnostic")
     args = parser.parse_args()
     if args.output.exists():
         print(json.dumps({"ok": False, "error": "choose_new_report_path"}))
         return 2
     load_dotenv(Path(__file__).resolve().parents[1]/".env", override=False)
     report = asyncio.run(collect(seconds=args.seconds, parlay_sport=args.parlay_sport, oddize_sport=args.oddize_sport,
-        parlay_books=args.parlay_books.split(","), oddize_books=args.oddize_books.split(",")))
+        parlay_books=args.parlay_books.split(","), oddize_books=args.oddize_books.split(","),
+        parlay_markets=[value for value in args.parlay_markets.split(",") if value],
+        parlay_kinds=args.parlay_kinds, skip_oddize=args.skip_oddize))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as output:
         json.dump(report, output, indent=2, allow_nan=False)

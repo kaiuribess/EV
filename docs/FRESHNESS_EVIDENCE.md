@@ -42,3 +42,23 @@ For Parlay, request a documented quote-bound observation clock and units for eac
 For Oddize, request the supported current-market-status/withdrawal contract and whether a distinct quote-verification clock exists beyond retained `ts` observations. Confirm actual per-book prop coverage and source cadence before setting any fast execution policy. The flat event-props route preserves thresholds; the grouped endpoint's untyped alternate-line data remains discovery-only.
 
 After these contracts are supported, collect representative sessions, bind source identities to reviewed canonical markets and settlement rules, and independently assess candidate age limits. This report cannot substitute for those steps or native order lifecycle validation.
+
+## Follow-up captures, October 21 local time
+
+The 20-second single-book capture `data/freshness-single-book-20261021.json` received 272 offers across five groups: 263 Parlay Pinnacle prop rows, all carrying truncation evidence, and nine Oddize Pinnacle moneyline observations. Six Oddize observations had complete opposing-side clocks; three had unsynchronized outcomes. None established current market status. One Oddize credit was used (1,478 remaining afterward). These samples do not establish a verified +EV candidate.
+
+A second 20-second Parlay-only check explicitly requested NBA `h2h`, `kinds=game`, and Pinnacle/FanDuel/DraftKings. It authenticated and received an initial frame, two update frames and three heartbeats, but yielded zero extracted offers in that bounded window. It made no Oddize calls. This is not evidence that no such market exists outside the sampled scope/window. Capture: `data/freshness-game-moneyline-20261021.json`.
+
+The collector now accepts `--parlay-markets`, `--parlay-kinds game` (or `prop`) and `--skip-oddize`, so narrowing a socket diagnosis does not consume another provider's credits. Example:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\collect_freshness_evidence.py --seconds 20 --parlay-books pinnacle,fanduel,draftkings --parlay-markets h2h --parlay-kinds game --skip-oddize --output data\freshness-moneyline-next.json
+```
+
+### Questions requiring provider answers
+
+Parlay: For Business NBA Pinnacle/FanDuel/DraftKings game moneylines and ordinary points props, which documented response fields bind a collector observation and an active/suspended/withdrawn state to the exact outcome, threshold and displayed price? Are unchanged offers reverified? Which request yields a complete baseline for this scope, and how are removals and reconnects represented? A narrowed Pinnacle prop sample remained truncated; the game-moneyline window yielded no extracted offers. Please specify exact supported parameters and whether additional entitlement is required, without sending credentials.
+
+Oddize: For NBA Pinnacle moneylines, what establishes that each retained price is still available now, rather than merely the last stored `ts`/`timestamp` observation? Which field or endpoint reports suspensions/withdrawals? How are unchanged quotes reverified and opposing-side observations synchronized? Please document source cadence and actual status semantics; delivery latency cannot substitute for observation age.
+
+These questions are prepared for review and have not been sent to either provider.

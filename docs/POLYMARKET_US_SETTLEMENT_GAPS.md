@@ -43,3 +43,9 @@ The [institutional balance ledger](https://docs.polymarket.us/api-reference/fund
 ## Evidence needed to remove the remaining block
 
 Obtain an official retail contract or authorized, documented account statement that links a durable cash-posting identifier to the account and market/trade, specifies paid settlement cash and adjustments, and supports complete replay across restart. Then implement and test exact execution/trade/cash joins, partial positions, NO collateral release, busts/corrections, duplicate delivery, missing pages, and restart recovery. Any unlinked or ambiguous record must remain unreconciled.
+
+### Exact retail support questions (prepared, not sent)
+
+For a personal US retail API account, which supported endpoint or account statement links `execution.tradeId` and `positionResolution.tradeId` to the final posted USD settlement, commissions, refunds and corrections? Please identify the stable account identifier, cash-posting ID, market/trade linkage, posting status and pagination/replay guarantees. The documented account balance change has a transaction ID without a trade/market link, while the private balance-change message has neither that link nor a durable replay sequence. Is there a supported retail ledger or export that supplies the missing linkage?
+
+Please also specify cash-only spendable funds after open-order reservations and short-YES/NO collateral, separately from buying power. Institutional bearer-token APIs are not assumed available to this personal retail account. No production settlement validation can be claimed until these identities and cash semantics are established.

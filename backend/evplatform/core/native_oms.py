@@ -18,6 +18,7 @@ from .models import Contract, Envelope, Market, OrderStatus, utcnow
 from .native_accounting import NativeAccounting, NativeCumulativeSnapshot, NativeFill, NativeOrderIntent, merge_native_fill_metadata
 from .risk import RiskRejected
 from .stake_sizing import StakeSizing
+from .native_trace import NativeTrace
 
 
 class NativeOrder(Contract):
@@ -113,9 +114,15 @@ class NativeOrderManager:
         self._fill_evidence: dict[str, dict[str, NativeFill]] = {}
         self._fill_conflicts: set[str] = set()
         self.recovered = False
+        self.trace = None
+        self._pending_trace = {}
 
     async def start(self):
+        from .native_runtime import build_fingerprint
+        self.trace = NativeTrace(await asyncio.to_thread(build_fingerprint))
+        self._pending_trace.clear()
         await self.storage.write([
+            ("CREATE TABLE IF NOT EXISTS native_lifecycle_trace (seq INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, data TEXT NOT NULL)", ()),
             ("CREATE TABLE IF NOT EXISTS native_orders (id TEXT PRIMARY KEY, client_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL)", ()),
             ("CREATE TABLE IF NOT EXISTS native_reconciliations (seq INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, data TEXT NOT NULL)", ()),
             ("CREATE TABLE IF NOT EXISTS native_settlements (order_id TEXT PRIMARY KEY, data TEXT NOT NULL)", ()),
@@ -126,6 +133,8 @@ class NativeOrderManager:
         rows = await (await self.storage.connection.execute("SELECT data FROM native_orders")).fetchall()
         for row in rows:
             order = NativeOrder.model_validate_json(row[0])
+            recovered_event = self.trace.event(order, "order_recovered", was_unresolved=order.status in UNRESOLVED)
+            await self.storage.write([self.trace.statement(recovered_event)], (), True)
             if order.status in UNRESOLVED:
                 order = order.model_copy(update={"status": OrderStatus.UNKNOWN, "reconciliation_complete": False,
                                                 "reason": "Restart requires account order reconciliation; never resend"})
@@ -351,13 +360,17 @@ class NativeOrderManager:
             return order
 
     async def _save(self, order):
+        pending = self._pending_trace.get(order.id, [])
         try:
             await self.storage.write(
-                "INSERT INTO native_orders VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,data=excluded.data",
-                (order.id, order.client_order_id, order.status.value, order.model_dump_json()), True)
+                [("INSERT INTO native_orders VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,data=excluded.data",
+                (order.id, order.client_order_id, order.status.value, order.model_dump_json())),
+                 *[self.trace.statement(event) for event in pending],
+                 self.trace.statement(self.trace.event(order, "state_saved"))], (), True)
         except BaseException:
             self.risk.halt("Native order persistence failed")
             raise
+        self._pending_trace.pop(order.id, None)
         self.risk.native_orders[order.id] = order
         await self.bus.publish(Envelope(schema_name="native.order", source="native_oms", payload=order))
         return order
@@ -380,12 +393,16 @@ class NativeOrderManager:
             self._check(order)
             self.risk.native_orders[order.id] = order
             await self._save(order)  # fsync barrier before native writes.
+            self._pending_trace[order.id] = [self.trace.event(order, "intent_commit_returned")]
             authorization, transmission_started = None, False
             try:
                 self._check(order)
                 order = await self._save(order.model_copy(update={"status": OrderStatus.SUBMITTING, "submitted_at": utcnow()}))
                 self._check(order)  # Check clocks, limits and kill after fsync.
                 authorization = self.risk.authority.issue(order.id)
+                # Persist with the acknowledgement/unknown outcome. A crash
+                # before that commit deliberately leaves dispatch unproven.
+                self._pending_trace[order.id] = [self.trace.event(order, "dispatch_entered")]
                 transmission_started = True
                 response = await self.adapters[order.venue].submit_intent(order.intent, authorization)
                 native_id = getattr(response, "native_order_id", None)
@@ -645,6 +662,7 @@ class NativeOrderManager:
             await self.storage.write(statements+[
                 ("INSERT INTO native_reconciliations VALUES(NULL,?,?)", (order.id, report.model_dump_json())),
                 ("UPDATE native_orders SET status=?,data=? WHERE id=?", (updated.status.value, updated.model_dump_json(), order.id)),
+                self.trace.statement(self.trace.event(updated, "financial_reconciliation", terminal=report.terminal)),
             ], (), True)
         except BaseException:
             self.risk.halt("Native reconciliation persistence failed")
@@ -697,6 +715,8 @@ class NativeOrderManager:
             old = self.settlements.get(order.id)
             if old:
                 if old != result: raise ValueError("Conflicting native settlement")
+                await self.storage.write([self.trace.statement(self.trace.event(order, "settlement_duplicate",
+                    settlement_id=result.settlement_id))], (), True)
                 return
             if (result.venue != order.venue or result.account_fingerprint != order.account_fingerprint or
                     result.environment != order.mode or result.market_fingerprint != order.market_fingerprint or
@@ -705,7 +725,12 @@ class NativeOrderManager:
                     result.payout_usd > max(order.gross_payout_usd, order.filled_cost_usd) or
                     result.fee_refund_usd > order.fees):
                 raise ValueError("Native settlement requires final matching account evidence")
-            await self.storage.write("INSERT INTO native_settlements VALUES(?,?)", (order.id, result.model_dump_json()), True)
+            await self.storage.write([
+                ("INSERT INTO native_settlements VALUES(?,?)", (order.id, result.model_dump_json())),
+                self.trace.statement(self.trace.event(order, "settlement_recorded",
+                    settlement_id=result.settlement_id, payout_usd=str(result.payout_usd),
+                    additional_fee_usd=str(result.additional_fee_usd), fee_refund_usd=str(result.fee_refund_usd)))
+            ], (), True)
             self.settlements[order.id] = result
             self.risk.settled.add(order.id)
             self.risk.roll_day()

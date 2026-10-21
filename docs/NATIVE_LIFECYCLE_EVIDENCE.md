@@ -34,6 +34,14 @@ For each intended account, environment, market-rule family and application build
 
 The verifier intentionally marks those event-time checks missing, even when historical money totals match. Native order/fill history must be complete and agree exactly with durable quantities, costs, payouts and actual fees. Missing collections, scope differences, inconsistent identities, incomplete pagination and invalidated evidence cannot count as a match. ProphetX needs synchronized fill and wallet-ledger fee attribution; a reporting summary alone does not establish its final financial state.
 
+## Event-time instrumentation added October 21
+
+New native orders now retain `native_lifecycle_trace` records with the exact intent hash, account, environment, market, software build, manager run and process instance. The application records the return from the durable intent commit before entering the transport. That commit receipt uses the existing submitting-state transaction. The dispatch-entry observation is persisted with the subsequent acknowledgement or unknown-outcome transaction; a process crash before that write deliberately leaves dispatch unproven. No additional disk barrier was added before transmission.
+
+Recovery, complete financial reconciliation, accepted settlement and duplicate settlement calls also leave observations. Reloading a manager in the same process does not count as a new process. The read-only history capture includes these records; its `application_trace` section rejects conflicting identities, duplicate sequence numbers and regressing process clocks. Monotonic clocks are never compared across processes. These are locally recorded application facts, not exchange-signed proof. A settlement callback being repeated does not establish where that callback originated.
+
+Existing orders cannot gain missing historical observations retroactively. No test fixture or application trace alone issues launch evidence. Native histories, exact paid cash/fees, release of actual positions, and independently reviewed runtime scope still need to agree. One ordinary filled bet also cannot exercise partial-fill cancellation races, interruption handling or every settlement exception. Keep those scenario checks distinct and use an authorized sandbox where available.
+
 Offline fixtures exercise parser/accounting invariants and no-mutation boundaries. They are useful regression coverage, not certificates of real exchange connectivity or production behavior. The report never produces a `LaunchEvidence` object, changes launch profiles, or alters risk controls.
 
 ## Official contracts consulted

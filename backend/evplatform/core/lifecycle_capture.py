@@ -83,7 +83,7 @@ def local_oms_snapshot(database: Path):
     if not database.is_file():
         return {"available": False, "reason": "database_missing", "tables": {}}
     allowed = ("native_orders", "native_fill_evidence", "native_reconciliations", "native_settlements",
-               "native_fill_conflicts", "native_settlement_invalidations")
+               "native_fill_conflicts", "native_settlement_invalidations", "native_lifecycle_trace")
     result = {}
     with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=5) as db:
         db.execute("BEGIN")

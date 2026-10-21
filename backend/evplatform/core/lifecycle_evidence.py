@@ -13,6 +13,7 @@ import json
 
 from .native_accounting import NativeAccounting, NativeFill
 from .native_oms import NativeOrder, NativeSettlement
+from .native_trace import review_application_trace
 from ..venues.reconciliation import normalize_kalshi_order, normalize_novig_fill, normalize_novig_order
 
 
@@ -162,7 +163,8 @@ def verify_native_lifecycle(capture: dict, *, expected_build_id: str | None = No
         results.append({"local_order_id": order.id, "client_order_id": order.client_order_id,
             "native_order_id": order.venue_order_id, "venue": order.venue, "environment": order.mode,
             "account_fingerprint": order.account_fingerprint, "market_fingerprint": order.market_fingerprint,
-            "checks": checks, "lifecycle_certified": False})
+            "checks": checks, "application_trace": review_application_trace(_table(capture, "native_lifecycle_trace"), order),
+            "lifecycle_certified": False})
     return {"schema_version": 1, "capture_sha256": artifact_digest(capture), "build_id": capture["build_id"],
         "captured_at": capture["captured_at"], "previous_capture_sha256": artifact_digest(previous_capture) if previous_capture else None,
         "native_order_count": len(results), "local_inventory_complete": native_rows is not None,

@@ -147,3 +147,14 @@ async def test_live_capture_script_uses_existing_adapters_with_bounded_read_only
     assert report["capture"]["diagnostics"]["parlay"]["authenticated"] is True
     assert report["capture"]["diagnostics"]["oddize"]["http_roundtrip_ms"] == 15
     assert ("socket_closed",) in calls and ("rest_closed",) in calls
+    calls.clear()
+    class ForbiddenRest:
+        def __init__(self, config):
+            raise AssertionError("Parlay-only diagnostics must not initialize Oddize")
+    monkeypatch.setattr(script, "OddizeRest", ForbiddenRest)
+    scoped = await script.collect(seconds=5, parlay_sport="basketball_nba", oddize_sport="nba",
+        parlay_books=["pinnacle"], oddize_books=["pin"], parlay_markets=["h2h"],
+        parlay_kinds=["game"], skip_oddize=True)
+    assert calls[0][1]["markets"] == ["h2h"] and calls[0][1]["stream_kinds"] == ["game"]
+    assert scoped["capture"]["diagnostics"]["oddize"]["requests"] == 0
+    assert scoped["capture"]["parlay_markets"] == ["h2h"] and scoped["capture"]["skip_oddize"]
