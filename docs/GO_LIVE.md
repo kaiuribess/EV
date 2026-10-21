@@ -76,6 +76,11 @@ the previous stop. A missing or stale response displays readiness as unconfirmed
 
 ### Current unresolved release work
 
+The [October 21 Kalshi NBA pilot](KALSHI_PILOT_2026-10-21.md) records a concrete
+live no-trade decision: the observed Orlando contract had no validated positive
+edge, and its reference quotes did not meet the current-status and settlement
+requirements. It did not place a real order.
+
 As reviewed October 20, 2026, the working installation has connected real feeds
 but no reviewed real sportsbook/native market mappings. Displayed demo
 opportunities are synthetic. The NBA review found different interruption,
