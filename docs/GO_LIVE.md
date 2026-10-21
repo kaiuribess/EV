@@ -240,10 +240,12 @@ from the relevant native account probe. A successful REST response or a
 credential's presence does not prove write permission or geographical
 eligibility. No ready-to-trade profile is shipped with sample money limits.
 
-The requested $5, available-account-cash and no-overlap settings are documented
+The requested quarter-Kelly sizing, $5 reporting unit, available-account-cash
+and no-overlap settings are documented
 in [OPERATOR_LIMITS.md](OPERATOR_LIMITS.md). Venue/total monetary caps may be
 `null` only with `available_cash_only: true`; current authenticated spendable
-cash is still mandatory. The local limits draft is not genuine launch evidence.
+cash is still mandatory. An uncapped per-order amount also requires
+`stake_sizing: quarter_kelly`. The local limits draft is not genuine launch evidence.
 
 Evidence records contain the kind, actual environment/account, observation and
 expiry timestamps, reviewer, source class, original artifact SHA-256, passed

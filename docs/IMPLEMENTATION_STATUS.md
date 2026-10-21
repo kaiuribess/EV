@@ -86,8 +86,9 @@ synthetic plugin runs in demo/paper mode and all its prices/fills are labeled.
 
 ## Requested operator limits
 
-The saved operator policy is up to $5 per bet including fees, no daily-loss stop,
-and one active/unsettled event or player across accounts. Native cash-only caps
+The saved operator policy is quarter Kelly with $5 as one reporting unit, no
+fixed dollar stake cap, no daily-loss stop, and one active/unsettled event or
+player across accounts. The earlier $5-per-bet policy is superseded. Native cash-only caps
 require verified spendable cash for that exact account. A reviewed launch portfolio
 now supports one account per venue, with a cross-venue process lock and one durable
 risk ledger. Every selected account must pass its own release checks, while cash

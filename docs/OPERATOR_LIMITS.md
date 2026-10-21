@@ -1,10 +1,12 @@
 # Operator limits and overlap protection
 
-The requested launch policy is **up to $5 total per bet, including the maximum
-fee**, each account's verified available cash as its spending cap, no daily-loss
-stop, and one active/unsettled bet per game or player across venues. Contract
-increments can make the executable amount smaller than $5. The engine never
-rounds above the cap to meet a venue minimum.
+The current requested launch policy is **quarter Kelly**, with **$5 = one
+reporting unit**, each account's verified available cash as its spending cap,
+no fixed dollar stake cap, no daily-loss stop, and one active/unsettled bet per
+game or player across venues. The earlier $5-per-bet cap is superseded. Unit
+size is neither a minimum stake nor a required increment. The engine rounds
+quantity down and skips an order that cannot meet its verified venue minimum
+within the Kelly budget. See [the sizing calculation](STAKE_SIZING.md).
 
 `data/operator_launch_limits.json` is the local draft of these limits. It is not
 a launch profile or permission to submit orders. After the exact account,
@@ -14,16 +16,18 @@ limit changes invalidate old launch evidence.
 
 ```json
 {
-  "max_order_stake_usd": "5",
-  "max_event_exposure_usd": "5",
-  "max_player_exposure_usd": "5",
+  "max_order_stake_usd": null,
+  "max_event_exposure_usd": null,
+  "max_player_exposure_usd": null,
   "max_venue_exposure_usd": null,
-  "max_correlated_exposure_usd": "5",
+  "max_correlated_exposure_usd": null,
   "max_total_exposure_usd": null,
   "daily_loss_limit_usd": null,
   "available_cash_only": true,
   "block_overlapping_events": true,
   "block_overlapping_players": true,
+  "stake_sizing": "quarter_kelly",
+  "unit_size_usd": "5",
   "max_open_orders": 20,
   "max_orders_per_minute": 30
 }
