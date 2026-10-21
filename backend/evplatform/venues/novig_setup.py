@@ -223,9 +223,11 @@ def protect_private_path(path: Path):
     if os.name != "nt":
         path.chmod(0o700 if path.is_dir() else 0o600)
         return
-    from .windows_private_storage import protect_windows_path
+    from .windows_private_storage import WindowsStorageError, protect_windows_path
     try:
         protect_windows_path(path)
+    except WindowsStorageError as exc:
+        raise SetupError(f"private_storage_acl_failed:{exc.operation}:win32_{exc.code}") from None
     except OSError:
         raise SetupError("private_storage_acl_failed") from None
 

@@ -42,6 +42,19 @@ The same CLI supports `open --journal PATH`, `fund --journal PATH --amount AMOUN
 and the other actions shown below. Windows key protection calls the operating
 system directly and does not launch PowerShell or require audit privileges.
 
+To diagnose a storage failure without any account requests, run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\check_novig_storage.py --journal 'PATH_PRINTED_BY_PREPARE'
+```
+
+Relative journal paths in this diagnostic resolve from the project directory,
+even when the command is launched elsewhere. It reports fixed operation labels
+and numeric Windows error codes, tests the existing local signer/lock, and saves
+`data/novig-storage-diagnostic.json` without keys or private-file paths. It does
+not open accounts, transfer funds, or change the journal. A successful diagnostic
+in one process does not prove an unexplained failure in another process is fixed.
+
 ## Owner-performed wallet opening
 
 ```powershell

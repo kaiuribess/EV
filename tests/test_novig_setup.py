@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import importlib.util
 import json
 from pathlib import Path
 from uuid import UUID
@@ -16,6 +17,14 @@ from dotenv import dotenv_values
 
 from evplatform.venues.novig import NovigSettings, novig_canonical
 from evplatform.venues.novig_setup import NovigSetup, NovigSetupTransport, SetupError, TTYConfirmation, _Approval, validate_amount
+
+
+def storage_diagnostic_module():
+    spec = importlib.util.spec_from_file_location("storage_diagnostic_script",
+        Path(__file__).parents[1] / "scripts/check_novig_storage.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 MANAGEMENT_ID = "00000000-0000-4000-8000-000000000001"
@@ -474,3 +483,34 @@ async def test_transport_confirmation_binds_exact_request_expires_and_is_single_
     with pytest.raises(SetupError, match="operator_confirmation_expired_or_changed"):
         await helper.transport.request("POST", path, body=body, approval=approval)
     assert len(exchange.requests) == 1 and len(exchange.transfers) == 1
+
+async def test_storage_diagnostic_is_local_only_and_preserves_journal(setup_case, monkeypatch):
+    helper, exchange, _, _ = setup_case
+    journal = await helper.prepare('OFFLINE diagnostic')
+    original = journal.read_bytes()
+    diagnostic = storage_diagnostic_module()
+    monkeypatch.setattr(diagnostic, 'NovigSetup', lambda *args: helper)
+    monkeypatch.setattr(diagnostic, 'protect_private_path', lambda path: None)
+    exchange.requests.clear()
+    report = diagnostic.diagnose(journal)
+    assert report['ok'] and report['journal_unchanged']
+    assert report['account_actions'] == report['network_requests'] == 0
+    assert exchange.requests == [] and journal.read_bytes() == original
+    assert report['open_state'] == 'prepared' and report['recorded_transfers'] == 0
+    assert 'PRIVATE KEY' not in json.dumps(report) and MANAGEMENT_ID not in json.dumps(report)
+
+
+async def test_storage_diagnostic_reports_safe_failure_without_private_paths(setup_case, monkeypatch):
+    helper, exchange, _, _ = setup_case
+    journal = await helper.prepare('OFFLINE diagnostic')
+    diagnostic = storage_diagnostic_module()
+    monkeypatch.setattr(diagnostic, 'NovigSetup', lambda *args: helper)
+    def denied(path):
+        raise SetupError('private_storage_acl_failed:read_permissions:win32_5')
+    monkeypatch.setattr(diagnostic, 'protect_private_path', denied)
+    exchange.requests.clear()
+    report = diagnostic.diagnose(journal)
+    assert not report['ok'] and report['journal_unchanged']
+    assert report['checks']['private_signer'] == 'private_storage_acl_failed:read_permissions:win32_5'
+    assert exchange.requests == []
+    assert str(helper.secret_dir) not in json.dumps(report) and MANAGEMENT_ID not in json.dumps(report)

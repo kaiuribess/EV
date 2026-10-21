@@ -73,3 +73,37 @@ def test_windows_acl_failure_is_redacted_and_blocks_write(tmp_path, monkeypatch)
     with pytest.raises(SetupError, match="^private_storage_acl_failed$"):
         _atomic(target, b"OFFLINE payload", protect_private_path)
     assert not target.exists()
+
+
+def test_windows_acl_failure_preserves_safe_operation_and_numeric_code(tmp_path, monkeypatch):
+    from evplatform.venues import windows_private_storage
+    def denied(path):
+        raise windows_private_storage.WindowsStorageError("read_permissions", 5)
+    monkeypatch.setattr(windows_private_storage, "protect_windows_path", denied)
+    target = tmp_path / "must-not-write.txt"
+    with pytest.raises(SetupError, match="^private_storage_acl_failed:read_permissions:win32_5$"):
+        _atomic(target, b"OFFLINE payload", protect_private_path)
+    assert not target.exists()
+
+
+def test_win32_read_failure_reports_return_code_not_stale_last_error(tmp_path, monkeypatch):
+    import ctypes
+    from evplatform.venues import windows_private_storage
+    real_load = ctypes.WinDLL
+    class ReadDenied:
+        def __call__(self, *args):
+            ctypes.set_last_error(122)
+            return 5  # GetNamedSecurityInfo returns its error directly.
+    class Library:
+        def __init__(self, real):
+            self.real = real
+            self.GetNamedSecurityInfoW = ReadDenied()
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+    def load(name, **kwargs):
+        real = real_load(name, **kwargs)
+        return Library(real) if name == "advapi32" else real
+    monkeypatch.setattr(ctypes, "WinDLL", load)
+    with pytest.raises(windows_private_storage.WindowsStorageError) as error:
+        windows_private_storage.protect_windows_path(tmp_path)
+    assert error.value.operation == "read_permissions" and error.value.code == 5

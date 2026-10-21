@@ -2,6 +2,15 @@
 
 ## Latest automated checks
 
+Latest storage-diagnostic follow-up: **59 focused tests passed in 2.63 seconds**.
+Windows permission failures now retain the fixed failing operation and the
+numeric Win32 code while excluding private paths and credentials. Tests cover
+direct Win32 return codes (rather than a stale last-error value), local-only
+diagnosis, unchanged setup journals, and redacted failure reports. The original
+terminal failure is still not reproduced in the agent process. A newly opened
+interactive owner setup window passed all six local checks and waited at the
+owner confirmation; no confirmation was supplied by the agent.
+
 Follow-up Windows storage repair: **55 focused tests passed in 2.54 seconds**
 (52 setup cases plus three real Windows permissions/error-handling cases).
 The permissions helper now uses Win32 directly instead of launching PowerShell;

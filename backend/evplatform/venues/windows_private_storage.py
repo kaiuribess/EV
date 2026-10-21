@@ -11,6 +11,14 @@ from ctypes import wintypes
 from pathlib import Path
 
 
+class WindowsStorageError(OSError):
+    """Fixed operation labels and numeric OS codes only; never paths or secrets."""
+
+    def __init__(self, operation: str, code: int = 0):
+        self.operation, self.code = operation, int(code)
+        super().__init__(f"{operation}:win32_{self.code}")
+
+
 def protect_windows_path(path: Path):
     """Require current-user ownership and a protected user/SYSTEM-only DACL."""
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -43,15 +51,15 @@ def protect_windows_path(path: Path):
     write_sd = api(advapi, "SetNamedSecurityInfoW", dword, wintypes.LPWSTR, ctypes.c_int,
                    dword, ptr, ptr, ptr, ptr)
 
-    def require(ok):
+    def require(ok, operation="descriptor_validation", code=0):
         if not ok:
-            raise OSError("Windows private storage operation failed")
+            raise WindowsStorageError(operation, ctypes.get_last_error() if code is None else code)
 
     def descriptor_parts(descriptor):
         owner, dacl = ptr(), ptr()
         present, defaulted = boolean(), boolean()
-        require(get_owner(descriptor, ctypes.byref(owner), ctypes.byref(defaulted)))
-        require(get_dacl(descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)))
+        require(get_owner(descriptor, ctypes.byref(owner), ctypes.byref(defaulted)), "get_owner", None)
+        require(get_dacl(descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)), "get_dacl", None)
         require(owner.value and present.value and dacl.value)
         return owner, dacl
 
@@ -62,7 +70,7 @@ def protect_windows_path(path: Path):
         rows = []
         for index in range(count):
             ace = ptr()
-            require(get_ace(dacl, index, ctypes.byref(ace)))
+            require(get_ace(dacl, index, ctypes.byref(ace)), "get_ace", None)
             _, _, length = struct.unpack("<BBH", ctypes.string_at(ace, 4))
             require(4 <= length <= size - 8)
             rows.append(ctypes.string_at(ace, length))
@@ -70,18 +78,18 @@ def protect_windows_path(path: Path):
 
     token, sid_string, expected = ptr(), ptr(), ptr()
     try:
-        require(open_token(process(), 0x0008, ctypes.byref(token)))  # TOKEN_QUERY
+        require(open_token(process(), 0x0008, ctypes.byref(token)), "open_process_token", None)  # TOKEN_QUERY
         needed = dword()
         token_info(token, 1, None, 0, ctypes.byref(needed))  # TokenUser
         require(needed.value > 0)
         buffer = ctypes.create_string_buffer(needed.value)
-        require(token_info(token, 1, buffer, needed, ctypes.byref(needed)))
+        require(token_info(token, 1, buffer, needed, ctypes.byref(needed)), "get_token_user", None)
         user_sid = ptr.from_buffer(buffer).value
-        require(sid_text(user_sid, ctypes.byref(sid_string)))
+        require(sid_text(user_sid, ctypes.byref(sid_string)), "convert_user_sid", None)
         user = ctypes.wstring_at(sid_string)
         inheritance = "OICI" if path.is_dir() else ""
         sddl = f"O:{user}D:P(A;{inheritance};FA;;;{user})(A;{inheritance};FA;;;SY)"
-        require(parse_sd(sddl, 1, ctypes.byref(expected), None))
+        require(parse_sd(sddl, 1, ctypes.byref(expected), None), "build_private_descriptor", None)
         owner, dacl = descriptor_parts(expected)
         expected_entries = entries(dacl)
 
@@ -89,10 +97,11 @@ def protect_windows_path(path: Path):
             actual = ptr()
             try:
                 # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION.
-                require(read_sd(str(path.absolute()), 1, 0x5, None, None, None, None, ctypes.byref(actual)) == 0)
+                code = read_sd(str(path.absolute()), 1, 0x5, None, None, None, None, ctypes.byref(actual))
+                require(code == 0, "read_permissions", code)
                 actual_owner, actual_dacl = descriptor_parts(actual)
                 control, revision = wintypes.WORD(), dword()
-                require(get_control(actual, ctypes.byref(control), ctypes.byref(revision)))
+                require(get_control(actual, ctypes.byref(control), ctypes.byref(revision)), "read_protection", None)
                 if not equal_sid(owner, actual_owner) or not control.value & 0x1000:
                     return False
                 try:
@@ -105,8 +114,9 @@ def protect_windows_path(path: Path):
 
         if not matches():
             # Replace only owner/DACL. Do not request SACL/audit privileges.
-            require(write_sd(str(path.absolute()), 1, 0x80000005, owner, None, dacl, None) == 0)
-            require(matches())
+            code = write_sd(str(path.absolute()), 1, 0x80000005, owner, None, dacl, None)
+            require(code == 0, "write_permissions", code)
+            require(matches(), "verify_permissions")
     finally:
         if expected.value:
             free(expected)
