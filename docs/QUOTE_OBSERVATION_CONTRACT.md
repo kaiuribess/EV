@@ -20,6 +20,23 @@ Streaming `commence_time` and subscription sport now survive discovery as `sched
 
 All 25 retained malformed real spread rows parsed successfully after the repair. A new 30-second authenticated NBA capture saw 68 FanDuel/DraftKings moneyline and spread offers with zero extraction errors. It still supplied no verified quote-bound observation or active-status evidence; no execution eligibility was inferred. The captures are bounded windows, not a coverage census. Local artifacts: `data/first-scope-bad-rows-20261021.json` (protected raw rows) and `data/first-scope-feed-fixed-20261021.json` (summary).
 
+### Withdrawal precedence repair, October 21
+
+Offline regression reproduced two mapper defects: a `status: suspended` notice
+with no price fields did not revoke its cached quote, and a usable-looking row
+in the same batch could restore a quote marked removed, suspended, unavailable
+or missing an explicit side price. The flat REST-prop and WebSocket paths now
+treat those notices as adverse evidence for the entire affected event/book/market
+scope in that delivery. They clear cached partial sides and exclude companion
+rows in either order, while allowing unrelated scopes to continue.
+
+Nullable fields belonging to another transport family remain harmless: unused
+moneyline columns do not withdraw a complete prop, and unused over/under columns
+do not withdraw a named-outcome price. A missing identity broadens invalidation
+instead of guessing a player or threshold. These negative-evidence fixes do not
+assert positive active-status verification or add an upstream withdrawal
+guarantee that the provider contract does not supply.
+
 ## Oddize
 
 `Price.ts` denotes observation time and `timestamp` is its ISO representation. Conflicting or missing clocks remain unverified. The older opposing-side observation is retained; unequal side timestamps do not receive synchronized completeness. The published flat schemas provide no authoritative current market status, so status verification remains false. [Official OpenAPI](https://oddize.com/api/v1/openapi.json).

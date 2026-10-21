@@ -143,6 +143,33 @@ def _parlay_failure_scope(row: Any) -> dict[str, str]:
     return selectors
 
 
+def _parlay_unavailability_reason(row: dict) -> str | None:
+    """Negative evidence revokes quotes; it never verifies positive status.
+
+    Nullable columns belonging to another transport shape must not withdraw a
+    valid named-outcome price. An explicit suspended notice needs no prices.
+    """
+    if row.get("action") == "remove":
+        return "Explicit source removal"
+    if row.get("suspended") is True or row.get("status") == "suspended":
+        return "Explicit source suspension"
+    if row.get("available") is False:
+        return "Source quote unavailable"
+    fields = {key: row[key] for key in (
+        "over_price", "under_price", "home_ml", "away_ml", "price", "price_american", "price_decimal",
+    ) if key in row}
+    if any(fields.get(key) is not None for key in ("price", "price_american", "price_decimal")):
+        return None
+    # Inspect null sides only in a populated price family. Some containers also
+    # carry unused null columns for a different family (props vs moneylines).
+    families = [("over_price", "under_price"), ("home_ml", "away_ml")]
+    populated = [family for family in families if any(fields.get(key) is not None for key in family)]
+    missing_side = any(key in fields and fields[key] is None for family in populated for key in family)
+    if fields and (missing_side or all(value is None for value in fields.values())):
+        return "Explicit missing usable side price"
+    return None
+
+
 def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | None:
     """Retain adverse completeness evidence without making it market identity."""
     body = envelope.payload if isinstance(envelope.payload, dict) else {}
@@ -704,6 +731,13 @@ class VerifiedProviderMapper:
             try:
                 if not isinstance(row, dict):
                     raise ValueError("Expected a Parlay row")
+                adverse = _parlay_unavailability_reason(row)
+                if adverse:
+                    scope = _parlay_failure_scope(row)
+                    self._quarantine(None, adverse, envelope.provider_id, failed_scope=scope)
+                    if scope not in failures:
+                        failures.append(scope)
+                    continue
                 payload = {**envelope.payload, "data": [row]} if isinstance(envelope.payload, dict) else [row]
                 offers.extend(extract_offers(replace(envelope, payload=payload)))
             except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
@@ -723,31 +757,6 @@ class VerifiedProviderMapper:
             self._clear_partial(envelope.provider_id)
             # Even an incomplete reconnect baseline cannot retain old live quotes.
             result.extend(self._invalidate(envelope))
-        if envelope.provider_id.startswith("parlay"):
-            rows = envelope.payload.get("data", []) if isinstance(envelope.payload, dict) else envelope.payload
-            if isinstance(rows, list):
-                for row in rows:
-                    price_fields = {key: row[key] for key in (
-                        "over_price", "under_price", "home_ml", "away_ml", "price", "price_american", "price_decimal",
-                    ) if isinstance(row, dict) and key in row}
-                    # Null sides are absence of a supplied usable price, never
-                    # an instruction to keep an earlier opposing price alive.
-                    side_prices = {key: value for key, value in price_fields.items()
-                                   if key in {"over_price", "under_price", "home_ml", "away_ml"}}
-                    single_prices = {key: value for key, value in price_fields.items() if key not in side_prices}
-                    # Nullable columns for a *different* row shape do not
-                    # withdraw a valid per-outcome price (e.g. moneyline rows
-                    # with unused null over_price/under_price columns).
-                    missing_price = (bool(price_fields)
-                                     and not any(value is not None for value in single_prices.values())
-                                     and (any(value is None for value in side_prices.values())
-                                          or all(value is None for value in price_fields.values())))
-                    if isinstance(row, dict) and (row.get("action") == "remove" or row.get("suspended") is True or row.get("available") is False or missing_price):
-                        self._clear_partial(envelope.provider_id)
-                        result.extend(self._invalidate(envelope, {
-                            "event_id": str(row.get("canonical_event_id") or row.get("event_id") or row.get("eventId") or ""),
-                            "bookmaker": row.get("bookmaker"), "market_key": row.get("market_key"),
-                        }))
         try:
             extracted, failed_scopes = self._extract_isolated(envelope)
             for scope in failed_scopes:

@@ -66,10 +66,10 @@ current trading authorization.
 
 ## Validation
 
-Latest full offline run: **1,853 backend tests passed in 48.17 seconds**, with
-**88.66% statement coverage** (11,834 of 13,347 statements), plus **89 frontend
+Latest full offline run: **1,880 backend tests passed in 48.14 seconds**, with
+**88.67% statement coverage** (11,846 of 13,359 statements), plus **89 frontend
 tests passed** and a successful TypeScript/Vite production build. The run is
-saved in `data/validation-owned-final-20261021.log`. This is software regression
+saved in `data/validation-source-gates-final-20261021.log`. This is software regression
 evidence, not genuine native lifecycle or profitability validation. No new
 live fill latency was measured because no native order was placed.
 
@@ -146,6 +146,30 @@ production database did not exist and was reported unavailable. Offline review
 therefore reported `local_inventory_complete: false` and issued no lifecycle or
 launch certification. No real wager, sale, cancellation or transfer occurred.
 Protected evidence: `data/prophetx-native-ledger-audit-20261021/`.
+
+### Source and production permission audit
+
+Regression tests exposed two real source-state defects: a price-less suspended
+notice could preserve an active cache entry, and adverse rows could be undone
+by a later usable-looking row in the same delivery. All adverse rows now dominate
+their source scope for that batch in either order. Unrelated markets continue;
+unused nullable columns from other price families are not withdrawals. The
+new tests reproduced 22 failures before the repair.
+
+The legacy pricing path also implicitly set `live_execution_allowed: true`
+without a selected reference profile. It now remains available for paper/research
+and returns false for live permission. Production requires explicit approval
+of a strict profile with its independent observation, active-status, exact-source
+TTL and sensitivity gates. Validation re-derives permission from current policy,
+so editing a cached fair-value permission flag cannot bypass that requirement.
+Three new tests reproduced this gap before the fix.
+
+These repairs strengthen software checks; they do not establish the missing
+external facts. The official Parlay contract explicitly says the sampled
+DraftKings/FanDuel game-line views lack guaranteed removals and a complete
+replacement baseline. Oddize's flat price schema supplies no authoritative active
+status. No provider status was inferred from timestamps, no real mapping was
+approved, and no live order was submitted.
 
 - [Parlay streaming schema](https://parlay-api.com/v1/asyncapi.json): bounded
   recent-row snapshots differ from explicitly complete game-board baselines.

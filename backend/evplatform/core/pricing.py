@@ -192,7 +192,10 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
                      synthetic=any(q.synthetic for q in by_book.values()),
                      reference_profile_id=profile_id, reference_policy_digest=digest,
                      reference_profile_status=profile.status if profile else None,
-                     live_execution_allowed=profile.live_execution_allowed if profile else True,
+                     # Legacy blends support paper/research. Production needs
+                     # an explicitly approved strict profile and its separate
+                     # observation/status/TTL and sensitivity requirements.
+                     live_execution_allowed=profile.live_execution_allowed if profile else False,
                      execution_eligible=not reasons, ineligibility_reasons=tuple(dict.fromkeys(reasons)),
                      sensitivity_model=profile.sensitivity_devig if profile else None,
                      sensitivity_probabilities=sensitivity_result)
@@ -208,8 +211,8 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
     config, profile_id, profile, digest = resolved_reference_policy(config, market, now)
     if fair.reference_profile_id != profile_id or fair.reference_policy_digest != digest:
         raise NoSignal("Reference profile policy changed; recalculation required")
-    if profile and (fair.live_execution_allowed != profile.live_execution_allowed
-                    or fair.reference_profile_status != profile.status):
+    if (fair.live_execution_allowed != (profile.live_execution_allowed if profile else False)
+            or fair.reference_profile_status != (profile.status if profile else None)):
         raise NoSignal("Reference profile permission or status changed")
     if fair.market_id != market.id or set(fair.probabilities) != set(market.outcomes):
         raise NoSignal("Fair value does not match the normalized market")
