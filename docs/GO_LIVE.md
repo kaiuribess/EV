@@ -45,8 +45,45 @@ With the sandbox workspace running on port 8002:
 ```
 
 Use port 8003 for the production example above. The Trading page also shows the
-same live readiness checks and their next actions. Its readiness panel is
-read-only. A missing or stale response displays readiness as unconfirmed.
+same live readiness checks and their next actions. **Live setup** also lists
+configured native monitors before any launch profile exists, separates real
+market coverage from synthetic opportunities, and distinguishes saved limits
+from limits applied to a reviewed launch scope. `GET /api/launch/setup` supplies
+these read-only preparation facts. No balance from an old diagnostic file is
+shown as current spendable cash.
+
+The final owner-controlled enable button remains disabled unless the current
+report is complete, fresh, production-scoped and safe to arm, with native
+execution explicitly configured. It fetches the checks again for review and
+confirmation and binds the control request to the reviewed profile digest.
+Changed accounts, configuration or stale evidence require a fresh review. The
+backend rechecks the gate before changing the emergency stop, and again after
+the persistence wait. A rejected combined enable/reset cannot silently clear
+the previous stop. A missing or stale response displays readiness as unconfirmed.
+
+### Current unresolved release work
+
+As reviewed October 20, 2026, the working installation has connected real feeds
+but no reviewed real sportsbook/native market mappings. Displayed demo
+opportunities are synthetic. The NBA review found different interruption,
+postponement and void payouts across Novig, Kalshi and sportsbook references;
+no common exact settlement scope was established. Novig fair-value settlement
+cannot be relabeled as a stake refund. See [the source evidence](NBA_SETTLEMENT_EVIDENCE.md).
+
+An explicit, validated model would be needed to use reference contracts with
+different settlement rules. No such model or profitable weighting calibration
+has been established. Otherwise, select genuinely equivalent contracts and
+retain the supporting rules and source clocks before publishing their mappings.
+
+Genuine order/fill/recovery and settlement certification is still missing.
+Polymarket US has an additional implementation blocker: account-attributed
+settlement is unsupported, so an all-four-venue launch cannot pass merely by
+adding keys or signing a profile. The other venues support only the narrow
+settlement policies documented in [native accounting](NATIVE_ACCOUNTING.md).
+Polymarket does document resolution events; the remaining cash-posting and
+replay gaps are detailed in [the retail settlement review](POLYMARKET_US_SETTLEMENT_GAPS.md).
+Existing connections and funded balances are useful setup results, not proof
+that these remaining checks passed.
 
 The report includes machine-readable blocker codes and an action for each. Exit
 status 0 means `safe_to_arm`; 1 means blocked; 2 means the check could not be

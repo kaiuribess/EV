@@ -10,6 +10,8 @@ if ($LASTEXITCODE -ne 0) { throw "Backend tests failed." }
 if (-not $SkipFrontend) {
     Push-Location -LiteralPath "frontend"
     try {
+        & npm.cmd test
+        if ($LASTEXITCODE -ne 0) { throw "Frontend control checks failed." }
         & npm.cmd run build
         if ($LASTEXITCODE -ne 0) { throw "Frontend build failed." }
     } finally { Pop-Location }

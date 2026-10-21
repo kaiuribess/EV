@@ -211,10 +211,20 @@ coverage is account dependent.
 
 For native venue keys, `.env.example` includes the extra signing key paths and
 ProphetX secret required by current documentation. Configure native monitors for
-the correct sandbox/production environment. **There is no one-click production
-trading switch in this release.** `EV_LIVE_ENABLED=true` alone does not bypass the
-account-bound launch profile, reviewed mappings/fees, current synchronized feeds,
-explicit limits, or genuine lifecycle and settlement evidence.
+the correct sandbox/production environment. The Trading desk's **Live setup**
+panel shows each configured account, real versus synthetic coverage, the saved
+limits, and the remaining launch checks. Its final enable control is available
+only in a reviewed production workspace after every current check passes.
+`EV_LIVE_ENABLED=true` alone does not bypass the account-bound launch profile,
+reviewed mappings/fees, current synchronized feeds, explicit limits, or genuine
+lifecycle and settlement evidence. The current installation is not ready for
+real orders; see [the launch guide](docs/GO_LIVE.md).
+
+Book weights are configurable, not learned or validated automatically. The
+current default is equal weighting after removing each book's margin, requiring
+two distinct books and fresh quotes. See [the reference model](docs/REFERENCE_MODEL.md)
+and [the NBA settlement comparison](docs/NBA_SETTLEMENT_EVIDENCE.md) before
+treating sportsbook and exchange prices as interchangeable.
 
 ## Data, replay, and recovery
 

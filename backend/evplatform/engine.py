@@ -620,7 +620,22 @@ class Engine:
         await self.recalculate(result.market_id)
         await self.notice("info", f"Simulated settlement recorded; realized P&L {realized:.2f}", "paper_settlement")
 
-    async def control(self, *, auto_trade=None, kill_switch=None):
+    async def control(self, *, auto_trade=None, kill_switch=None, expected_launch_digest=None):
+        def check_native_activation():
+            if not auto_trade or self.settings.mode in {"demo", "paper"}:
+                return
+            report = self.native.report()
+            if (expected_launch_digest is not None
+                    and expected_launch_digest != report.profile_digest):
+                raise ValueError("The reviewed launch scope changed; refresh and review before enabling")
+            if not self.settings.live_enabled or not report.safe_to_arm:
+                raise ValueError("Native execution requires explicit enablement and all launch checks passing")
+
+        # Reject an invalid combined enable/reset before modifying or persisting
+        # the emergency stop. An explicit stop still takes precedence.
+        if kill_switch is not True:
+            check_native_activation()
+        previous_stop = (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted)
         if kill_switch is True:
             self.risk.halt("Operator emergency stop")
             await self.storage.save_config("kill_switch", True)
@@ -635,9 +650,19 @@ class Engine:
             self.halt_persisted = False
             await self.storage.save_config("kill_switch", False)
         if auto_trade is not None:
-            if auto_trade and self.settings.mode not in {"demo", "paper"}:
-                if not self.settings.live_enabled or not self.native.report().safe_to_arm:
-                    raise ValueError("Native execution requires explicit enablement and all launch checks passing")
+            try:
+                # Persisting a reset yields to feed/reconciliation work. Recheck
+                # the reviewed scope and gate after that yield; on failure keep
+                # the previous emergency-stop state in memory and on disk.
+                check_native_activation()
+            except ValueError:
+                if kill_switch is False:
+                    # A new safety halt raised during the persistence await
+                    # takes precedence over the state from before this request.
+                    if not self.risk.kill_switch:
+                        self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted = previous_stop
+                    await self.storage.save_config("kill_switch", self.risk.kill_switch)
+                raise
             if auto_trade and self.risk.kill_switch:
                 raise ValueError("Reset kill switch first")
             self.risk.auto_trade = auto_trade

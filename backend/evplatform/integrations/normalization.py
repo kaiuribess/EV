@@ -138,10 +138,11 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                         raise ValueError("Duplicate outcome in market")
                     prices[name] = decimal_price(outcome["price"], odds_format)
                     points[name] = number_identity(outcome.get("point"))
-                # Whole-book liveness is not per-market verification.
+                # Whole-book liveness is not per-market verification. Parlay's
+                # main reference and cookbook give conflicting oldest-price vs
+                # freshest-poll meanings for book.last_update_ms, so it cannot
+                # establish this market's source observation clock.
                 observed = parse_timestamp(market.get("last_update"))
-                if envelope.provider_id.startswith("parlay"):
-                    observed = observed or parse_timestamp(book.get("last_update_ms"), epoch_unit="milliseconds")
                 status = "suspended" if market.get("suspended") or book.get("suspended") else "active"
                 if event.get("phase") in {"suspended", "closed"} or event.get("status") in {"suspended", "closed"}:
                     status = "suspended"

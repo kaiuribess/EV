@@ -2,6 +2,46 @@
 
 ## Latest automated checks
 
+Launch-preparation and reference-policy follow-up: **1,395 tests passed in
+38.60 seconds**, with **88.03% backend statement coverage** (9,874 of 11,216
+statements). These are offline tests, including the new preparation report,
+account/secret boundaries, failed-activation stop preservation, reviewed-scope
+digest checks, bookmaker eligibility, changed pricing policy, stale references,
+independent sport overrides, and missing Parlay market timestamps. One upstream
+Starlette/httpx TestClient deprecation warning remains.
+
+All **57 frontend control tests** passed, followed by strict TypeScript checking
+and the Vite production build. Browser inspection confirmed the source-origin
+banner, all four account cards, unapplied $5 policy, uncalibrated equal-weight
+description, pending requirements and disabled real-trading control. Final
+confirmation renders the profile's exact market whitelist and account hashes,
+not the global market count. No activation was attempted during browser checks.
+
+A separate 15-second synthetic run produced nine markets, 18 positive and nine
+negative opportunities, nine paper orders, and four orders with simulated fills.
+Across 2,190 calculations, internal processing was median **0.189 ms**, p95
+**0.397 ms**, p99 **0.566 ms**. Receipt-to-calculation was median **9.999 ms**,
+p95 **18.995 ms**, p99 **22.001 ms** across 1,800 samples. Seven simulated fill
+events had a 510.787 ms median; this sample does not support tail percentiles or
+any claim about real fills. There were no bus drops. The separate benchmark
+database does not change the dashboard's paused state. Local output:
+`artifacts/benchmark.json`.
+
+The updated backend restarted on port 8001 with automation off, the emergency
+stop on and zero native orders. The new preparation endpoint confirmed all four
+configured production monitors authenticated and streaming, but zero reviewed
+native markets, zero real reference markets and zero native candidates. All 27
+opportunities in that snapshot were synthetic. The $5 cash-only/no-overlap
+operator limits remained a saved, unapplied production draft. Polymarket's
+unsupported settlement accounting is now explicit. Local snapshot:
+`data/launch-setup-paused-restart.json`.
+
+An isolated GET-only check of the existing Novig **paper** management wallet
+returned 10,000 play dollars. Its separate paper trading wallet had zero.
+No transfer or order was submitted. Official documentation confirms paper uses
+play money and separate credentials; that observation is not production
+lifecycle evidence. See [paper validation scope](NOVIG_PAPER_VALIDATION.md).
+
 Latest storage-diagnostic follow-up: **59 focused tests passed in 2.63 seconds**.
 Windows permission failures now retain the fixed failing operation and the
 numeric Win32 code while excluding private paths and credentials. Tests cover

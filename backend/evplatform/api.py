@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from .core.config import PricingConfig, RiskConfig, Settings
 from .core.models import Envelope, SettlementResult
 from .core.market_review import ContractReview, compare_contracts, pending_market_reviews
+from .core.launch_setup import launch_setup, operator_limits_draft
 from .core.signals import SignalResultImport
 from .engine import Engine
 
@@ -19,6 +20,7 @@ class ControlBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     auto_trade: bool | None = None
     kill_switch: bool | None = None
+    expected_launch_digest: str | None = None
 
 
 class ToggleBody(BaseModel):
@@ -122,6 +124,11 @@ def create_app(settings=None):
             raise HTTPException(404, "No reviewed launch profile for this venue")
         return {**engine.native.runtime_facts(venue).model_dump(mode="json"),
             "accounts": {key: facts.model_dump(mode="json") for key, facts in engine.native.runtime_facts_by_venue().items()}}
+
+    @app.get("/api/launch/setup")
+    async def launch_preparation():
+        limits, error = await asyncio.to_thread(operator_limits_draft)
+        return launch_setup(engine, limits_draft=limits, limits_error=error)
 
     @app.get("/api/market-review")
     async def market_review(provider: str | None = None, offset: int = Query(0, ge=0),

@@ -224,3 +224,17 @@ async def test_native_plugin_preserves_no_signal_diagnostic(market, quotes):
         await NativePositiveEV().evaluate(None, dict(market=m, quotes=q,
             native_books=[b.model_copy(update={"source_time": None})], config=c,
             max_stake_usd=D("1"), mode="sandbox"))
+
+
+@pytest.mark.parametrize("policy,error", [
+    ({"eligible_books": ["pinnacle", "circa"]}, "no longer eligible"),
+    ({"eligible_books": []}, "no longer eligible"),
+    ({"weights": {"pinnacle": D("2")}}, "weight changed"),
+    ({"devig_method": "power"}, "method changed"),
+    ({"required_books": ["fanduel"]}, "requirements"),
+])
+def test_native_submission_rechecks_current_reference_policy(market, quotes, policy, error):
+    m, q, b, f, config, now = setup_native(market, quotes)
+    changed = PricingConfig.model_validate(config.model_dump() | policy)
+    with pytest.raises(NoSignal, match=error):
+        candidate((m, q, b, f, changed, now))

@@ -295,3 +295,30 @@ def test_non_threshold_and_unidentified_source_labels_are_not_paired(updates):
     mapper = VerifiedProviderMapper()
     assert mapper(envelope(over, under)) == []
     assert len(mapper.quarantine) == 2
+
+
+@pytest.mark.parametrize("market_time", [None, "invalid", SOURCE.isoformat()])
+@pytest.mark.parametrize("topped_up", [False, True])
+def test_rest_book_poll_clock_never_refreshes_missing_or_old_market_clock(market_time, topped_up):
+    # Official docs and cookbook disagree on block last_update_ms semantics.
+    # A fresh block/verification/receipt clock cannot date the actual offer.
+    source_market = {"key": "h2h", "last_update": market_time,
+                     "outcomes": [{"name": "A", "price": "1.8"}, {"name": "B", "price": "2.1"}]}
+    row = {"id": "fixture-one", "sport_key": "basketball_nba", "home_team": "A", "away_team": "B",
+           "bookmakers": [{"key": "pinnacle", "last_update_ms": int(RECEIVED.timestamp() * 1000),
+                           "last_update": RECEIVED.isoformat(), "verified_at": RECEIVED.isoformat(),
+                           "is_current": True, "topped_up": topped_up, "markets": [source_market]}]}
+    raw = envelope(row, provider="parlay_rest", kind="snapshot")
+    offer, = extract_offers(raw)
+    expected_time = SOURCE if market_time == SOURCE.isoformat() else None
+    assert offer.observed_at == expected_time
+    market = Market(id="fixture-one-moneyline", event_id="fixture-one", event_name="A vs B",
+                    sport="basketball", league="nba", participants=("A", "B"), start_time=RECEIVED,
+                    market_type="moneyline", outcomes=("home", "away"), settlement=Settlement())
+    mapper = VerifiedProviderMapper([VerifiedOfferMapping(signature=offer.signature, market=market,
+        outcome_map={"A": "home", "B": "away"}, bookmaker="pinnacle", verified=True,
+        evidence="Offline fixture mapping for source-clock regression only")])
+    (_, quote), = mapper(raw)
+    assert quote.source_time == expected_time
+    assert quote.received_at == RECEIVED
+    assert not quote.fresh(5000, RECEIVED)

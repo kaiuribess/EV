@@ -9,6 +9,10 @@ class PricingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     devig_method: Literal["proportional", "power"] = "proportional"
     min_references: int = Field(default=2, ge=1)
+    eligible_books: list[str] | None = Field(default=None, description=(
+        "Exact reviewed bookmaker identities eligible for fair value. Null preserves all mapped "
+        "books; an empty list disables signals. Inclusion is not evidence of calibrated sharpness."
+    ))
     required_books: list[str] = Field(default_factory=list)
     weights: dict[str, Decimal] = Field(default_factory=dict)
     max_quote_age_ms: int = Field(default=5000, ge=100, le=300000)
@@ -21,6 +25,13 @@ class PricingConfig(BaseModel):
 
     @model_validator(mode="after")
     def positive_weights(self):
+        for books in (self.required_books, self.eligible_books or []):
+            if len(set(books)) != len(books) or any(not book or book != book.strip() for book in books):
+                raise ValueError("Reference bookmaker identities must be nonblank, exact and unique")
+        if any(not book or book != book.strip() for book in self.weights):
+            raise ValueError("Weighted bookmaker identities must be nonblank and exact")
+        if self.eligible_books is not None and set(self.required_books) - set(self.eligible_books):
+            raise ValueError("Required books must be eligible references")
         if any(not v.is_finite() or v <= 0 for v in self.weights.values()):
             raise ValueError("Reference weights must be finite and positive")
         for override in self.market_overrides.values():

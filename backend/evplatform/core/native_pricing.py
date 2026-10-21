@@ -15,7 +15,7 @@ from .models import FairValue, Market, utcnow
 from .native_accounting import (
     ExactDecimal, NativeContract, NativeInstrument, NativeOrderIntent, Nonnegative, Positive,
 )
-from .pricing import NoSignal, market_config
+from .pricing import NoSignal, market_config, validate_fair_references
 
 D = Decimal
 AnnotatedProbability = Annotated[ExactDecimal, Field(ge=0, le=1)]
@@ -180,30 +180,7 @@ def _validate_market(market: Market, fair: FairValue, book: NativeBook,
         raise NoSignal("Native source price timestamp is missing, future-dated or stale")
     if book.received_at > now or book.provider_time is not None and book.provider_time > now:
         raise NoSignal("Native receipt/publication clock is future-dated")
-    fair_age = (now - fair.calculated_at).total_seconds() * 1000
-    if fair_age < 0 or fair_age > config.max_quote_age_ms:
-        raise NoSignal("Native fair-value calculation is stale")
-    books = set()
-    for reference in fair.references:
-        try:
-            source_time = datetime.fromisoformat(reference["source_time"])
-            if source_time.tzinfo is None:
-                raise ValueError("Naive reference clock")
-            reference_age = (now - source_time).total_seconds() * 1000
-            bookmaker = reference["bookmaker"]
-            if not isinstance(bookmaker, str) or not bookmaker:
-                raise ValueError("Missing bookmaker")
-        except (TypeError, ValueError, KeyError) as exc:
-            raise NoSignal("Reference source clock/book identity is unavailable") from exc
-        if not 0 <= reference_age <= config.max_quote_age_ms:
-            raise NoSignal("Native fair-value reference expired")
-        if bookmaker in books:
-            raise NoSignal("Native reference evidence double-counts a bookmaker")
-        books.add(bookmaker)
-    if len(books) < config.min_references or set(config.required_books) - books:
-        raise NoSignal("Independent reference requirements are no longer satisfied")
-    if fair.disagreement > config.max_disagreement:
-        raise NoSignal("Native reference disagreement exceeds configured limit")
+    validate_fair_references(market, fair, config, now)
     return _settlement_bounds(market)
 
 

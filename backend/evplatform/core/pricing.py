@@ -66,8 +66,12 @@ class NoSignal(ValueError):
 
 
 def market_config(config: PricingConfig, market: Market):
-    override = config.market_overrides.get(f"{market.sport}:{market.market_type}", {})
-    return PricingConfig.model_validate({**config.model_dump(), **override})
+    override = config.market_overrides.get(f"{market.sport}:{market.market_type}")
+    if override is None:
+        return config
+    # Overrides were validated independently against the global configuration.
+    # A resolved market policy must not rebase unrelated sports' overrides.
+    return PricingConfig.model_validate({**config.model_dump(), **override, "market_overrides": {}})
 
 
 def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
@@ -78,12 +82,19 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
         raise NoSignal("Market suspended or closed")
     # Select once per bookmaker; multiple API vendors are not independent evidence.
     by_book: dict[str, Quote] = {}
+    eligible = None if config.eligible_books is None else set(config.eligible_books)
     for quote in quotes:
         if quote.market_id != market.id or quote.status != "active":
+            continue
+        if not quote.bookmaker or quote.bookmaker != quote.bookmaker.strip():
+            continue
+        if eligible is not None and quote.bookmaker not in eligible:
             continue
         if set(quote.decimal_odds) != set(market.outcomes):
             continue
         if not quote.fresh(config.max_quote_age_ms, now):
+            continue
+        if quote.received_at > now or quote.provider_time is not None and quote.provider_time > now:
             continue
         current = by_book.get(quote.bookmaker)
         ranking = lambda q: (q.source_time, q.quality, config.provider_priority.get(q.provider, 0))
@@ -113,6 +124,57 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
                      synthetic=any(q.synthetic for q in by_book.values()))
 
 
+def validate_fair_references(market: Market, fair: FairValue, config: PricingConfig,
+                             now: datetime) -> None:
+    """Recheck cached fair evidence at use time, including current reference policy.
+
+    Calculation time cannot refresh a sportsbook's source clock. A changed
+    devig/weight/eligibility policy requires a newly calculated fair value.
+    """
+    if fair.market_id != market.id or set(fair.probabilities) != set(market.outcomes):
+        raise NoSignal("Fair value does not match the normalized market")
+    probabilities = list(fair.probabilities.values())
+    if (any(not p.is_finite() or not 0 <= p <= 1 for p in probabilities)
+            or abs(sum(probabilities) - 1) > D("0.00000001")):
+        raise NoSignal("Invalid fair probability distribution")
+    if fair.calculated_at.tzinfo is None:
+        raise NoSignal("Fair-value calculation clock is unavailable")
+    fair_age = (now - fair.calculated_at).total_seconds() * 1000
+    if not 0 <= fair_age <= config.max_quote_age_ms:
+        raise NoSignal("Fair-value calculation is stale or future-dated")
+    if fair.model != config.devig_method:
+        raise NoSignal("Fair-value method changed; recalculation required")
+    books = set()
+    eligible = None if config.eligible_books is None else set(config.eligible_books)
+    for reference in fair.references:
+        try:
+            source_time = datetime.fromisoformat(reference["source_time"])
+            if source_time.tzinfo is None:
+                raise ValueError("Naive reference clock")
+            reference_age = (now - source_time).total_seconds() * 1000
+            bookmaker = reference["bookmaker"]
+            if not isinstance(bookmaker, str) or not bookmaker or bookmaker != bookmaker.strip():
+                raise ValueError("Missing bookmaker")
+            weight = D(reference["weight"])
+            if not weight.is_finite() or weight <= 0:
+                raise ValueError("Invalid weight")
+        except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
+            raise NoSignal("Reference source clock/book identity/weight is unavailable") from exc
+        if not 0 <= reference_age <= config.max_quote_age_ms:
+            raise NoSignal("Fair-value reference expired or is future-dated")
+        if bookmaker in books:
+            raise NoSignal("Reference evidence double-counts a bookmaker")
+        if eligible is not None and bookmaker not in eligible:
+            raise NoSignal("Fair-value reference is no longer eligible")
+        if weight != config.weights.get(bookmaker, D(1)):
+            raise NoSignal("Fair-value reference weight changed; recalculation required")
+        books.add(bookmaker)
+    if len(books) < config.min_references or set(config.required_books) - books:
+        raise NoSignal("Independent reference requirements are no longer satisfied")
+    if not fair.disagreement.is_finite() or not 0 <= fair.disagreement <= config.max_disagreement:
+        raise NoSignal("Reference disagreement exceeds configured limit")
+
+
 def opportunity(market: Market, fair: FairValue, book: OrderBook, config: PricingConfig,
                 now: datetime | None = None) -> Candidate:
     now = now or utcnow()
@@ -123,10 +185,15 @@ def opportunity(market: Market, fair: FairValue, book: OrderBook, config: Pricin
         raise NoSignal("Push probability model is required for this contract")
     if book.market_id != market.id or fair.market_id != market.id or book.outcome not in fair.probabilities:
         raise NoSignal("Book does not match the normalized market")
+    if market.status in {"suspended", "closed"}:
+        raise NoSignal("Market suspended or closed")
+    validate_fair_references(market, fair, config, now)
     if not book.synchronized or book.status != "active" or not book.asks:
         raise NoSignal("Order book unavailable or not synchronized")
     if not book.fresh(config.max_book_age_ms, now):
         raise NoSignal("Stale order book")
+    if book.received_at > now or book.provider_time is not None and book.provider_time > now:
+        raise NoSignal("Order-book receipt/publication clock is future-dated")
     if not book.fee.verified:
         raise NoSignal("Fee schedule is not verified")
     p = fair.probabilities[book.outcome]
