@@ -80,7 +80,7 @@ def test_fractional_kalshi_and_prophetx_stakes_keep_native_quantity(market, quot
     stake = candidate(setup_native(market, quotes, venue="prophetx", price="125", quantity="4.17"))
     assert stake.intent.quantity == D("4.17")
     assert stake.intent.maximum_cost_usd == D("4.17")
-    assert stake.intent.minimum_gross_payout_usd == D("9.38")
+    assert stake.intent.minimum_gross_payout_usd == D("8.34")  # each .01 match may round profit down
 
 
 def test_negative_native_observations_are_visible_but_not_qualified(market, quotes):

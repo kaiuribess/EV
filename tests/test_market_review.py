@@ -13,7 +13,11 @@ def review(**changes):
         market_type="player_prop", player_id="player1", statistic="points", line="20.5",
         outcomes=("over", "under"), period="full_game", scope="player", overtime="included",
         participation="must_play", void_rule="refund", push_rule="not_applicable", currency="USD",
-        contract_type="binary", evidence_urls=("https://example.test/OFFLINE",))
+        contract_type="binary", evidence_urls=("https://example.test/OFFLINE",),
+        postponement_rule="OFFLINE scheduled day", interruption_rule="OFFLINE full game required",
+        venue_change_rule="OFFLINE void", forfeit_rule="OFFLINE void", tie_rule="OFFLINE void",
+        correction_rule="OFFLINE no corrections", official_result_rule="OFFLINE official league result",
+        payout_rule="OFFLINE binary unit payout; entry cost refunded on void")
     return ContractReview(**{**values, **changes})
 
 

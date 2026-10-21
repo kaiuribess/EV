@@ -104,8 +104,11 @@ export function parseSetupReport(value: unknown): SetupReport {
       || !(risk.values === null || record(risk.values))) return fail()
   if (record(risk.values)) {
     const values = risk.values
-    if (!['max_order_stake_usd', 'max_event_exposure_usd', 'max_player_exposure_usd', 'max_correlated_exposure_usd'].every(k => decimal(values[k]) && Number(values[k]) > 0)
+    if (!['max_order_stake_usd', 'max_event_exposure_usd', 'max_player_exposure_usd', 'max_correlated_exposure_usd'].every(k => values[k] === null && values.available_cash_only === true || decimal(values[k]) && Number(values[k]) > 0)
       || !['daily_loss_limit_usd', 'max_venue_exposure_usd', 'max_total_exposure_usd'].every(k => values[k] === null || decimal(values[k]) && Number(values[k]) > 0)
+      || values.max_order_stake_usd === null && values.stake_sizing !== 'quarter_kelly'
+      || values.stake_sizing !== undefined && !['capped', 'quarter_kelly'].includes(values.stake_sizing as string)
+      || values.unit_size_usd !== undefined && (!decimal(values.unit_size_usd) || Number(values.unit_size_usd) <= 0)
       || !bools(values, ['available_cash_only', 'block_overlapping_events', 'block_overlapping_players'])
       || !['max_open_orders', 'max_orders_per_minute'].every(k => count(values[k]) && Number(values[k]) > 0)) return fail()
   }

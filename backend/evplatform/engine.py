@@ -564,6 +564,8 @@ class Engine:
             if book.sequence != c.book_sequence:
                 raise RiskRejected("Book changed; wait for a newly calculated candidate")
             # Recheck fee rounding at the actually affordable quantity.
+            if self.settings.risk.max_order_stake is None:
+                raise RiskRejected("Uncapped account sizing requires the native quarter-Kelly route")
             qty = min(c.max_quantity, int(self.settings.risk.max_order_stake / c.price))
             if qty <= 0:
                 raise RiskRejected("No affordable quantity")

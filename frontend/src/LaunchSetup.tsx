@@ -4,6 +4,7 @@ import { request } from './api'
 import { human, money, type Json } from './types'
 import { activationBody, activationGate, parseSetupReport, profileFreshnessCoverage, setupIsCurrent, weightSummary, type SetupReport } from './launchSetupModel'
 import './LaunchSetup.css'
+import { AccountCash } from './AccountCash'
 
 type Props = { mutate: (path: string, body: Json) => Promise<Json>; notify: (message: string, error?: boolean) => void; disabled: boolean }
 const amount = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? money(value) : 'Not configured'
@@ -11,13 +12,15 @@ function Limits({ report, complete = false }: { report: SetupReport; complete?: 
   const values = report.risk_policy.values
   const cap = (value: unknown) => value === null && values?.available_cash_only === true ? 'Verified available cash' : amount(value)
   return <div className="setup-limits">
-    <div><span>Maximum per bet, including fees</span><strong>{amount(values?.max_order_stake_usd)}</strong></div>
+    <div><span>Maximum per bet, including fees</span><strong>{values?.max_order_stake_usd === null && values?.stake_sizing === 'quarter_kelly' ? 'Quarter Kelly · account cash' : amount(values?.max_order_stake_usd)}</strong></div>
+    <div><span>Stake sizing / reporting unit</span><strong>{values?.stake_sizing === 'quarter_kelly' ? 'Quarter Kelly' : 'Capped stake'} · 1 unit = {amount(values?.unit_size_usd ?? 5)}</strong></div>
+    {values?.stake_sizing === 'quarter_kelly' && <p className="setup-note">Uses this account’s verified available cash after pending reservations. Orders below a verified market minimum are skipped, never rounded up. $5 units report size; they do not cap bets.</p>}
     <div><span>Daily-loss stop</span><strong>{values?.daily_loss_limit_usd === null ? 'Off' : amount(values?.daily_loss_limit_usd)}</strong></div>
     <div><span>Account funding</span><strong>{values?.available_cash_only === true ? 'Verified cash in each account' : 'Not confirmed'}</strong></div>
     <div><span>Overlapping game / player bets</span><strong>{values?.block_overlapping_events === true && values?.block_overlapping_players === true ? 'Blocked across accounts' : 'Not confirmed'}</strong></div>
-    {complete && <><div><span>Per-event exposure cap</span><strong>{amount(values?.max_event_exposure_usd)}</strong></div>
-      <div><span>Per-player exposure cap</span><strong>{amount(values?.max_player_exposure_usd)}</strong></div>
-      <div><span>Correlated-exposure cap</span><strong>{amount(values?.max_correlated_exposure_usd)}</strong></div>
+    {complete && <><div><span>Per-event exposure cap</span><strong>{cap(values?.max_event_exposure_usd)}</strong></div>
+      <div><span>Per-player exposure cap</span><strong>{cap(values?.max_player_exposure_usd)}</strong></div>
+      <div><span>Correlated-exposure cap</span><strong>{cap(values?.max_correlated_exposure_usd)}</strong></div>
       <div><span>Per-account exposure cap</span><strong>{cap(values?.max_venue_exposure_usd)}</strong></div>
       <div><span>Total exposure cap</span><strong>{cap(values?.max_total_exposure_usd)}</strong></div>
       <div><span>Maximum open orders</span><strong>{typeof values?.max_open_orders === 'number' ? values.max_open_orders : 'Not configured'}</strong></div>
@@ -169,6 +172,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
           </article>
         })}</div>
         {!report.accounts.length && <p className="setup-placeholder">No exchange monitor plugins are registered.</p>}
+        <AccountCash />
         <div className="setup-two-columns"><section className="setup-subpanel"><div className="setup-section-title"><h3>Trading limits</h3><span className={`setup-pill ${current && report.risk_policy.applied ? 'good' : ''}`}>{!current ? 'Unconfirmed' : report.risk_policy.applied ? 'Applied to live scope' : report.risk_policy.values ? 'Saved draft · not applied' : 'Not configured'}</span></div><Limits report={report} /><details className="setup-all-limits"><summary>Review all exposure and order limits <ChevronRight size={12} /></summary><Limits report={report} complete /></details><p className="setup-note">{report.risk_policy.applied ? 'These limits bind the reviewed scope.' : 'Saved limits do not authorize real orders.'} Wallet balances are never pooled. Pending orders and unsettled fills retain their game and player reservations.</p>{report.risk_policy.error && <p className="setup-inline-error">{report.risk_policy.error}</p>}</section>
           <PricingModel pricing={report.pricing} /></div>
         <details className="setup-inputs"><summary><Radio size={16} />Sportsbook mapping coverage <ChevronRight size={13} /></summary><div className="table-scroll"><table><thead><tr><th>PROVIDER</th><th>ACCESS</th><th>MAPPED UPDATES</th><th>AWAITING REVIEW</th></tr></thead><tbody>{report.inputs.map(input => <tr key={input.provider}><td>{human(input.provider)}</td><td>{current && input.authenticated ? 'Authenticated' : 'Unconfirmed'}</td><td>{input.mapped_quotes.toLocaleString()}</td><td>{input.quarantined.toLocaleString()}</td></tr>)}</tbody></table></div><p className="setup-note">Mapped updates are cumulative observations, not unique tradable markets. Quarantined observations cannot produce approved native orders.</p></details>

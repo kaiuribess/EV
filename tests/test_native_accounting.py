@@ -104,7 +104,8 @@ def test_unverified_mapping_fee_and_wrong_currency_fail_closed():
 def test_prophetx_exact_american_limits_and_conservative_payout_bounds():
     order = intent("prophetx")
     assert order.maximum_cost_usd == D("20")
-    assert order.minimum_gross_payout_usd == D("33.33")
+    assert order.minimum_gross_payout_usd == D("20")  # .01 matches may each round down to .01
+    assert order.instrument.payout_bound(D("20"), D("-150")) == D("33.33")
     assert order.instrument.payout_bound(D("20"), D("-150"), upper=True) == D("33.34")
     assert order.instrument.price_satisfies_limit(D("-140"), D("-150"))
     assert order.instrument.price_satisfies_limit(D("100"), D("-150"))
@@ -122,6 +123,16 @@ def test_prophetx_partial_usd_stake_and_actual_fill_price_not_order_limit():
         ledger.apply_fill(fill(fill_id="wrong", quantity="10", price="-160", cost_usd="10",
                                gross_payout_usd="16.25", fee_usd="0.1"))
     assert ledger.totals.quantity == D("10")
+
+
+def test_many_legal_small_matches_do_not_claim_single_rounded_payout():
+    ledger = NativeAccounting(intent("prophetx"), "native-order")
+    for index in range(100):
+        ledger.apply_fill(fill(fill_id=f"small-{index}", quantity=".01", price="-150",
+            cost_usd=".01", gross_payout_usd=".01", fee_usd="0"))
+    assert ledger.totals.quantity == 1
+    assert ledger.totals.gross_payout_usd == 1
+    assert ledger.intent.instrument.minimum_split_payout(D(1), D("-150")) == 1
 
 
 def test_fill_idempotency_conflicting_duplicate_and_foreign_order():

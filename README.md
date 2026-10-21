@@ -228,6 +228,20 @@ reviewed mappings/fees, current synchronized feeds, explicit limits, or genuine
 lifecycle and settlement evidence. The current installation is not ready for
 real orders; see [the launch guide](docs/GO_LIVE.md).
 
+The saved owner policy now uses **quarter Kelly**, with **$5 = 1 reporting unit**
+and no fixed dollar cap per bet. Each account's verified available cash funds
+only that account, after pending reservations; overlapping game/player bets
+remain blocked across venues. Orders below verified native minimums are skipped.
+The policy stays an unapplied draft until launch evidence passes. See
+[stake sizing](docs/STAKE_SIZING.md). The Trading desk also offers a separate
+read-only **Refresh balances** view; reported balances are not spendable-cash
+certification or permission to trade.
+
+Current actual checks and repeatable evidence tools are documented in
+[market review](docs/MARKET_EVIDENCE_WORKFLOW.md),
+[source freshness](docs/FRESHNESS_EVIDENCE.md), and
+[native lifecycle evidence](docs/NATIVE_LIFECYCLE_EVIDENCE.md).
+
 Book weights are configurable, not learned or validated automatically. The
 current default is equal weighting after removing each book's margin, requiring
 two distinct books and fresh quotes. See [the reference model](docs/REFERENCE_MODEL.md)

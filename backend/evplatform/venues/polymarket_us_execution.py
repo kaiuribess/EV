@@ -29,7 +29,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_HALF_EVEN, localcontext
 from cryptography.hazmat.primitives import serialization
 
 from ..core.models import utcnow
-from ..core.native_accounting import NativeAccounting, NativeCumulativeSnapshot, NativeFill, NativeOrderIntent
+from ..core.native_accounting import NativeAccounting, NativeCumulativeSnapshot, NativeFill, NativeOrderIntent, merge_native_fill_metadata
 from ..core.plugins import Manifest, UnsupportedOperation
 from .bridge import NativePreflight
 from .common import NativeTradingGate, PreflightRequired, UnknownOrderOutcome, VenueError, VenueHTTPError
@@ -174,6 +174,7 @@ def normalize_execution(intent, execution, *, expected_order_id, observed_at) ->
     if not quantity <= cumulative <= intent.quantity:
         raise ReconciliationError("Invalid execution quantity watermark")
     fill = NativeFill(fill_id=native_id(execution.get("id")), order_id=expected_order_id,
+        trade_id=native_id(execution["tradeId"]) if "tradeId" in execution else None,
         client_order_id=intent.client_order_id, quantity=quantity, price=price,
         cost_usd=intent.instrument.cost_for(quantity, price), gross_payout_usd=quantity,
         fee_usd=amount(execution.get("commissionNotionalCollected"), "actual execution commission"),
@@ -316,8 +317,11 @@ class PolymarketUSExecutionVenue:
 
     def _remember_fill(self, order_id, fill):
         old = self._fills.get(order_id, {}).get(fill.fill_id)
-        if old is not None and old.model_dump(exclude={"observed_at"}) != fill.model_dump(exclude={"observed_at"}):
-            raise ReconciliationError("Conflicting Polymarket US execution identity")
+        if old is not None:
+            try:
+                fill = merge_native_fill_metadata(old, fill)
+            except ValueError:
+                raise ReconciliationError("Conflicting Polymarket US execution identity") from None
         self._fills.setdefault(order_id, {})[fill.fill_id] = fill
 
     async def _post(self, path, body, intent, *, placement):

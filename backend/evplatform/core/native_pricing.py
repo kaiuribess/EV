@@ -16,6 +16,7 @@ from .native_accounting import (
     ExactDecimal, NativeContract, NativeInstrument, NativeOrderIntent, Nonnegative, Positive,
 )
 from .pricing import NoSignal, market_config, validate_fair_references
+from .stake_sizing import StakeSizing, quarter_kelly_budget
 
 D = Decimal
 AnnotatedProbability = Annotated[ExactDecimal, Field(ge=0, le=1)]
@@ -148,6 +149,7 @@ class NativeCandidate(NativeContract):
     sensitivity_expected_profit_usd: ExactDecimal | None = None
     sensitivity_ev_per_usd_payout: ExactDecimal | None = None
     sensitivity_roi: ExactDecimal | None = None
+    sizing: StakeSizing | None = None
 
 
 def _settlement_bounds(market: Market) -> NativeSettlementProbabilities:
@@ -201,7 +203,7 @@ def _validate_market(market: Market, fair: FairValue, book: NativeBook,
 
 def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: PricingConfig,
                     intent: NativeOrderIntent, bounds: NativeSettlementProbabilities,
-                    now: datetime) -> NativeCandidate:
+                    now: datetime, *, durable_intent: NativeOrderIntent | None = None) -> NativeCandidate:
     config = market_config(config, market)
     probability = fair.probabilities[intent.instrument.outcome]
     if not probability.is_finite() or not 0 <= probability <= 1:
@@ -227,7 +229,7 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
     reasons = () if qualified else ("Both primary and sensitivity models must meet native EV and ROI thresholds",)
     ref_ages = [(now - datetime.fromisoformat(ref["source_time"])).total_seconds() * 1000 for ref in fair.references]
     return NativeCandidate(id=intent.id, market_id=market.id, event_id=market.event_id,
-        venue=intent.instrument.venue, outcome=intent.instrument.outcome, intent=intent,
+        venue=intent.instrument.venue, outcome=intent.instrument.outcome, intent=durable_intent or intent,
         fair_probability=probability, expected_profit_usd=expected_profit, ev_per_usd_payout=ev,
         roi=roi, book_revision=book.revision, references=fair.references, calculated_at=now,
         quote_age_ms=max([book.age_ms(now), *ref_ages]),
@@ -241,17 +243,29 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
 
 
 def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config: PricingConfig, *,
-                       max_stake_usd: Decimal, mode: Literal["sandbox", "production"],
+                       max_stake_usd: Decimal | None, mode: Literal["sandbox", "production"],
+                       stake_sizing: Literal["capped", "quarter_kelly"] = "capped",
+                       available_cash_usd: Decimal | None = None, unit_size_usd: Decimal = D("5"),
                        now: datetime | None = None) -> NativeCandidate:
     """Size the best executable native level within a USD budget, including fees."""
     now = now or utcnow()
     if mode not in {"sandbox", "production"}:
         raise NoSignal("Native execution mode is not explicitly configured")
-    if max_stake_usd is None or isinstance(max_stake_usd, (float, bool)):
+    if (max_stake_usd is None and stake_sizing != "quarter_kelly") or isinstance(max_stake_usd, (float, bool)):
         raise NoSignal("Native stake budget must be explicitly configured as an exact decimal")
     bounds = _validate_market(market, fair, book, config, now)
     if mode == "production" and not fair.live_execution_allowed:
         raise NoSignal("Reference profile does not authorize production execution")
+    sizing = None
+    if stake_sizing == "quarter_kelly":
+        probabilities = [fair.probabilities[book.instrument.outcome]]
+        if fair.sensitivity_probabilities:
+            probabilities.append(fair.sensitivity_probabilities[book.instrument.outcome])
+        sizing = quarter_kelly_budget(book, min(probabilities), bounds, available_cash_usd=available_cash_usd,
+            unit_size_usd=unit_size_usd, now=now, max_stake_usd=max_stake_usd)
+        if sizing.budget_usd < sizing.minimum_cost_with_fees_usd:
+            raise NoSignal("Quarter-Kelly budget is below the verified native minimum including fees; skipped")
+        max_stake_usd = sizing.budget_usd
     try:
         max_stake_usd = D(max_stake_usd)
     except (ValueError, TypeError, ArithmeticError) as exc:
@@ -275,7 +289,8 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     if instrument.maximum_quantity is not None:
         quantity = min(quantity, instrument.maximum_quantity)
     quantity = (quantity / step).to_integral_value(rounding=ROUND_FLOOR) * step
-    if quantity < instrument.minimum_quantity:
+    minimum = sizing.minimum_quantity if sizing else instrument.minimum_quantity
+    if quantity < minimum:
         raise NoSignal("No executable native quantity within stake and liquidity limits")
     maximum_fee = fee.maximum_fee(instrument, quantity, now)
     identity = str(uuid4())
@@ -284,7 +299,7 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
         fees_verified=True, created_at=now, mode=mode)
     if intent.reserved_cost_usd > max_stake_usd:
         raise NoSignal("Native rounded reservation exceeds stake budget")
-    return _make_candidate(market, fair, book, config, intent, bounds, now)
+    return _make_candidate(market, fair, book, config, intent, bounds, now).model_copy(update={"sizing": sizing})
 
 
 def native_revalidate_intent(intent: NativeOrderIntent, market: Market, fair: FairValue,
@@ -314,10 +329,13 @@ def native_revalidate_intent(intent: NativeOrderIntent, market: Market, fair: Fa
         raise NoSignal("Current native fees exceed the original reservation")
     # Keep the original durable ID and price. This is a validation result, not
     # authorization to submit a new order or retry an unknown outcome.
-    remaining_intent = NativeOrderIntent.model_validate(intent.model_dump() | {
+    # A residual after a real partial fill may be smaller than a NEW order's
+    # minimum. Identity/grid/fees were validated above; this valuation copy is
+    # never transmitted as a new order or used to increase the original size.
+    remaining_intent = intent.model_copy(update={
         "quantity": quantity, "max_fee_usd": fees, "fee_source": book.fee_bound.source,
     })
-    result = _make_candidate(market, fair, book, config, remaining_intent, bounds, now)
+    result = _make_candidate(market, fair, book, config, remaining_intent, bounds, now, durable_intent=intent)
     if not result.qualified:
         raise NoSignal("Native intent no longer meets configured edge and ROI")
     return result

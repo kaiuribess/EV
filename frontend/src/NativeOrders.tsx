@@ -4,6 +4,7 @@ import { request } from './api'
 type NativeOrder = {
   status: string; filled_quantity: string; filled_cost_usd: string; fees: string;
   gross_payout_usd: string; reconciliation_complete: boolean; reason: string;
+  sizing?: { method: string; unit_size_usd: string; budget_usd: string } | null;
   intent: { id: string; quantity: string; limit_price: string; mode: string;
     instrument: { venue: string; canonical_market_id: string; outcome: string; quantity_unit: string } }
 }
@@ -34,7 +35,7 @@ export function NativeOrders() {
       <td>{o.intent.instrument.venue}<small>{o.intent.instrument.canonical_market_id} · {o.intent.instrument.outcome}</small></td>
       <td>{o.intent.mode}</td><td>{o.status}</td>
       <td>{o.filled_quantity} / {o.intent.quantity}<small>{o.intent.instrument.quantity_unit.replaceAll('_', ' ')}</small></td>
-      <td>${o.filled_cost_usd}<small>Fees ${o.fees}</small></td>
+      <td>${o.filled_cost_usd}<small>Fees ${o.fees}</small>{o.sizing && <small>{((Number(o.filled_cost_usd) + Number(o.fees)) / Number(o.sizing.unit_size_usd)).toFixed(3)} units · ${o.sizing.unit_size_usd}/unit</small>}</td>
       <td>{o.reconciliation_complete ? 'Confirmed' : 'Pending'}<small>{o.reason}</small></td>
     </tr>)}</tbody></table></div> : <p className="quiet-message">No native orders recorded. Launch checks must pass before native execution can be enabled.</p>}
   </section>

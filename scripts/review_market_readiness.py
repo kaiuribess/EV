@@ -14,12 +14,19 @@ def main(argv=None):
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--url", help="Local app URL, e.g. http://127.0.0.1:8001")
     source.add_argument("--snapshot", type=Path, help="Saved /api/market-review response")
+    source.add_argument("--write-comparison-schema", type=Path,
+                        help="Write a new JSON Schema for listing-bound contract/evidence intake; no network access")
     parser.add_argument("--comparisons", type=Path, help="Explicit ContractReview pairs; these are not certificates")
     parser.add_argument("--max-source-age", type=float, default=5.0)
     parser.add_argument("--max-rows", type=int, default=3000)
     parser.add_argument("--output", type=Path, help="New report file; existing files are never overwritten")
     args = parser.parse_args(argv)
     try:
+        if args.write_comparison_schema:
+            with args.write_comparison_schema.open("x", encoding="utf-8") as stream:
+                stream.write(json.dumps(ReviewPairs.model_json_schema(), indent=2) + "\n")
+            print(json.dumps({"schema_written": True, "execution_authorized": False}))
+            return 0
         snapshot = fetch_pending_reviews(args.url, max_rows=args.max_rows) if args.url else json.loads(args.snapshot.read_text(encoding="utf-8"))
         pairs = ReviewPairs.model_validate_json(args.comparisons.read_text(encoding="utf-8")) if args.comparisons else None
         report = build_review_report(snapshot, max_age_seconds=args.max_source_age, pairs=pairs)

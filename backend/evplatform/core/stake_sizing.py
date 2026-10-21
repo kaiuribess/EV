@@ -1,0 +1,71 @@
+"""Conservative quarter Kelly in USD, using one account's available cash.
+
+Fees are bounded at the smallest legal order so fixed-fee dilution cannot
+inflate the Kelly fraction. Refund/void probability is treated as a loss for
+sizing only. This is deliberately more conservative than binary Kelly when
+settlement has additional outcomes; it never claims fitted probabilities.
+"""
+from decimal import Decimal as D, ROUND_CEILING, localcontext
+
+from pydantic import Field
+
+from .native_accounting import NativeContract, Nonnegative, Positive
+from .pricing import NoSignal
+
+
+class StakeSizing(NativeContract):
+    method: str = "quarter_kelly"
+    fraction: Positive = D("0.25")
+    unit_size_usd: Positive
+    account_cash_after_reservations_usd: Nonnegative
+    conservative_probability: Nonnegative
+    full_kelly_fraction: Nonnegative
+    budget_usd: Nonnegative
+    minimum_quantity: Positive
+    minimum_cost_usd: Positive
+    minimum_cost_with_fees_usd: Positive
+    minimum_evidence: str = Field(min_length=1)
+
+
+def minimum_order(book, price, now):
+    ins = book.instrument
+    if not ins.verified or not ins.order_minimum_verified or ins.minimum_order_cost_usd is None or not ins.order_minimum_source:
+        raise NoSignal("Native minimum stake and quantity rules are not verified")
+    with localcontext() as context:
+        context.prec = 100
+        cost_per_step = ins.cost_for(ins.quantity_step, price)
+        cash_steps = (ins.minimum_order_cost_usd / cost_per_step).to_integral_value(rounding=ROUND_CEILING)
+        quantity = max(ins.minimum_quantity, cash_steps * ins.quantity_step)
+        ins.validate_quantity(quantity, order=True)
+        cost = ins.cost_for(quantity, price)
+        return quantity, cost, cost + book.fee_bound.maximum_fee(ins, quantity, now)
+
+
+def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_size_usd, now,
+                        max_stake_usd=None, price=None):
+    if isinstance(available_cash_usd, (float, bool)) or available_cash_usd is None:
+        raise NoSignal("Quarter Kelly requires verified account cash")
+    cash = D(available_cash_usd)
+    if not cash.is_finite() or cash <= 0:
+        raise NoSignal("No verified available account cash after pending reservations")
+    price = book.asks[0].price if price is None else price
+    ins = book.instrument
+    quantity, cost, reserved = minimum_order(book, price, now)
+    with localcontext() as context:
+        context.prec = 100
+        # Match size may be much smaller than the NEW order minimum. Reserve
+        # for a cash rounding loss on every smallest legal partial match.
+        gross = ins.minimum_split_payout(quantity, price) / quantity
+        unit_cost = reserved / quantity
+        p = probability * (1 - bounds.push_probability_upper_bound - bounds.void_probability_upper_bound)
+        fraction = max(D(0), min(D(1), (p * gross - unit_cost) / (gross - unit_cost))) if gross > unit_cost else D(0)
+        budget = cash * D("0.25") * fraction
+        if max_stake_usd is not None:
+            cap = D(max_stake_usd)
+            if not cap.is_finite() or cap <= 0:
+                raise NoSignal("Invalid native stake cap")
+            budget = min(budget, cap)
+    return StakeSizing(unit_size_usd=unit_size_usd, account_cash_after_reservations_usd=cash,
+        conservative_probability=p, full_kelly_fraction=fraction, budget_usd=budget,
+        minimum_quantity=quantity, minimum_cost_usd=cost, minimum_cost_with_fees_usd=reserved,
+        minimum_evidence=ins.order_minimum_source)

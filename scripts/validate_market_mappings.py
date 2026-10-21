@@ -14,7 +14,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from evplatform.core.readiness import digest_json
+from evplatform.core.market_review import compare_contracts
 from evplatform.integrations.normalization import MappingFile
+from evplatform.integrations.review_report import ReviewPairs
 from evplatform.venues.bridge import VerifiedVenueMapping
 from evplatform.venues.book_normalization import NativeBookMapper, NativeMappingFile
 
@@ -27,7 +29,8 @@ class VenueMappingFile(BaseModel):
 
 
 def validate_mappings(provider_files: list[MappingFile], venue_files: list[VenueMappingFile],
-                      *, min_reference_books: int = 2, native_files: list[NativeMappingFile] | None = None) -> dict:
+                      *, min_reference_books: int = 2, native_files: list[NativeMappingFile] | None = None,
+                      reviews: ReviewPairs | None = None, require_evidence: bool = False) -> dict:
     issues: list[dict] = []
     signatures = {}
     markets = {}
@@ -122,14 +125,65 @@ def validate_mappings(provider_files: list[MappingFile], venue_files: list[Venue
         issue("provider.empty", "provider", "Supply reviewed provider mappings")
     if not native_keys:
         issue("venue.empty", "venue", "Supply reviewed native venue mappings")
+    # Optional strict dossier validation is intentionally separate from legacy
+    # structural checks. It never converts a review into an executable mapping.
+    review_reports = []
+    covered_pairs = set()
+    for pair in (reviews or ReviewPairs()).comparisons:
+        comparison = compare_contracts(pair.left, pair.right)
+        review_reports.append({"provider_signature": pair.provider_signature,
+                               "native_market_id": pair.right.source_market_id, **comparison})
+        provider = signatures.get(pair.provider_signature)
+        scope = pair.provider_signature or "unbound_review"
+        if provider is None or pair.canonical_market_id != provider.market.id or pair.canonical_identity != provider.market.identity():
+            issue("evidence.provider_binding_mismatch", scope,
+                  "Bind the review to an existing exact source signature, canonical market and current Market.identity()")
+            continue
+        market = provider.market
+        native_matches = [key for key, canonical in native_keys.items()
+                          if key[:2] == (pair.right.source, pair.right.source_market_id) and canonical[1] == market.id]
+        if pair.left.source != provider.bookmaker or not native_matches:
+            issue("evidence.source_or_native_binding_mismatch", scope,
+                  "Use the reviewed bookmaker ID and exact execution venue/instrument ID")
+            continue
+        values = {"event_id": market.event_id, "sport": market.sport, "league": market.league,
+                  "participant_ids": market.participants, "start_time": market.start_time,
+                  "market_type": market.market_type, "player_id": market.player_id,
+                  "statistic": market.statistic, "line": market.line, "outcomes": market.outcomes,
+                  **{field: getattr(market.settlement, field) for field in
+                     ("period", "scope", "overtime", "participation", "void_rule", "push_rule", "currency", "contract_type")}}
+        for side in (pair.left, pair.right):
+            for field, expected in values.items():
+                actual = getattr(side, field)
+                if field in {"participant_ids", "outcomes"}:
+                    actual, expected = set(actual or ()), set(expected)
+                if actual != expected:
+                    issue("evidence.canonical_fact_mismatch", f"{scope}:{field}",
+                          "The reviewed fact must match the actual canonical mapping; do not copy a fingerprint over conflicting facts")
+        if not comparison["evidence_complete"]:
+            issue("evidence.incomplete_or_incompatible", scope,
+                  "Resolve exact rule differences and provide listing-bound field evidence; see review_reports")
+        for native_key in native_matches:
+            covered_pairs.add((pair.provider_signature, *native_key[:2]))
+    if require_evidence:
+        for signature, provider in signatures.items():
+            for native_key, canonical in native_keys.items():
+                if canonical[1] == provider.market.id and (signature, *native_key[:2]) not in covered_pairs:
+                    issue("evidence.missing_contract_comparison", signature,
+                          "Supply a complete exact provider-to-native contract review for every referenced instrument")
     # Binding covers complete configuration including evidence and explicit units.
-    digest = digest_json({"providers": [f.model_dump(mode="json") for f in provider_files],
-                          "venues": [f.model_dump(mode="json") for f in venue_files],
-                          "native": [f.model_dump(mode="json") for f in native_files]})
+    digest_payload = {"providers": [f.model_dump(mode="json") for f in provider_files],
+                      "venues": [f.model_dump(mode="json") for f in venue_files],
+                      "native": [f.model_dump(mode="json") for f in native_files]}
+    if reviews is not None:
+        digest_payload["reviews"] = reviews.model_dump(mode="json")
+    digest = digest_json(digest_payload)
     return {"schema_version": 1, "valid": not issues, "mapping_digest": digest,
             "native_mapping_digest": extended_digest if extended else None,
             "provider_mappings": len(signatures), "canonical_markets": len(markets),
             "native_outcomes": len(native_keys), "issues": issues,
+            "evidence_required": require_evidence, "review_reports": review_reports,
+            "external_facts_verified": False, "execution_authorized": False,
             "note": "Offline structural validation does not verify external facts or authorize trading."}
 
 
@@ -138,6 +192,8 @@ def main(argv=None) -> int:
     parser.add_argument("--provider", type=Path, action="append", default=[])
     parser.add_argument("--venue", type=Path, action="append", default=[])
     parser.add_argument("--native", type=Path, action="append", default=[], help="Extended native accounting mapping bundle")
+    parser.add_argument("--comparisons", type=Path, help="Listing-bound ContractReview evidence pairs")
+    parser.add_argument("--require-evidence", action="store_true", help="Reject every mapping without a complete exact contract dossier")
     parser.add_argument("--min-reference-books", type=int, default=2)
     args = parser.parse_args(argv)
     if args.min_reference_books < 1:
@@ -146,7 +202,9 @@ def main(argv=None) -> int:
         providers = [MappingFile.model_validate_json(path.read_text(encoding="utf-8")) for path in args.provider]
         venues = [VenueMappingFile.model_validate_json(path.read_text(encoding="utf-8")) for path in args.venue]
         natives = [NativeMappingFile.model_validate_json(path.read_text(encoding="utf-8")) for path in args.native]
-        report = validate_mappings(providers, venues, min_reference_books=args.min_reference_books, native_files=natives)
+        reviews = ReviewPairs.model_validate_json(args.comparisons.read_text(encoding="utf-8")) if args.comparisons else None
+        report = validate_mappings(providers, venues, min_reference_books=args.min_reference_books, native_files=natives,
+                                   reviews=reviews, require_evidence=args.require_evidence)
         print(json.dumps(report, indent=2))
         return 0 if report["valid"] else 1
     except ValidationError as exc:

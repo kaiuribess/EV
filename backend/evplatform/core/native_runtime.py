@@ -90,8 +90,9 @@ class NativeRuntime:
             # Native money limits have no implicit defaults: only an explicitly
             # written profile selects them. This does not grant write access.
             values = primary.limits.model_dump()
-            limits = {key.removesuffix("_usd"): value for key,value in values.items()}
+            limits = {key if key == "unit_size_usd" else key.removesuffix("_usd"): value for key,value in values.items()}
             limits["live_max_order_stake"] = limits["max_order_stake"]
+            limits["live_stake_authorized"] = True
             self.engine.risk.config = type(self.engine.risk.config).model_validate({
                 **self.engine.risk.config.model_dump(), **limits})
             self.engine.settings.risk = self.engine.risk.config
@@ -193,8 +194,45 @@ class NativeRuntime:
             native_revalidate_intent(order.intent, market, fair, book, self.engine.settings.pricing,
                                      remaining_quantity=order.quantity-order.filled_quantity,
                                      fees_already_paid_usd=order.fees)
+            risk = self.engine.risk.config
+            if risk.stake_sizing == "quarter_kelly":
+                from .native_pricing import _settlement_bounds
+                from .stake_sizing import quarter_kelly_budget
+                probabilities = [fair.probabilities[order.outcome]]
+                if fair.sensitivity_probabilities:
+                    probabilities.append(fair.sensitivity_probabilities[order.outcome])
+                caps = [v for v in (risk.max_order_stake, risk.live_max_order_stake) if v is not None]
+                sizing = quarter_kelly_budget(book, min(probabilities), _settlement_bounds(market),
+                    available_cash_usd=self.sizing_cash(order.venue, exclude_order_id=order.id),
+                    unit_size_usd=risk.unit_size_usd, max_stake_usd=min(caps) if caps else None,
+                    price=order.intent.limit_price, now=utcnow())
+                if order.reserved_cost > sizing.budget_usd or order.quantity < sizing.minimum_quantity:
+                    raise NoSignal("Native order exceeds current quarter-Kelly budget or market minimum")
         except (NoSignal, ValueError) as exc:
             raise RiskRejected(str(exc)) from exc
+
+    def sizing_cash(self, venue, *, exclude_order_id=None):
+        """Only this account's reconciled, current available cash can size risk."""
+        from decimal import Decimal
+        profile = self.profile_for(venue)
+        snapshot = self.account_snapshots.get(venue)
+        now = utcnow()
+        if (profile is None or snapshot is None or not snapshot.identity_verified
+                or not snapshot.reconciled or not getattr(snapshot, "cash_available_verified", False)
+                or snapshot.account_fingerprint != profile.account_fingerprint
+                or snapshot.venue != venue or snapshot.environment != profile.environment
+                or snapshot.balance_usd is None or snapshot.observed_at.tzinfo is None
+                or not 0 <= (now-snapshot.observed_at).total_seconds() < 30
+                or venue in getattr(self, "_account_probes", ())
+                or self._account_snapshot_fences.get(venue) != self._ledger_fence()):
+            raise NoSignal("Quarter Kelly requires current reconciled cash for this account")
+        reserved = sum((o.reserved_cost for o in self.engine.risk.native_orders.values()
+            if o.id != exclude_order_id and o.venue == venue and o.mode == profile.environment
+            and o.account_fingerprint == profile.account_fingerprint and o.status in UNRESOLVED), Decimal(0))
+        cash = snapshot.balance_usd - reserved
+        if not cash.is_finite() or cash <= 0:
+            raise NoSignal("No account cash remains after pending reservations")
+        return cash
 
     def dispatch_guard(self, intent):
         """Synchronous final placement check after transport pacing.
@@ -228,7 +266,7 @@ class NativeRuntime:
         order = NativeOrder(intent=candidate.intent, candidate_id=candidate.id,
             strategy=candidate.strategy, account_fingerprint=p.account_fingerprint,
             market_snapshot=market, market_fingerprint=market.identity(), risk_family_id=risk_family(market),
-            reviewed_correlation_groups=reviewed_correlations(market))
+            reviewed_correlation_groups=reviewed_correlations(market), sizing=candidate.sizing)
         try:
             return await self.manager.execute(order)
         finally:
@@ -248,11 +286,25 @@ class NativeRuntime:
         reason, candidates = "Native strategy is disabled", []
         if record and record.enabled:
             try:
+                account_cash = {}
+                if self.engine.risk.config.stake_sizing == "quarter_kelly":
+                    for venue in {b.instrument.venue for b in books}:
+                        try:
+                            account_cash[venue] = self.sizing_cash(venue)
+                        except NoSignal:
+                            account_cash[venue] = None
+                caps = [v for v in (self.engine.risk.config.live_max_order_stake,
+                    self.engine.risk.config.max_order_stake) if v is not None]
+                native_budget_authorized = (self.engine.risk.config.live_max_order_stake is not None
+                                            or self.engine.risk.config.live_stake_authorized)
                 candidates = await record.plugin.evaluate(event, {
                     "market": self.engine.markets[market_id],
                     "quotes": list(self.engine.quotes.get(market_id, {}).values()),
                     "native_books": books, "config": self.engine.settings.pricing,
-                    "max_stake_usd": self.engine.risk.config.live_max_order_stake,
+                    "max_stake_usd": min(caps) if caps and native_budget_authorized else None,
+                    "stake_sizing": self.engine.risk.config.stake_sizing,
+                    "unit_size_usd": self.engine.risk.config.unit_size_usd,
+                    "account_cash": account_cash,
                     "mode": self.engine.settings.mode,
                 })
                 reason = "Native fee-bounded executable offers"
@@ -405,15 +457,17 @@ class NativeRuntime:
         risk = engine.risk.config
         limits = None
         try:
-            if risk.live_max_order_stake is not None:
+            if risk.live_max_order_stake is not None or risk.live_stake_authorized:
+                caps = [v for v in (risk.max_order_stake, risk.live_max_order_stake) if v is not None]
                 limits = LiveLimits(
-                    max_order_stake_usd=min(risk.max_order_stake, risk.live_max_order_stake),
+                    max_order_stake_usd=min(caps) if caps else None,
                     max_event_exposure_usd=risk.max_event_exposure, max_player_exposure_usd=risk.max_player_exposure,
                     max_venue_exposure_usd=risk.max_venue_exposure, max_correlated_exposure_usd=risk.max_correlated_exposure,
                     max_total_exposure_usd=risk.max_total_exposure, daily_loss_limit_usd=risk.daily_loss_limit,
                     available_cash_only=risk.available_cash_only,
                     block_overlapping_events=risk.block_overlapping_events,
                     block_overlapping_players=risk.block_overlapping_players,
+                    stake_sizing=risk.stake_sizing, unit_size_usd=risk.unit_size_usd,
                     max_open_orders=risk.max_open_orders, max_orders_per_minute=risk.max_orders_per_minute)
         except (ValueError, TypeError):
             # Contradictory runtime limits are a missing authorization, not a
@@ -477,7 +531,9 @@ class NativeRuntime:
                 fee_schedule_verified=bool(books) and all(b.fee_bound.verified
                     and b.fee_bound.instrument_fingerprint == instrument_fingerprint(b.instrument)
                     and b.fee_bound.observed_at <= now < b.fee_bound.valid_until for b in books),
-                native_units_supported=bool(books), usable_reference_books=len(refs),
+                native_units_supported=bool(books), order_minimum_verified=bool(books) and all(
+                    b.instrument.order_minimum_verified and b.instrument.minimum_order_cost_usd is not None
+                    and b.instrument.order_minimum_source for b in books), usable_reference_books=len(refs),
                 required_books_present=bool(fair and fair.execution_eligible and
                     (engine.settings.mode != "production" or fair.live_execution_allowed)),
                 oldest_reference_age_ms=oldest_reference_age,

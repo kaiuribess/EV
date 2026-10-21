@@ -102,6 +102,40 @@ def test_exact_private_execution_normalizes_outcome_price_and_actual_commission(
     fill=normalize_execution(original,execution(original),expected_order_id="exchange-order-1",observed_at=utcnow())
     assert fill.price==D("0.4") and fill.cost_usd==D("1.2") and fill.gross_payout_usd==D(3)
     assert fill.fee_usd==D("0.05") and fill.timestamp_kind=="matched"
+    assert fill.fill_id == "execution-1" and fill.trade_id == "trade-1"
+
+
+@pytest.mark.parametrize("trade_id", [None, "", "bad/id", 1, True])
+def test_present_malformed_execution_trade_identity_is_rejected(trade_id):
+    original = intent()
+    raw = execution(original)
+    raw["tradeId"] = trade_id
+    with pytest.raises(ReconciliationError):
+        normalize_execution(original, raw, expected_order_id="exchange-order-1", observed_at=utcnow())
+
+
+def test_missing_legacy_trade_identity_remains_absent_never_inferred():
+    original = intent()
+    raw = execution(original)
+    raw.pop("tradeId")
+    fill = normalize_execution(original, raw, expected_order_id="exchange-order-1", observed_at=utcnow())
+    assert fill.trade_id is None
+
+
+async def test_adapter_retains_documented_trade_binding_across_legacy_replay():
+    original = intent()
+    adapter = adapter_for(original, lambda request: httpx.Response(200, json={}))
+    raw = execution(original)
+    fill = normalize_execution(original, raw, expected_order_id="exchange-order-1", observed_at=utcnow())
+    try:
+        adapter.seed_fills("exchange-order-1", original, (fill.model_copy(update={"trade_id": None}),))
+        adapter.seed_fills("exchange-order-1", original, (fill,))
+        adapter.seed_fills("exchange-order-1", original, (fill.model_copy(update={"trade_id": None}),))
+        assert adapter.execution_fills("exchange-order-1", original)[0].trade_id == "trade-1"
+        with pytest.raises(ReconciliationError):
+            adapter.seed_fills("exchange-order-1", original, (fill.model_copy(update={"trade_id": "trade-2"}),))
+    finally:
+        await adapter.client.disconnect()
 
 
 @pytest.mark.parametrize("change", ["missing_fee","maker","combo","wrong_side","wrong_id","wrong_price","bad_clock","changed_quantity"])

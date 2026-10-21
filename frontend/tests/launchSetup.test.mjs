@@ -40,6 +40,18 @@ test('well-formed blocked setup preserves all accounts without profiles and no c
   assert.equal(parsed.accounts[0].account_snapshot.balance_usd, null)
   assert.equal(activationGate(parsed, NOW, NOW).allowed, false)
 })
+test('quarter Kelly accepts cash-bounded stakes without turning the reporting unit into a cap', () => {
+  const raw = report()
+  Object.assign(raw.risk_policy.values, { max_order_stake_usd: null, max_event_exposure_usd: null,
+    max_player_exposure_usd: null, max_correlated_exposure_usd: null, stake_sizing: 'quarter_kelly', unit_size_usd: '5' })
+  const parsed = parseSetupReport(raw)
+  assert.equal(parsed.risk_policy.values.max_order_stake_usd, null)
+  assert.equal(parsed.risk_policy.values.unit_size_usd, '5')
+  for (const change of [{ stake_sizing: 'capped' }, { available_cash_only: false }, { unit_size_usd: 0 }, { unit_size_usd: 'NaN' }]) {
+    const invalid = structuredClone(raw); Object.assign(invalid.risk_policy.values, change)
+    assert.throws(() => parseSetupReport(invalid))
+  }
+})
 test('valid current production approval can prepare a digest-bound body without executing it', () => {
   const parsed = parseSetupReport(report())
   assert.equal(activationGate(parsed, NOW, NOW).allowed, true)

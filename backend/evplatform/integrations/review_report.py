@@ -20,6 +20,9 @@ class ReviewPair(BaseModel):
     model_config = ConfigDict(extra="forbid")
     left: ContractReview
     right: ContractReview
+    provider_signature: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    canonical_market_id: str | None = None
+    canonical_identity: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ReviewPairs(BaseModel):
@@ -47,6 +50,30 @@ def source_freshness(value, *, now: datetime, max_age_seconds: float) -> dict:
     state = "unknown" if age is None else "future" if age < 0 else "stale" if age > max_age_seconds else "within_limit"
     return {"source_time": value if isinstance(value, str) else None,
             "source_age_seconds": age, "freshness": state}
+
+
+def observation_evidence(observation: dict, *, now: datetime, max_age_seconds: float) -> dict:
+    """Assess a quote-bound observation and active status, never a price-change clock."""
+    clock = source_freshness(observation.get("source_observed_at"), now=now, max_age_seconds=max_age_seconds)
+    problems = []
+    if observation.get("observation_verified") is not True:
+        problems.append("verified_quote_observation")
+    if observation.get("observation_complete") is not True:
+        problems.append("complete_quote_observation")
+    if observation.get("market_status_verified") is not True:
+        problems.append("verified_market_status")
+    if observation.get("status") != "active":
+        problems.append("active_market")
+    if clock["freshness"] != "within_limit":
+        problems.append("fresh_quote_observation")
+    return {"source_observed_at": clock["source_time"],
+            "observation_age_seconds": clock["source_age_seconds"],
+            "observation_freshness": clock["freshness"],
+            "observation_verified": observation.get("observation_verified") is True,
+            "observation_complete": observation.get("observation_complete") is True,
+            "market_status_verified": observation.get("market_status_verified") is True,
+            "verification_reason": observation.get("verification_reason"),
+            "quote_evidence_ready": not problems, "quote_evidence_gaps": problems}
 
 
 def fetch_pending_reviews(url: str, *, max_rows=3000, client: httpx.Client | None = None) -> dict:
@@ -94,6 +121,7 @@ def build_review_report(snapshot: dict, *, now: datetime | None = None,
     if not isinstance(rows, list) or len(rows) > 10000:
         raise ValueError("Expected at most 10000 quarantined observations")
     observations, counts, gaps, seen, duplicates = [], Counter(), Counter(), set(), 0
+    quote_counts = Counter()
     for raw in rows:
         if not isinstance(raw, dict) or not isinstance(raw.get("identity"), dict):
             counts["invalid_identity"] += 1
@@ -113,6 +141,9 @@ def build_review_report(snapshot: dict, *, now: datetime | None = None,
         seen.add(signature)
         clocks = source_freshness(observation.get("source_time"), now=now, max_age_seconds=max_age_seconds)
         counts[clocks["freshness"]] += 1
+        quote_proof = observation_evidence(observation, now=now, max_age_seconds=max_age_seconds)
+        quote_counts[quote_proof["observation_freshness"]] += 1
+        quote_counts["ready" if quote_proof["quote_evidence_ready"] else "not_ready"] += 1
         prices = observation.get("decimal_odds", {})
         try:
             valid_prices = isinstance(prices, dict) and len(prices) >= 2 and all(
@@ -135,8 +166,8 @@ def build_review_report(snapshot: dict, *, now: datetime | None = None,
             missing.append("complete_valid_prices")
         if observation.get("status") != "active":
             missing.append("active_market")
-        if clocks["freshness"] != "within_limit":
-            missing.append("fresh_source_price")
+        missing.extend(quote_proof["quote_evidence_gaps"])
+        missing = sorted(set(missing))
         gaps.update(missing)
         observations.append({"signature": signature, "provider": identity.get("provider"),
             "bookmaker": identity.get("bookmaker"), "source_event_id": identity.get("event_id"),
@@ -145,6 +176,7 @@ def build_review_report(snapshot: dict, *, now: datetime | None = None,
             "outcome_points": identity.get("outcome_points"), "participant_labels": participants,
             "scheduled_start": context.get("scheduled_start"), "source_sport": context.get("event_sport"),
             **clocks, "provider_time": observation.get("provider_time"), "source_status": observation.get("status"),
+            **quote_proof, "source_price_changed_at": observation.get("source_price_changed_at"),
             "price_count": len(prices) if isinstance(prices, dict) else 0,
             "raw_settlement_supplied": bool(context.get("settlement") or context.get("settlement_rules")),
             "evidence_gaps": sorted(missing), "execution_authorized": False})
@@ -154,8 +186,11 @@ def build_review_report(snapshot: dict, *, now: datetime | None = None,
         "collection": snapshot.get("collection", {"atomic": False, "truncated": len(rows) < snapshot.get("total", len(rows))}),
         "summary": {"received_observations": len(rows), "reviewed_observations": len(observations),
                     "duplicate_signatures": duplicates, "source_freshness": dict(sorted(counts.items())),
+                    "quote_observation_evidence": dict(sorted(quote_counts.items())),
                     "evidence_gaps": dict(sorted(gaps.items())), "authorized_mappings": 0},
         "observations": sorted(observations, key=lambda item: (str(item["source_event_id"]), str(item["source_market_key"]), item["signature"])),
         "contract_comparisons": comparisons, "execution_authorized": False,
-        "note": "Read-only review. Labels and supplied contract comparisons are not externally verified. "
+        "note": "Read-only review. source_time/freshness are legacy source-clock diagnostics, not quote validity. "
+                "Only quote-bound source_observed_at plus verified complete observations and verified active status "
+                "establish quote evidence; unchanged prices can remain valid. Labels and supplied contract comparisons are not externally verified. "
                 "No aliases, signatures, defaults, settlement equivalence, independent-book counts, or execution permissions are invented."}

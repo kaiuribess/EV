@@ -39,6 +39,11 @@ class ContractComparisonBody(BaseModel):
     target: ContractReview
 
 
+class CashRefreshBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    venue: str | None = None
+
+
 def local_origin(value, port=8000):
     if value is None:
         return True
@@ -48,6 +53,12 @@ def local_origin(value, port=8000):
 
 def create_app(settings=None):
     engine = Engine(settings or Settings())
+    from .core.monitor_cash import MonitorCashService
+    from .plugins.external import NativeMonitor
+    def monitored_clients():
+        return {name: record.plugin.client for name, record in engine.registry.records.items()
+                if record.enabled and isinstance(record.plugin, NativeMonitor) and record.plugin.client is not None}
+    monitor_cash = MonitorCashService(monitored_clients)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -59,6 +70,7 @@ def create_app(settings=None):
 
     app = FastAPI(title="EV Platform", version="0.1.0", lifespan=lifespan)
     app.state.engine = engine
+    app.state.monitor_cash = monitor_cash
 
     @app.middleware("http")
     async def loopback_guard(request: Request, call_next):
@@ -129,6 +141,17 @@ def create_app(settings=None):
     async def launch_preparation():
         limits, error = await asyncio.to_thread(operator_limits_draft)
         return launch_setup(engine, limits_draft=limits, limits_error=error)
+
+    @app.get("/api/accounts/cash")
+    async def reported_cash():
+        return monitor_cash.state()
+
+    @app.post("/api/accounts/cash/refresh")
+    async def refresh_reported_cash(body: CashRefreshBody):
+        try:
+            return await monitor_cash.refresh(body.venue)
+        except ValueError:
+            raise HTTPException(422, "Choose an enabled account monitor")
 
     @app.get("/api/market-review")
     async def market_review(provider: str | None = None, offset: int = Query(0, ge=0),
@@ -240,7 +263,7 @@ def create_app(settings=None):
     @app.post("/api/settings")
     async def settings_update(body: dict):
         allowed_pricing = set(PricingConfig.model_fields)
-        allowed_risk = set(RiskConfig.model_fields) - {"live_max_order_stake"}
+        allowed_risk = set(RiskConfig.model_fields) - {"live_max_order_stake", "live_stake_authorized"}
         if set(body) - allowed_pricing - allowed_risk:
             raise HTTPException(422, "Unknown or restricted setting")
         try:

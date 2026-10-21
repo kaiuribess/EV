@@ -84,10 +84,11 @@ class RiskEngine:
             raise RiskRejected("Native execution requires an explicit native environment")
         if not metadata_consistent(order):
             raise RiskRejected("Native order has unverified canonical position metadata")
-        if self.config.live_max_order_stake is None:
+        if self.config.live_max_order_stake is None and not self.config.live_stake_authorized:
             raise RiskRejected("An explicit native maximum order stake is required")
         cost = order.reserved_cost
-        if not cost.is_finite() or cost <= 0 or cost > min(self.config.max_order_stake, self.config.live_max_order_stake):
+        caps = [v for v in (self.config.max_order_stake, self.config.live_max_order_stake) if v is not None]
+        if not cost.is_finite() or cost <= 0 or any(cost > cap for cap in caps):
             raise RiskRejected("Native order exceeds its explicit stake limit")
         if reserved and self.native_orders.get(order.id) != order:
             raise RiskRejected("Native durable reservation is missing or changed")
@@ -160,7 +161,7 @@ class RiskEngine:
         required = filled_cost + residual * (order.price + per_fee)
         if required > order.reserved_cost:
             raise RiskRejected("Current fees or fills exceed the approved order reservation")
-        if max(required, order.reserved_cost) > self.config.max_order_stake:
+        if self.config.max_order_stake is None or max(required, order.reserved_cost) > self.config.max_order_stake:
             raise RiskRejected("Current order stake limit is below its reservation")
         limits = [
             (self.exposures(), self.config.max_total_exposure, "total"),
@@ -240,7 +241,7 @@ class RiskEngine:
             raise RiskRejected("Invalid candidate economics")
         if mode not in {"demo", "paper"}:
             raise RiskRejected("Native routing requires a verified venue mapping and live preflight")
-        if self.config.max_venue_exposure is None or self.config.max_total_exposure is None:
+        if self.config.max_order_stake is None or self.config.max_venue_exposure is None or self.config.max_total_exposure is None:
             raise RiskRejected("Paper trading requires explicit simulated exposure caps")
         if (market.settlement.contract_type != "binary" or market.settlement.payout != 1 or
                 market.settlement.push_rule != "not_applicable" or market.settlement.currency != "USD"):

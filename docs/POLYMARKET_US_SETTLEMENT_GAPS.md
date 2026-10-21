@@ -1,6 +1,6 @@
 # Polymarket US retail settlement evidence
 
-Reviewed **2026-10-20** against current official documentation and the local connector. This was research only: no private accounts, secrets, orders, or financial actions were accessed. This review does not certify live connectivity.
+Initially reviewed **2026-10-20** against official documentation. On **2026-10-21**, the diagnostic activity reader was implemented, tested offline and used for an authenticated read-only capture of the configured personal US account. That capture proves access to the served history, not an order-to-settlement lifecycle.
 
 ## Conclusion
 
@@ -19,10 +19,22 @@ The [collateral and margin rules](https://docs.polymarket.us/market-structure/co
 
 ## Concrete local implementation work
 
-- `backend/evplatform/venues/polymarket_us.py` already exposes a raw authenticated `activities()` GET. A bounded, validated activity paginator and resolution-history parser are feasible now. Preserve exact decimal fields, pagination completeness, trade states, and correction/bust evidence.
-- `backend/evplatform/venues/polymarket_us_execution.py::normalize_execution()` currently stores the execution ID in `NativeFill` but does not preserve the documented `execution.tradeId`. `backend/evplatform/core/native_accounting.py::NativeFill` has no trade-ID field. Persisting a venue-specific execution-to-trade mapping would enable exact joins for future captured executions. Do not recover missing historical bindings by matching price, quantity, or time.
+- `backend/evplatform/venues/polymarket_us_activities.py` now provides bounded pagination and typed diagnostic trade, resolution and balance records. It requires explicit `eof`, rejects malformed or looping cursors, preserves bust/state revisions, distinguishes exact duplicate deliveries from conflicting revisions, and never substitutes rounded legacy quantities for decimal fields. Unknown/malformed rows remain in protected raw evidence and make parsed coverage incomplete.
+- `backend/evplatform/venues/polymarket_us_execution.py::normalize_execution()` now preserves the documented `execution.tradeId` separately from the execution ID as `NativeFill.trade_id`. A supplied malformed identifier is rejected. A legacy fill can gain the ID only from the exact same execution identity with every financial/source-clock field unchanged; that enrichment is persisted before the in-memory journal changes. A later omitted ID does not erase the known binding. Two different nonempty trade IDs still conflict. No binding is inferred from similar price, quantity or time, and metadata enrichment never adds the fill twice.
 - `backend/evplatform/venues/polymarket_us_account.py` intentionally returns unverified identity and spendable-cash flags. The executor declares `fill_replay=False` and `settlement_reconciliation=False`. A diagnostic resolution reader alone must not turn those flags on or emit authoritative paid `NativeSettlement` records.
 - `docs/VENUE_PROTOCOLS.md` should retain the launch limitation, with the narrower explanation above: resolution/trade identifiers exist, but the reviewed retail cash-posting and recovery contracts do not complete the join.
+
+## Actual read-only capture
+
+At **2026-10-21 06:52 UTC**, the configured retail credentials authenticated successfully. The documented RFQ participant lookup succeeded, but that participant is not automatically a verified cash-account identity. The served activity history contained **two balance activities, zero trades and zero position resolutions**. Pagination ended explicitly and both rows parsed successfully. No paid settlement, order linkage or cash-posting join was established; no orders, cancellations or fund transfers were issued.
+
+Protected files are `data/polymarket-activities-20261021-readonly/activities.json` and `coverage.json`. They are local ignored account records, not repository fixtures. Capture another read-only snapshot using a new output directory:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\capture_polymarket_us_activities.py --output data\polymarket-activities-review-2
+```
+
+The script signs only the documented retail balance, participant and activity GET routes. It does not call the institutional API. Its summary always reports `cash_posting_join_verified: false`, zero emitted settlements and no OMS certification. A diagnostic resolution never becomes a paid `NativeSettlement` merely because a public result, balance delta or timestamp appears to agree.
 
 ## Institutional API is a separate integration
 

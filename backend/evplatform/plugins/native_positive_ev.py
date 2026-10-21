@@ -27,7 +27,9 @@ class NativePositiveEV(StrategyPlugin):
         for book in view["native_books"]:
             try:
                 candidates.append(native_opportunity(view["market"], fair, book, view["config"],
-                    max_stake_usd=view["max_stake_usd"], mode=view["mode"]))
+                    max_stake_usd=view["max_stake_usd"], mode=view["mode"],
+                    stake_sizing=view.get("stake_sizing", "capped"), unit_size_usd=view.get("unit_size_usd", "5"),
+                    available_cash_usd=view.get("account_cash", {}).get(book.instrument.venue)))
             except NoSignal as exc:
                 errors.append(str(exc))
         if errors and not candidates:

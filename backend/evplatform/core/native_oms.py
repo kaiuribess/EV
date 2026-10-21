@@ -15,8 +15,9 @@ from pydantic import Field, model_validator
 
 from .conflicts import UNRESOLVED, reviewed_correlations, risk_family
 from .models import Contract, Envelope, Market, OrderStatus, utcnow
-from .native_accounting import NativeAccounting, NativeCumulativeSnapshot, NativeFill, NativeOrderIntent
+from .native_accounting import NativeAccounting, NativeCumulativeSnapshot, NativeFill, NativeOrderIntent, merge_native_fill_metadata
 from .risk import RiskRejected
+from .stake_sizing import StakeSizing
 
 
 class NativeOrder(Contract):
@@ -44,6 +45,7 @@ class NativeOrder(Contract):
     cancel_retry_after: datetime | None = None
     reason: str = ""
     synthetic: Literal[False] = False
+    sizing: StakeSizing | None = None
 
     @property
     def id(self): return self.intent.id
@@ -160,7 +162,7 @@ class NativeOrderManager:
 
     def _stage_fills(self, order, fills):
         staged = dict(self._fill_evidence.get(order.id, {}))
-        new = []
+        changed = {}
         for raw in fills:
             fill = NativeFill.model_validate(raw)
             if fill.observed_at > utcnow() or (fill.filled_at and fill.filled_at > fill.observed_at):
@@ -175,8 +177,10 @@ class NativeOrderManager:
                 raise ValueError("Invalid native fill watermark")
             old = staged.get(fill.fill_id)
             if old:
-                if old.model_dump(exclude={"observed_at"}) != fill.model_dump(exclude={"observed_at"}):
-                    raise ValueError("Conflicting duplicate native fill ID")
+                merged = merge_native_fill_metadata(old, fill)
+                if merged != old:
+                    staged[fill.fill_id] = merged
+                    changed[fill.fill_id] = merged
                 continue
             if watermark is not None:
                 for known in staged.values():
@@ -184,12 +188,12 @@ class NativeOrderManager:
                     if end is not None and max(watermark-fill.quantity, end-known.quantity) < min(watermark, end):
                         raise ValueError("Native execution intervals overlap")
             staged[fill.fill_id] = fill
-            new.append(fill)
+            changed[fill.fill_id] = fill
         if sum((fill.quantity for fill in staged.values()), Decimal(0)) > order.quantity:
             raise ValueError("Journaled fills exceed durable order quantity")
         if sum((fill.fee_usd for fill in staged.values()), Decimal(0)) > order.intent.max_fee_usd:
             raise ValueError("Journaled fill fees exceed reserved order bound")
-        return staged, new
+        return staged, list(changed.values())
 
     async def _persist_fill_evidence(self, order, fills):
         if order.id in self._fill_conflicts:
@@ -198,7 +202,8 @@ class NativeOrderManager:
         if new:
             try:
                 await self.storage.write([
-                    ("INSERT INTO native_fill_evidence VALUES(?,?,?)", (order.id, fill.fill_id, fill.model_dump_json()))
+                    ("INSERT INTO native_fill_evidence VALUES(?,?,?) ON CONFLICT(order_id,fill_id) DO UPDATE SET data=excluded.data",
+                     (order.id, fill.fill_id, fill.model_dump_json()))
                     for fill in new], (), True)
             except BaseException:
                 self.risk.halt("Native fill evidence persistence failed")

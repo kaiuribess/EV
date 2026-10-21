@@ -31,16 +31,18 @@ class StrictRecord(BaseModel):
 class LiveLimits(StrictRecord):
     """No default money authorization; every launch limit is explicit."""
 
-    max_order_stake_usd: Decimal = Field(gt=0)
-    max_event_exposure_usd: Decimal = Field(gt=0)
-    max_player_exposure_usd: Decimal = Field(gt=0)
+    max_order_stake_usd: Decimal | None = Field(gt=0)
+    max_event_exposure_usd: Decimal | None = Field(gt=0)
+    max_player_exposure_usd: Decimal | None = Field(gt=0)
     max_venue_exposure_usd: Decimal | None = Field(gt=0)
-    max_correlated_exposure_usd: Decimal = Field(gt=0)
+    max_correlated_exposure_usd: Decimal | None = Field(gt=0)
     max_total_exposure_usd: Decimal | None = Field(gt=0)
     daily_loss_limit_usd: Decimal | None = Field(gt=0)
     available_cash_only: bool = False
     block_overlapping_events: bool = False
     block_overlapping_players: bool = False
+    stake_sizing: Literal["capped", "quarter_kelly"] = "capped"
+    unit_size_usd: Decimal = Field(default=Decimal("5"), gt=0, allow_inf_nan=False)
     max_open_orders: int = Field(ge=1)
     max_orders_per_minute: int = Field(ge=1)
 
@@ -55,9 +57,13 @@ class LiveLimits(StrictRecord):
 
     @model_validator(mode="after")
     def coherent_limits(self):
-        if not self.available_cash_only and (self.max_venue_exposure_usd is None or self.max_total_exposure_usd is None):
+        caps = (self.max_order_stake_usd, self.max_event_exposure_usd, self.max_player_exposure_usd,
+                self.max_venue_exposure_usd, self.max_correlated_exposure_usd, self.max_total_exposure_usd)
+        if not self.available_cash_only and any(value is None for value in caps):
             raise ValueError("Exposure without fixed caps requires available-cash enforcement")
-        if self.max_order_stake_usd > min(value for value in (
+        if self.max_order_stake_usd is None and self.stake_sizing != "quarter_kelly":
+            raise ValueError("No fixed stake cap requires quarter-Kelly sizing")
+        if self.max_order_stake_usd is not None and any(self.max_order_stake_usd > value for value in (
             self.max_event_exposure_usd, self.max_player_exposure_usd,
             self.max_venue_exposure_usd, self.max_correlated_exposure_usd,
             self.max_total_exposure_usd,
@@ -167,6 +173,7 @@ class MarketReadiness(StrictRecord):
     venue_mapping_verified: bool = False
     fee_schedule_verified: bool = False
     native_units_supported: bool = False
+    order_minimum_verified: bool = False
     usable_reference_books: int = Field(default=0, ge=0)
     required_books_present: bool = False
     oldest_reference_age_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -354,6 +361,9 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
                           "Review this exact market and restore valid native/reference data", scope=market_id)
             if market.synthetic:
                 block("market.synthetic", "Synthetic data cannot authorize native orders", "Connect actual reference and native data", scope=market_id)
+            if profile.limits.stake_sizing == "quarter_kelly" and not market.order_minimum_verified:
+                block("market.order_minimum_verified", "Quarter Kelly requires the actual market minimum stake and quantity",
+                      "Verify the native cash minimum, quantity increment and minimum lot for this account and instrument", scope=market_id)
             if market.usable_reference_books < profile.min_reference_books:
                 block("market.references", "Too few independent usable reference bookmakers",
                       "Restore the configured independent books; duplicate vendors do not count twice", scope=market_id)

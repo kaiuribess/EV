@@ -78,6 +78,11 @@ class NativeInstrument(NativeContract):
     payout_per_unit_usd: Positive | None = None
     quantity_step: Positive
     minimum_quantity: Positive
+    # Distinct from price ticks and payout denominations. None means the
+    # adapter has not established whether a minimum cash stake also applies.
+    minimum_order_cost_usd: Nonnegative | None = None
+    order_minimum_verified: bool = False
+    order_minimum_source: str | None = None
     maximum_quantity: Positive | None = None
     # Explicit cash unit is used only for conservative bounds, never to silently
     # rewrite the venue's actual cash amounts or round a native quantity.
@@ -89,6 +94,8 @@ class NativeInstrument(NativeContract):
 
     @model_validator(mode="after")
     def coherent_units(self):
+        if self.order_minimum_verified and (self.minimum_order_cost_usd is None or not self.order_minimum_source):
+            raise ValueError("Verified order minimum requires cash rule and evidence source")
         if self.minimum_quantity % self.quantity_step:
             raise ValueError("Minimum quantity must be on the native grid")
         if self.maximum_quantity is not None and self.maximum_quantity < self.minimum_quantity:
@@ -162,6 +169,17 @@ class NativeInstrument(NativeContract):
             return actual <= limit
         return self.gross_ratio(actual) >= self.gross_ratio(limit)
 
+    def minimum_split_payout(self, quantity: Decimal, price: Decimal) -> Decimal:
+        """Worst aggregate payout when each minimum-grid match rounds down.
+
+        An order minimum does not restrict partial-match size. Actual individual
+        fills still use payout_bound, with their recorded native cash evidence.
+        """
+        self.validate_quantity(quantity)
+        with localcontext() as context:
+            context.prec = 256
+            return self.payout_bound(self.quantity_step, price) * (quantity / self.quantity_step)
+
 
 class NativeOrderIntent(NativeContract):
     schema_version: Literal[1] = 1
@@ -182,6 +200,9 @@ class NativeOrderIntent(NativeContract):
             raise ValueError("Native intent requires reviewed instrument and fee bounds")
         self.instrument.validate_quantity(self.quantity, order=True)
         self.instrument.validate_price(self.limit_price)
+        if (self.instrument.minimum_order_cost_usd is not None and
+                self.instrument.cost_for(self.quantity, self.limit_price) < self.instrument.minimum_order_cost_usd):
+            raise ValueError("Native intent is below the minimum cash stake")
         return self
 
     @property
@@ -190,7 +211,7 @@ class NativeOrderIntent(NativeContract):
 
     @property
     def minimum_gross_payout_usd(self) -> Decimal:
-        return self.instrument.payout_bound(self.quantity, self.limit_price)
+        return self.instrument.minimum_split_payout(self.quantity, self.limit_price)
 
     @property
     def reserved_cost_usd(self) -> Decimal:
@@ -203,6 +224,9 @@ NativeIntent = NativeOrderIntent
 
 class NativeFill(NativeContract):
     fill_id: str = Field(min_length=1)
+    # Some venues distinguish an execution/delivery ID from its exchange trade
+    # ID. Preserve the latter for exact history joins; never infer it later.
+    trade_id: str | None = Field(default=None, min_length=1)
     order_id: str = Field(min_length=1)
     client_order_id: str = Field(min_length=1)
     quantity: Positive
@@ -262,6 +286,18 @@ class ReconciliationRequired(ValueError):
     """Keep exposure reserved; missing or contradictory evidence is not zero."""
 
 
+def merge_native_fill_metadata(previous: NativeFill, incoming: NativeFill) -> NativeFill:
+    """Merge only a newly documented trade binding on the exact same execution.
+
+    Missing optional metadata in a legacy journal or later response is not a
+    financial change. Two different known trade IDs remain contradictory.
+    """
+    if (previous.model_dump(exclude={"observed_at", "trade_id"}) != incoming.model_dump(exclude={"observed_at", "trade_id"})
+            or previous.trade_id is not None and incoming.trade_id is not None and previous.trade_id != incoming.trade_id):
+        raise ReconciliationRequired("Conflicting duplicate native fill ID")
+    return previous.model_copy(update={"trade_id": incoming.trade_id}) if previous.trade_id is None and incoming.trade_id else previous
+
+
 class NativeAccounting:
     """Order-local journal with exact idempotency and conservative overlap rules.
 
@@ -293,7 +329,7 @@ class NativeAccounting:
         if totals.quantity:
             instrument.validate_quantity(totals.quantity)
             max_cost = instrument.cost_for(totals.quantity, self.intent.limit_price)
-            min_payout = instrument.payout_bound(totals.quantity, self.intent.limit_price)
+            min_payout = instrument.minimum_split_payout(totals.quantity, self.intent.limit_price)
             if totals.cost_usd > max_cost or totals.gross_payout_usd < min_payout:
                 raise ReconciliationRequired("Fill economics breach the limit")
             if instrument.quantity_unit == "usd_stake" and totals.cost_usd != totals.quantity:
@@ -324,8 +360,7 @@ class NativeAccounting:
             # the same venue fill identity and economic evidence. Keep source
             # matched time, quantity, price, money and cumulative watermark in
             # the comparison; only delivery observation is non-economic.
-            if old.model_dump(exclude={"observed_at"}) != fill.model_dump(exclude={"observed_at"}):
-                raise ReconciliationRequired("Conflicting duplicate native fill ID")
+            self._fills[fill.fill_id] = merge_native_fill_metadata(old, fill)
             return NativeAccountingDelta(duplicate=True)
         instrument = self.intent.instrument
         instrument.validate_quantity(fill.quantity)
