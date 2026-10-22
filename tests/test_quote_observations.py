@@ -187,6 +187,16 @@ def test_fixture_heartbeat_and_topups_never_verify_main_prices():
     assert offer.observed_at is None and offer.source_observed_at is None
     assert not offer.observation_verified and not offer.observation_complete
     assert offer.verification_reason == "retained_top_up"
+    assert offer.source_scope_poll_at == NOW and offer.source_scope_is_current is True
+    assert offer.signature == extract_offers(ProviderEnvelope("parlay_rest", "snapshot", [{
+        **event, "bookmakers": [{**event["bookmakers"][0],
+            "verified_at": (NOW - timedelta(seconds=2)).isoformat(), "is_current": False}]}], NOW, 1))[0].signature
+    mapper = VerifiedProviderMapper()
+    assert mapper(raw) == []
+    diagnostic = next(iter(mapper.quarantine.values()))["observation"]
+    assert diagnostic["source_scope_poll_at"] == NOW.isoformat()
+    assert diagnostic["source_scope_is_current"] is True
+    assert diagnostic["observation_verified"] is False
 
 
 def paired_rows():

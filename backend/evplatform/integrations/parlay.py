@@ -92,6 +92,9 @@ class ParlayRest(RestProvider):
             "markets": ",".join(self.config.markets),
             "regions": ",".join(self.config.regions),
             "oddsFormat": "decimal", "dateFormat": "iso",
+            # Book/fixture poll heartbeats are diagnostics. They do not
+            # certify the exact market's current price or active status.
+            "include": "normalized,verification",
             # The current OpenAPI adds per-outcome FanDuel links only when a
             # matching native quote was observed on an OPEN/ACTIVE selection.
             # Links are evidence metadata; they are never order URLs here.

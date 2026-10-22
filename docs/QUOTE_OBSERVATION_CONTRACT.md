@@ -8,6 +8,24 @@ Reviewed against official documentation on 2026-10-20 and updated with a bounded
 
 The documented `last_observed` plus `last_update_type: collector_observation` pair establishes a quote-bound collector observation. The current parser accepts timezone-qualified ISO values; numeric units are unspecified in the reviewed schema and remain unverified. `last_update` has legacy meanings and cannot universally establish verification or price movement. `line_changed_at_ms` is retained separately. Book/fixture heartbeat fields do not verify each displayed selection. The adapter preserves unknown market status; collector observation alone is insufficient for automatic execution. [Official reference](https://parlay-api.com/docs), [timing distinctions](https://parlay-api.com/docs/streaming).
 
+REST game requests now ask for `include=normalized,verification` and retain the
+book/fixture `verified_at` and `is_current` values in quarantine diagnostics as
+`source_scope_poll_at` and `source_scope_is_current`. They stay outside the
+source identity and quote-bound clock. Parlay explicitly says this heartbeat
+does not bind the market, selection, line or displayed price; a retained
+`topped_up` row can coexist with a current book pulse. An authenticated NBA
+moneyline read on October 22 returned these fields on the sampled bookmaker
+blocks, confirming response shape, not quote validity.
+[Official game-odds contract](https://parlay-api.com/openapi.json),
+[book/fixture heartbeat limitation](https://parlay-api.com/docs).
+
+After restart, each local workspace's bounded 1,000-row Parlay REST review
+window contained 78 fixture-poll timestamps and 72 provider `is_current=true`
+flags. It also contained 325 quote-bound clocks and one verified active-status
+offer, but **zero offers with both**. These counts describe a mixed rolling
+review window, not one sampled market or a complete provider board. The native
+launch gate remained closed.
+
 The October 22 schema clarifies that REST props `maxAgeSec` is a Pinnacle
 observation-age filter only for rows with validated `last_observed`; other rows
 are filtered by last price write. The default REST request now omits that

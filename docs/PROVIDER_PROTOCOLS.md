@@ -33,6 +33,10 @@ REST implements `/v1/sports`, per-sport `/events`, `/odds`, `/props`, and
 decimal odds; the prop parser uses the documented American fields. Completeness
 and pagination headers are preserved. [Official REST reference](https://parlay-api.com/docs)
 
+Game-line REST requests include verification metadata for per-book/fixture
+poll diagnostics. The quote mapper never promotes that heartbeat into a
+market/selection observation or active-price status.
+
 REST props omit `maxAgeSec` by default. Parlay applies that filter to a validated
 Pinnacle observation age where available, but to last price-write age for other
 books. A quiet, still-displayed FanDuel price can therefore disappear under a

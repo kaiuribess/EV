@@ -69,6 +69,11 @@ class SourceOffer:
     source_price_changed_at: datetime | None = None
     verification_reason: str | None = None
     market_status_verified: bool = False
+    # A provider's book/fixture poll is useful for health review but does not
+    # bind this market, outcome, line, or price. It never enters identity or
+    # quote-bound observation eligibility.
+    source_scope_poll_at: datetime | None = None
+    source_scope_is_current: bool | None = None
 
     def identity(self) -> dict[str, Any]:
         context = dict(self.context)
@@ -275,6 +280,8 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
         if "id" in event and "eventId" in event:
             event_context["provider_event_ids"] = {"id": event["id"], "eventId": event["eventId"]}
         for book in event.get("bookmakers", []):
+            poll_at = parse_timestamp(book.get("verified_at")) if isinstance(book.get("verified_at"), str) else None
+            poll_current = book.get("is_current") if type(book.get("is_current")) is bool else None
             for market in book.get("markets", []):
                 outcomes = market.get("outcomes", [])
                 prices, points = {}, {}
@@ -314,6 +321,8 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                                            scopes=(event, book))
                        if envelope.provider_id.startswith("parlay") else {}),
                     market_status_verified=native_status,
+                    source_scope_poll_at=poll_at,
+                    source_scope_is_current=poll_current,
                 ))
                 # Alternate lines are separate source identities. Missing sides never
                 # inherit prices or timestamps from a primary rung.
@@ -333,6 +342,8 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                         # An alternate rung has no documented quote-bound
                         # observation pair. It cannot inherit the main clock.
                         verification_reason="alternate_observation_unverified",
+                        source_scope_poll_at=poll_at,
+                        source_scope_is_current=poll_current,
                     ))
     return result
 
@@ -766,6 +777,8 @@ class VerifiedProviderMapper:
                 "observation_verified": offer.observation_verified,
                 "observation_complete": offer.observation_complete,
                 "market_status_verified": offer.market_status_verified,
+                "source_scope_poll_at": offer.source_scope_poll_at.isoformat() if offer.source_scope_poll_at else None,
+                "source_scope_is_current": offer.source_scope_is_current,
                 "verification_reason": offer.verification_reason,
                 "status": offer.status,
                 "decimal_odds": {name: str(value) for name, value in offer.prices.items()},
