@@ -63,6 +63,11 @@ while provider remaining credits and the monthly pacing rule remain enforced.
 Equivalent Parlay schedule timestamp spellings now yield one source signature;
 an actual schedule change still requires renewed mapping review. No existing
 reviewed production mapping needed migration because none is installed.
+An additional read-only Parlay prop check at 03:35 UTC on October 22 returned
+1,022 NFL rows (609 two-sided) and 36 MLB rows, but **zero** rows in either
+response had a collector-observation timestamp within two minutes. This shows
+the paid feed is returning real odds, not that these rows pass the current
+quote-bound live-freshness gate. The requests did not place bets.
 
 The evidence is saved locally in `data/parlay-paid-access.json` (03:08:55–03:09:07
 UTC on October 21). All unreviewed real markets remained quarantined, with
