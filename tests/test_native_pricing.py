@@ -90,7 +90,7 @@ async def test_manual_review_is_one_use_and_does_not_enable_automation(market, q
 async def test_manual_review_rejects_changed_price_without_placement(market, quotes):
     data = setup_native(market, quotes)
     first = candidate(data)
-    changed = first.model_copy(update={"roi": first.roi + D(".01")})
+    changed = first.model_copy(update={"roi": first.roi - D(".01")})
     risk = RiskEngine(RiskConfig())
     execute = AsyncMock()
     native = SimpleNamespace(preview_check=lambda _: None,
@@ -103,7 +103,7 @@ async def test_manual_review_rejects_changed_price_without_placement(market, quo
     service._gate = lambda **_: "reviewed-profile"
     service._fresh_candidate = AsyncMock(side_effect=[first, changed])
     preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
-    with pytest.raises(RiskRejected, match="changed"):
+    with pytest.raises(RiskRejected, match="approved bounds"):
         await service.submit(preview["review_token"], preview["terms_digest"], D("1"), preview["proposal_digest"])
     execute.assert_not_awaited()
 
@@ -174,6 +174,71 @@ async def test_manual_proposal_expiry_and_duplicate_digest_fail_without_placemen
         await service.submit(review["review_token"], review["terms_digest"],
                              D("1"), review["proposal_digest"])
     execute.assert_not_awaited()
+
+
+async def test_manual_reverification_accepts_fresh_clock_and_harmless_depth_change(market, quotes):
+    data = setup_native(market, quotes)
+    first = candidate(data)
+    later = utcnow()
+    refreshed_refs = tuple({**row, "source_time": later.isoformat(),
+                            "source_observed_at": later.isoformat()} for row in first.references)
+    refreshed = first.model_copy(update={"references": refreshed_refs, "calculated_at": later,
+                                        "book_revision": first.book_revision + 1})
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock(return_value=SimpleNamespace(model_dump=lambda **_: {"id": first.intent.id}))
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(first.market_id, first.venue, first.outcome): data[2]},
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id, account_fingerprint="a" * 64),
+        execute=execute, build_id="build-1")
+    storage = SimpleNamespace(event=AsyncMock())
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"), storage=storage)
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(side_effect=[first, refreshed])
+    preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
+    native.books[(first.market_id, first.venue, first.outcome)] = data[2].model_copy(update={
+        "revision": 2, "source_time": later})
+    result = await service.submit(preview["review_token"], preview["terms_digest"], D("1"),
+                                  preview["proposal_digest"])
+    assert result["final_validation_digest"] != preview["proposal_digest"]
+    event = storage.event.await_args.args[0]
+    assert event.payload["original_proposal_digest"] == preview["proposal_digest"]
+    assert event.payload["final_validation_digest"] == result["final_validation_digest"]
+    assert storage.event.await_args.kwargs == {"durable": True}
+    execute.assert_awaited_once()
+    assert not risk.auto_trade and risk.kill_switch
+
+
+@pytest.mark.parametrize("change", ["policy", "build", "quantity", "debit", "fee", "edge"])
+async def test_manual_reverification_rejects_scope_or_worse_economics(market, quotes, change):
+    data = setup_native(market, quotes)
+    first = candidate(data)
+    updated = {"policy": {"reference_policy_digest": "different"},
+        "quantity": {"intent": first.intent.model_copy(update={"quantity": first.intent.quantity + D(1)})},
+        "debit": {"intent": first.intent.model_copy(update={"limit_price": first.intent.limit_price + D(".005")})},
+        "fee": {"intent": first.intent.model_copy(update={"max_fee_usd": first.intent.max_fee_usd + D(".001")})},
+        "edge": {"ev_per_usd_payout": first.ev_per_usd_payout - D(".01")}}
+    second = first.model_copy(update=updated.get(change, {}))
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock()
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(first.market_id, first.venue, first.outcome): data[2]}, build_id="build-1",
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id, account_fingerprint="a" * 64),
+        execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(side_effect=[first, second])
+    preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
+    if change == "build":
+        native.build_id = "build-2"
+    with pytest.raises(RiskRejected, match="changed|approved bounds"):
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"),
+                             preview["proposal_digest"])
+    execute.assert_not_awaited()
+    assert risk.kill_switch and not risk.auto_trade
 
 
 async def test_manual_max_cost_resizes_candidate_before_review(market, quotes):

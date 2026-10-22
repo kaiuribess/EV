@@ -10,6 +10,7 @@ import pytest
 from evplatform.core.models import OrderStatus, utcnow
 from evplatform.core.native_oms import NativeSettlement
 from evplatform.venues.account_probe import NativeAccountSnapshot
+from evplatform.venues.kalshi import KalshiClient, KalshiSettings
 
 from test_native_oms import system, order, report
 from test_native_runtime_maintenance import runtime_for
@@ -28,6 +29,49 @@ def snapshot(*, reconciled=True):
     return NativeAccountSnapshot(venue="novig", environment="sandbox", account_fingerprint="a"*64,
         identity_verified=True, observed_at=utcnow(), balance_usd="10", cash_available_verified=reconciled,
         reconciled=reconciled, reason="OFFLINE account fixture")
+
+
+async def test_kalshi_runtime_read_only_snapshot_loads_without_executable_mapping(system):
+    manager, risk, _, _ = system
+    runtime = runtime_for(system)
+    risk.kill_switch = True
+    risk.auto_trade = False
+    ticker = "OFFLINE-NBA-TICKER"
+    event = "OFFLINE-NBA-EVENT"
+    client = KalshiClient(KalshiSettings(api_key_id="fixture-key", environment="sandbox"))
+    calls = []
+    async def request(method, path, **kwargs):
+        assert method == "GET"
+        calls.append(path)
+        if path == f"/markets/{ticker}":
+            return {"market": {"ticker": ticker, "event_ticker": event, "exchange_index": 3}}
+        if path == "/api_keys":
+            return {"api_keys": [{"api_key_id": "fixture-key", "scopes": ["read"]}]}
+        if path == "/portfolio/balance":
+            assert kwargs["params"] == {"subaccount": 0, "exchange_index": 3}
+            return {"balance_dollars": "25.00", "balance_breakdown": [
+                {"exchange_index": 3, "balance": "25.00"}]}
+        if path == "/portfolio/orders": return {"orders": [], "cursor": ""}
+        if path == "/portfolio/positions": return {"market_positions": [], "cursor": ""}
+        pytest.fail("Placement or unknown endpoint")
+    client.request = request
+    runtime.profile = SimpleNamespace(venue="kalshi", environment="sandbox", market_ids=("nba-pilot",))
+    runtime.structural_review = SimpleNamespace(native_venue="kalshi", canonical_market_id="nba-pilot",
+        native_outcomes={"home": ticker, "away": ticker}, native_event_id=event)
+    runtime.mapper = SimpleNamespace(mappings=())
+    runtime.engine.registry = SimpleNamespace(records={"kalshi": SimpleNamespace(
+        plugin=SimpleNamespace(client=client))})
+    manager.adapters.pop("kalshi", None)
+    await runtime.refresh_account()
+    assert runtime.account_snapshots["kalshi"].exchange_index == 3
+    assert runtime.account_snapshots["kalshi"].cash_available_verified
+    assert "kalshi" not in manager.adapters
+    assert risk.kill_switch and not risk.auto_trade
+    assert calls.count(f"/markets/{ticker}") == 1
+    runtime._last_account_probes["kalshi"] = 0
+    await runtime.refresh_account()
+    assert calls.count(f"/markets/{ticker}") == 1
+    await client.disconnect()
 
 
 async def filled_order(system, market, *, venue="novig"):

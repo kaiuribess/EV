@@ -34,6 +34,9 @@ class NativeAccountSnapshot(BaseModel):
     identity_verified: bool = False
     observed_at: datetime
     balance_usd: Decimal | None = None
+    # Kalshi balance is exchange-index scoped only when this was explicitly
+    # requested; an aggregate balance must never fund an index-specific order.
+    exchange_index: int | None = None
     cash_available_verified: bool = False
     open_order_count: int | None = None
     position_count: int | None = None
@@ -88,7 +91,8 @@ def _novig_trading_scope(client: NovigClient, metadata: dict) -> bool:
 
 
 async def probe_native_account(client, managed_orders=(), *, settled_order_ids=frozenset(),
-                               adapter=None, management_client=None) -> NativeAccountSnapshot:
+                               adapter=None, management_client=None,
+                               exchange_index: int | None = None) -> NativeAccountSnapshot:
     """No connection/login management; use an already authenticated client.
 
     Managed orders are the native OMS's durable records. Account snapshots are
@@ -97,7 +101,7 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
     """
     venue, environment = client.venue_id, client.settings.environment
     if isinstance(client, KalshiClient):
-        return await _probe_kalshi(client, managed_orders, settled_order_ids)
+        return await _probe_kalshi(client, managed_orders, settled_order_ids, exchange_index)
     if isinstance(client, ProphetXClient):
         if not client._signin_confirmed or not client.health_check().get("authenticated"):
             return NativeAccountSnapshot(venue=venue, environment=environment, observed_at=utcnow(),
@@ -216,7 +220,9 @@ async def _kalshi_pages(client, path, collection, **params):
     raise ReconciliationError("Kalshi account inventory exceeds reconciliation page bound")
 
 
-async def _probe_kalshi(client, managed_orders, settled_order_ids):
+async def _probe_kalshi(client, managed_orders, settled_order_ids, exchange_index):
+    if exchange_index is not None and (type(exchange_index) is not int or exchange_index < 0):
+        raise ReconciliationError("Invalid Kalshi exchange index")
     environment = client.settings.environment
     private_fence = client.private.fence()
     private_barrier = client.private.barrier
@@ -257,10 +263,21 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids):
         return NativeAccountSnapshot(venue="kalshi", environment=environment, observed_at=utcnow(),
             reason="Kalshi non-primary or FCM execution account routing is not implemented")
     fingerprint = kalshi_account_fingerprint(environment, key["api_key_id"])
-    balance = _object(await client.request("GET", "/portfolio/balance", params={"subaccount": 0}), "balance")
+    scope = {"subaccount": 0, **({"exchange_index": exchange_index} if exchange_index is not None else {})}
+    balance = _object(await client.request("GET", "/portfolio/balance", params=scope), "balance")
     cash = _number(balance.get("balance_dollars"), "fixed-point balance")
-    orders = await _kalshi_pages(client, "/portfolio/orders", "orders", subaccount=0, status="resting")
-    positions = await _kalshi_pages(client, "/portfolio/positions", "market_positions", subaccount=0,
+    breakdown = balance.get("balance_breakdown")
+    if exchange_index is not None and breakdown is not None:
+        if not isinstance(breakdown, list):
+            raise ReconciliationError("Invalid Kalshi balance breakdown")
+        entries = [_object(row, "balance breakdown") for row in breakdown]
+        selected = [row for row in entries if row.get("exchange_index") == exchange_index]
+        if (len(selected) != 1 or any(type(row.get("exchange_index")) is not int for row in entries)
+                or len({row["exchange_index"] for row in entries}) != len(entries)
+                or _number(selected[0].get("balance"), "index balance") != cash):
+            raise ReconciliationError("Kalshi balance breakdown differs from requested exchange index")
+    orders = await _kalshi_pages(client, "/portfolio/orders", "orders", **scope, status="resting")
+    positions = await _kalshi_pages(client, "/portfolio/positions", "market_positions", **scope,
                                      settlement_status="unsettled", count_filter="position,total_traded")
     inventory = [o for o in managed_orders
                  if o.venue == "kalshi" and o.mode == environment and o.id not in settled_order_ids]
@@ -323,6 +340,8 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids):
         quantity = decimal_value(row.get("position_fp"))
         if type(row.get("exchange_index")) is not int or row["exchange_index"] < 0:
             raise ReconciliationError("Invalid Kalshi exchange shard")
+        if exchange_index is not None and row["exchange_index"] != exchange_index:
+            raise ReconciliationError("Kalshi position escaped requested exchange index")
         actual[ticker] = quantity
         cost = _number(row.get("market_exposure_dollars"), "position cost")
         traded = _number(row.get("total_traded_dollars"), "position total traded")
@@ -343,13 +362,14 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids):
         private_reason = "Kalshi private state changed or REST data has not reached the account barrier"
         private_fence, private_as_of = None, None
     return NativeAccountSnapshot(venue="kalshi", environment=environment, account_fingerprint=fingerprint,
-        identity_verified=True, observed_at=utcnow(), balance_usd=cash, open_order_count=len(orders),
+        identity_verified=True, observed_at=utcnow(), balance_usd=cash, exchange_index=exchange_index,
+        open_order_count=len(orders),
         position_count=len(actual), reconciled=not reasons,
         reason="; ".join(dict.fromkeys([*reasons, *([private_reason] if private_reason else [])])),
         # Official balance_dollars is available cash; portfolio_value is a
         # different field and is never funding capacity. Runtime still requires
         # a fresh synchronized snapshot and reserves concurrent order intents.
-        cash_available_verified=not reasons,
+        cash_available_verified=not reasons and exchange_index is not None,
         api_key_scopes=scopes, trading_permission_verified=trading_scope,
         geographic_attestation_expires_at=expiry,
         private_connection_generation=private_fence[0] if private_fence else None,

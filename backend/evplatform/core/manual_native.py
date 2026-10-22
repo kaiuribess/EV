@@ -1,6 +1,6 @@
 """One-use, short-lived operator review for a single qualified native order.
 
-The review is deliberately volatile. A restart, changed economics or an expired
+The review is deliberately volatile. A restart, worse economics or an expired
 quote requires a new review; no API call here enables automatic trading.
 """
 from __future__ import annotations
@@ -28,6 +28,15 @@ class ManualReview:
     terms_digest: str
     proposal_digest: str
     profile_digest: str
+    scope_digest: str
+    quantity_ceiling: Decimal
+    price_ceiling: Decimal
+    fee_ceiling_usd: Decimal
+    debit_ceiling_usd: Decimal
+    minimum_ev: Decimal
+    minimum_roi: Decimal
+    minimum_sensitivity_ev: Decimal | None
+    minimum_sensitivity_roi: Decimal | None
     created_at: datetime
     expires_at: datetime
 
@@ -77,8 +86,20 @@ class ManualNativeService:
 
     def _proposal_digest(self, *, candidate, order, profile_digest: str,
                          max_cost_usd: Decimal, created_at: datetime, expires_at: datetime) -> str:
-        market = self.engine.markets[candidate.market_id]
         book = self.engine.native.books[(candidate.market_id, candidate.venue, candidate.outcome)]
+        return digest_json({
+            "scope_digest": self._scope_digest(candidate, order, profile_digest),
+            "terms_digest": self._terms(candidate),
+            "book_asks": [level.model_dump(mode="json") for level in book.asks],
+            "book_source_time": book.source_time.isoformat() if book.source_time else None,
+            "fee_bound": book.fee_bound.model_dump(mode="json"),
+            "max_cost_usd": str(max_cost_usd),
+            "created_at": created_at.isoformat(), "expires_at": expires_at.isoformat(),
+        })
+
+    def _scope_digest(self, candidate, order, profile_digest: str) -> str:
+        """Static authorized identity and policy, independent of quote clocks/depth."""
+        market = self.engine.markets[candidate.market_id]
         registry = getattr(self.engine, "registry", None)
         source_mappings = {}
         for name, record in getattr(registry, "records", {}).items():
@@ -88,19 +109,21 @@ class ManualNativeService:
                     (item for item in mapper.mappings.values() if item.market.id == market.id),
                     key=lambda item: item.signature)]
         return digest_json({
-            "terms_digest": self._terms(candidate), "account_fingerprint": order.account_fingerprint,
+            "account_fingerprint": order.account_fingerprint,
             "profile_digest": profile_digest, "market_identity": market.identity(),
+            "market_id": candidate.market_id, "venue": candidate.venue, "outcome": candidate.outcome,
             "event_id": market.event_id, "native_outcome": candidate.intent.instrument.native_outcome,
             "native_ticker": candidate.intent.instrument.instrument_id,
+            "instrument": candidate.intent.instrument.model_dump(mode="json"),
+            "model": candidate.model, "sensitivity_model": candidate.sensitivity_model,
+            "reference_profile_id": candidate.reference_profile_id,
+            "reference_policy_digest": candidate.reference_policy_digest,
+            "settlement_probability_source": candidate.settlement_probability_source,
+            "fee_source": candidate.intent.fee_source,
             "source_mapping_digest": digest_json(source_mappings),
             "build_id": getattr(self.engine.native, "build_id", None),
             "pricing_digest": getattr(getattr(self.engine, "settings", None), "pricing", None).model_dump(mode="json")
                 if getattr(getattr(self.engine, "settings", None), "pricing", None) is not None else None,
-            "book_asks": [level.model_dump(mode="json") for level in book.asks],
-            "book_source_time": book.source_time.isoformat() if book.source_time else None,
-            "fee_bound": book.fee_bound.model_dump(mode="json"),
-            "max_cost_usd": str(max_cost_usd),
-            "created_at": created_at.isoformat(), "expires_at": expires_at.isoformat(),
         })
 
     async def _fresh_candidate(self, market_id: str, venue: str, outcome: str, max_cost_usd: Decimal):
@@ -151,11 +174,17 @@ class ManualNativeService:
             if len(self.reviews) >= 32:
                 self.reviews.pop(next(iter(self.reviews)))
             self.reviews[token] = ManualReview(market_id, venue, outcome, max_cost_usd,
-                self._terms(candidate), proposal_digest, profile_digest, created_at, expires_at)
+                self._terms(candidate), proposal_digest, profile_digest,
+                self._scope_digest(candidate, order, profile_digest),
+                candidate.intent.quantity, candidate.intent.limit_price, candidate.intent.max_fee_usd,
+                candidate.intent.reserved_cost_usd, candidate.ev_per_usd_payout, candidate.roi,
+                candidate.sensitivity_ev_per_usd_payout, candidate.sensitivity_roi,
+                created_at, expires_at)
             market = self.engine.markets[market_id]
             book = self.engine.native.books[(market_id, venue, outcome)]
             return {"review_token": token, "terms_digest": self._terms(candidate),
                     "proposal_digest": proposal_digest,
+                    "authorization_scope_digest": self.reviews[token].scope_digest,
                     "created_at": created_at.isoformat(), "expires_at": expires_at.isoformat(),
                     "environment": self.engine.settings.mode,
                     "market": {"id": market.id, "event_id": market.event_id,
@@ -175,7 +204,7 @@ class ManualNativeService:
                                        "submit_requires_kill_switch_off": True},
                     "unsigned": True,
                     "candidate": candidate.model_dump(mode="json"),
-                    "note": "Review only. No order sent. A changed price, fair value, size or scope requires a new review."}
+                    "note": "Review only. No order sent. Fresh final evidence must meet these same approved limits and scope."}
 
     async def submit(self, token: str, terms_digest: str, approved_max_cost_usd: Decimal,
                      proposal_digest: str | None = None):
@@ -191,16 +220,41 @@ class ManualNativeService:
                 if profile_digest != review.profile_digest:
                     raise RiskRejected("Native launch scope changed; review the trade again")
                 candidate = await self._fresh_candidate(review.market_id, review.venue, review.outcome, review.max_cost_usd)
-                if self._terms(candidate) != review.terms_digest:
-                    raise RiskRejected("Trade size, price, model or edge changed; review the trade again")
                 order = self.engine.native.build_order(candidate, execution_origin="manual")
-                if self._proposal_digest(candidate=candidate, order=order,
-                        profile_digest=profile_digest, max_cost_usd=review.max_cost_usd,
-                        created_at=review.created_at, expires_at=review.expires_at) != review.proposal_digest:
-                    raise RiskRejected("Account, market, mapping, depth, fees or configuration changed")
+                if self._scope_digest(candidate, order, profile_digest) != review.scope_digest:
+                    raise RiskRejected("Account, market, mapping, model or configuration changed")
+                instrument = candidate.intent.instrument
+                if (candidate.intent.quantity > review.quantity_ceiling
+                        or not instrument.price_satisfies_limit(candidate.intent.limit_price, review.price_ceiling)
+                        or candidate.intent.max_fee_usd > review.fee_ceiling_usd
+                        or candidate.intent.reserved_cost_usd > min(review.debit_ceiling_usd, review.max_cost_usd)
+                        or candidate.ev_per_usd_payout < review.minimum_ev
+                        or candidate.roi < review.minimum_roi
+                        or (review.minimum_sensitivity_ev is not None and (
+                            candidate.sensitivity_ev_per_usd_payout is None
+                            or candidate.sensitivity_ev_per_usd_payout < review.minimum_sensitivity_ev))
+                        or (review.minimum_sensitivity_roi is not None and (
+                            candidate.sensitivity_roi is None
+                            or candidate.sensitivity_roi < review.minimum_sensitivity_roi))):
+                    raise RiskRejected("Fresh price, size, debit or edge exceeds the approved bounds")
+                final_digest = self._proposal_digest(candidate=candidate, order=order,
+                    profile_digest=profile_digest, max_cost_usd=review.max_cost_usd,
+                    created_at=review.created_at, expires_at=review.expires_at)
+                storage = getattr(self.engine, "storage", None)
+                if storage is not None:
+                    from .models import Envelope
+                    evidence = Envelope(schema_name="manual.final_validation", source="manual_native",
+                        payload={"original_proposal_digest": review.proposal_digest,
+                                 "authorization_scope_digest": review.scope_digest,
+                                 "final_validation_digest": final_digest,
+                                 "candidate": candidate.model_dump(mode="json"),
+                                 "book": self.engine.native.books[
+                                     (candidate.market_id, candidate.venue, candidate.outcome)].model_dump(mode="json")})
+                    await storage.event(evidence, durable=True)
                 with self.engine.risk.manual_order(candidate.intent.id):
                     order = await self.engine.native.execute(candidate, execution_origin="manual")
                 return {"order": order.model_dump(mode="json"), "automation_enabled": self.engine.risk.auto_trade,
+                        "final_validation_digest": final_digest,
                         "note": "Order acknowledgement is not a fill. Check the native ledger and reconciliation."}
             finally:
                 # Consuming the owner confirmation always returns this local

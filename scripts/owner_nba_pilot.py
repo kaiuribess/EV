@@ -194,6 +194,7 @@ def submit_saved(args) -> int:
             order = result.get("order") or {}
             print(json.dumps({"order_id": order.get("id"), "native_order_id": order.get("venue_order_id"),
                               "status": order.get("status"), "filled_quantity": order.get("filled_quantity"),
+                              "final_validation_digest": result.get("final_validation_digest"),
                               "message": "Acknowledgement is not a fill or settlement; reconcile by order ID."}))
         finally:
             try:

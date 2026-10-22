@@ -63,6 +63,8 @@ class NativeRuntime:
         self.dirty_venues = set()
         self.last_account_probe = 0.0
         self._last_account_probes = {}
+        self._account_exchange_indexes = {}
+        self._kalshi_index_cache = None
         self.last_settlement_probe = 0.0
         self.execution_lease = None
         self._account_generations = {}
@@ -151,8 +153,36 @@ class NativeRuntime:
         self._account_generations[venue] = self._account_generations.get(venue, 0)+1
         self.account_snapshots.pop(venue, None)
         self._account_snapshot_fences.pop(venue, None)
+        self._account_exchange_indexes.pop(venue, None)
         self.last_account_probe = 0.0
         self._last_account_probes.pop(venue, None)
+
+    async def _kalshi_account_exchange_index(self, client, profile):
+        """Resolve the exact pilot shard from current public native listings."""
+        review = self.structural_review
+        if (review is None or review.native_venue != "kalshi"
+                or review.canonical_market_id not in profile.market_ids):
+            raise ValueError("No reviewed Kalshi market for account index lookup")
+        from ..venues.reconciliation import ReconciliationError, _object
+        from urllib.parse import quote as urlquote
+        cache_key = (id(client), review.native_event_id, tuple(sorted(review.native_outcomes.values())))
+        cache = self._kalshi_index_cache
+        if cache is not None and cache[0] == cache_key and time.monotonic()-cache[2] < 60:
+            return cache[1]
+        indexes = set()
+        for ticker in sorted(set(review.native_outcomes.values())):
+            response = await client.request("GET", f"/markets/{urlquote(ticker, safe='')}", authenticated=False)
+            market = _object(_object(response, "Kalshi market listing").get("market"), "Kalshi market")
+            index = market.get("exchange_index")
+            if (market.get("ticker") != ticker or market.get("event_ticker") != review.native_event_id
+                    or type(index) is not int or index < 0):
+                raise ReconciliationError("Reviewed Kalshi ticker/event/exchange index changed")
+            indexes.add(index)
+        if len(indexes) != 1:
+            raise ReconciliationError("Reviewed Kalshi outcomes have different exchange indexes")
+        index = indexes.pop()
+        self._kalshi_index_cache = (cache_key, index, time.monotonic())
+        return index
 
     def diagnostic_account(self, venue):
         """Return a short-lived, non-authorizing monitor inventory summary."""
@@ -177,6 +207,7 @@ class NativeRuntime:
             "observed_at": snapshot.observed_at.isoformat(),
             "balance_usd": str(snapshot.balance_usd) if snapshot.cash_available_verified
                 and snapshot.balance_usd is not None else None,
+            "exchange_index": snapshot.exchange_index,
             "cash_available_verified": snapshot.cash_available_verified,
             "open_order_count": snapshot.open_order_count,
             "position_count": snapshot.position_count,
@@ -206,9 +237,14 @@ class NativeRuntime:
             self.diagnostic_snapshots.pop(venue, None)
             self._diagnostic_bindings.pop(venue, None)
             try:
+                from ..venues.kalshi import KalshiClient
+                p = self.profile_for(venue)
+                exchange_index = (await self._kalshi_account_exchange_index(client, p)
+                    if isinstance(client, KalshiClient) and p is not None else None)
                 snapshot = await asyncio.wait_for(probe_native_account(
                     client, managed_orders=tuple(self.engine.risk.native_orders.values()),
                     settled_order_ids=frozenset(self.engine.risk.settled),
+                    **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
                     **({"management_client": record.plugin.management_client}
                        if venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
             except asyncio.CancelledError:
@@ -337,6 +373,9 @@ class NativeRuntime:
                 or venue in getattr(self, "_account_probes", ())
                 or self._account_snapshot_fences.get(venue) != self._ledger_fence()):
             raise NoSignal("Quarter Kelly requires current reconciled cash for this account")
+        if venue == "kalshi" and (snapshot.exchange_index is None
+                or snapshot.exchange_index != self._account_exchange_indexes.get(venue)):
+            raise NoSignal("Quarter Kelly requires cash scoped to the reviewed Kalshi exchange index")
         reserved = sum((o.reserved_cost for o in self.engine.risk.native_orders.values()
             if o.id != exclude_order_id and o.venue == venue and o.mode == profile.environment
             and o.account_fingerprint == profile.account_fingerprint and o.status in UNRESOLVED), Decimal(0))
@@ -566,6 +605,9 @@ class NativeRuntime:
             and client is not None and client.settings.environment == p.environment
             and venue not in getattr(self, "_account_probes", ())
             and (not engine.risk.config.available_cash_only or getattr(snapshot, "cash_available_verified", False)))
+        if venue == "kalshi" and account_current:
+            account_current = (snapshot.exchange_index is not None
+                and snapshot.exchange_index == self._account_exchange_indexes.get(venue))
         # Every installed snapshot must describe the exact durable ledger.
         fences = getattr(self, "_account_snapshot_fences", {})
         if account_current:
@@ -872,7 +914,7 @@ class NativeRuntime:
     async def refresh_account(self):
         # Only one read owns installation. Neither a concurrent private frame
         # nor a newer ledger may be overwritten by an earlier in-flight probe.
-        if self._account_probe_lock.locked() or not self.profiles_by_venue() or not self.mapper:
+        if self._account_probe_lock.locked() or not self.profiles_by_venue():
             return
         async with self._account_probe_lock:
             if self.portfolio:
@@ -887,13 +929,14 @@ class NativeRuntime:
         if client is None or client.settings.environment != p.environment:
             return
         adapter = self.bind_client(p.venue, client)
-        if adapter is None:
-            return
         last_probe = self._last_account_probes.get(p.venue, 0) if self.portfolio else self.last_account_probe
-        if time.monotonic()-last_probe < 5:
+        if time.monotonic()-last_probe < (5 if adapter is not None else 20):
             return
         from ..venues.account_probe import probe_native_account
         async def read_account():
+            from ..venues.kalshi import KalshiClient
+            exchange_index = (await self._kalshi_account_exchange_index(client, p)
+                if isinstance(client, KalshiClient) else None)
             async with self.manager.lock:
                 self.invalidate_account(p.venue)
                 self.last_account_probe = time.monotonic()
@@ -903,10 +946,11 @@ class NativeRuntime:
                 settled = frozenset(self.engine.risk.settled)
             snapshot = await asyncio.wait_for(probe_native_account(client,
                 managed_orders=inventory, settled_order_ids=settled,
+                **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
                 **({"adapter": adapter} if p.venue == "polymarket_us" else {}),
                 **({"management_client": record.plugin.management_client}
                    if p.venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
-            return snapshot, token
+            return snapshot, token, exchange_index
 
         def unchanged(token):
             current = self.engine.registry.records.get(p.venue)
@@ -916,7 +960,7 @@ class NativeRuntime:
 
         self._account_probes.add(p.venue)
         try:
-            snapshot, token = await read_account()
+            snapshot, token, exchange_index = await read_account()
             async with self.manager.lock:
                 if not unchanged(token):
                     self.last_account_probe = 0.0
@@ -944,15 +988,18 @@ class NativeRuntime:
                     # neither old cash nor the incomplete probe can authorize.
                     self.invalidate_account(p.venue)
                     return
-                snapshot, token = await read_account()
+                snapshot, token, exchange_index = await read_account()
             async with self.manager.lock:
                 if not unchanged(token):
                     self.last_account_probe = 0.0
                     self._last_account_probes.pop(p.venue, None)
                     return
                 self.account_snapshots[p.venue] = snapshot
+                if exchange_index is not None:
+                    self._account_exchange_indexes[p.venue] = exchange_index
                 self._account_snapshot_fences[p.venue] = token[1]
-                adapter.bound_account_fingerprint = snapshot.account_fingerprint if snapshot.identity_verified else ""
+                if adapter is not None:
+                    adapter.bound_account_fingerprint = snapshot.account_fingerprint if snapshot.identity_verified else ""
                 pending = any(o.venue == p.venue and (not o.reconciliation_complete or o.status == OrderStatus.UNKNOWN)
                               for o in self.engine.risk.native_orders.values())
                 if self.engine.risk.auto_trade and (not snapshot.identity_verified or (not snapshot.reconciled and not pending)):

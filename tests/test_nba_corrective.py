@@ -164,6 +164,42 @@ def test_five_second_gate_uses_verified_observation_not_old_price_change():
     assert not quote_eligibility(config, market, suspended_side, now)[0]
 
 
+def test_exact_source_rule_never_inherits_other_sport_book_or_market():
+    market = bootstrap_nba_pilot.validated_review()[1].mappings[0].market
+    now = datetime(2026, 10, 22, 19, 3, 48, tzinfo=timezone.utc)
+    # Offline hypothetical contract exercise; no production rule is installed.
+    rule = ReferenceFreshnessRule(sport="basketball", league="NBA", market_type="moneyline",
+        provider="fixture_contract", bookmaker="pinnacle", ttl_seconds="5", verified=True,
+        evidence="OFFLINE exact selection snapshot and status guarantee")
+    config = PricingConfig(profile_freshness_rules=[rule])
+    from evplatform.core.models import Quote
+    base = Quote(market_id=market.id, provider="fixture_contract", bookmaker="pinnacle",
+        decimal_odds={market.outcomes[0]: 1.35, market.outcomes[1]: 3.5},
+        source_time=now-timedelta(hours=1), source_observed_at=now-timedelta(seconds=1),
+        received_at=now, status="active", observation_verified=True,
+        observation_complete=True, market_status_verified=True,
+        settlement_equivalence_verified=True)
+    assert quote_eligibility(config, market, base, now)[0]
+    assert not quote_eligibility(config, market, base.model_copy(update={"bookmaker": "fanduel"}), now)[0]
+    assert not quote_eligibility(config, market, base.model_copy(update={"provider": "other"}), now)[0]
+    assert not quote_eligibility(config, market.model_copy(update={"sport": "football"}), base, now)[0]
+    assert not quote_eligibility(config, market.model_copy(update={"market_type": "total"}), base, now)[0]
+    assert not quote_eligibility(config, market, base, now+timedelta(seconds=6))[0]
+    assert not quote_eligibility(config, market, base.model_copy(update={"observation_complete": False}), now)[0]
+    assert not quote_eligibility(config, market, base.model_copy(update={"status": "suspended"}), now)[0]
+
+
+def test_response_level_scope_does_not_verify_uncovered_parlay_selection():
+    now = datetime(2026, 10, 22, 19, 3, 48, tzinfo=timezone.utc)
+    frame = ProviderEnvelope("parlay_game_ws", "odds_update", {}, now, 0,
+        metadata={"headers": {"x-result-truncated": "true"}})
+    row = {"last_observed": now.isoformat(), "last_update_type": "collector_observation"}
+    evidence = _parlay_observation(frame, row, complete=True)
+    assert evidence["observation_verified"]
+    assert not evidence["observation_complete"]
+    assert evidence["verification_reason"] == "truncated_response"
+
+
 def test_receipt_fixture_heartbeat_and_scaled_clock_do_not_refresh_selection():
     frame = recorded_frame()
     offer = extract_offers(frame)[0]

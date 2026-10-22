@@ -5,19 +5,26 @@ from decimal import Decimal as D, ROUND_CEILING
 import pytest
 
 from evplatform.core.models import utcnow
-from evplatform.venues.kalshi_fees import kalshi_taker_fee_bound
+from evplatform.venues.kalshi_fees import kalshi_taker_fee_bound, kalshi_taker_fill_fee
 from evplatform.venues.reconciliation import ReconciliationError
 from test_native_book_normalization import mapping
 
 
-def bound(market, *, multiplier=D(1), fee_type="quadratic", changes=None, direct=False, step=None):
+def bound(market, *, multiplier=D(1), fee_type="quadratic", changes=None, direct=False, step=None,
+          event_override=None, event_changes=None):
     instrument = mapping(market).instrument
     if step is not None:
         instrument = instrument.model_copy(update={"quantity_step": D(step)})
     now = utcnow()
     fee = kalshi_taker_fee_bound(instrument, {"series": {"ticker": "SERIES", "fee_type": fee_type,
         "fee_multiplier": multiplier}}, {"series_fee_change_arr": [] if changes is None else changes},
-        market_series_ticker="SERIES", observed_at=now, direct_member_verified=direct)
+        market_response={"market": {"ticker": instrument.instrument_id, "event_ticker": "EVENT", "exchange_index": 3}},
+        event_response={"event": {"event_ticker": "EVENT", "series_ticker": "SERIES", "exchange_index": 3,
+            "fee_type_override": event_override[0] if event_override else None,
+            "fee_multiplier_override": event_override[1] if event_override else None}},
+        event_changes_response={"event_fee_changes": [] if event_changes is None else event_changes, "cursor": ""},
+        market_series_ticker="SERIES", market_event_ticker="EVENT", observed_at=now,
+        direct_member_verified=direct)
     return instrument, fee, now
 
 
@@ -75,6 +82,59 @@ def test_series_binding_and_current_change_evidence_required(market):
     args = dict(market_series_ticker="OTHER", observed_at=utcnow())
     with pytest.raises(ReconciliationError, match="lineage"):
         kalshi_taker_fee_bound(instrument, {"series": {"ticker": "SERIES", "fee_type": "quadratic", "fee_multiplier": D(1)}},
-                              {"series_fee_change_arr": []}, **args)
+                              {"series_fee_change_arr": []},
+                              market_response={"market": {"ticker": instrument.instrument_id,
+                                  "event_ticker": "EVENT", "exchange_index": 3}},
+                              event_response={"event": {"event_ticker": "EVENT", "series_ticker": "SERIES",
+                                  "exchange_index": 3}}, event_changes_response={"event_fee_changes": [], "cursor": ""},
+                              market_event_ticker="EVENT", **args)
     with pytest.raises(ReconciliationError, match="already-effective"):
         bound(market, changes=[{"id": "old", "series_ticker": "SERIES", "scheduled_ts": utcnow().isoformat()}])
+
+
+@pytest.mark.parametrize("price,model,direct_debit,other_debit", [
+    (".27", ".013797", ".2838", ".29"),
+    (".74", ".013468", ".7535", ".76"),
+])
+def test_documented_one_contract_fee_and_account_precision(price, model, direct_debit, other_debit):
+    direct = kalshi_taker_fill_fee(D(price), D(1), D(1), balance_grid_usd=D(".0001"))
+    other = kalshi_taker_fill_fee(D(price), D(1), D(1), balance_grid_usd=D(".01"))
+    assert direct.model_fee_usd == other.model_fee_usd == D(model)
+    assert direct.debit_usd == D(direct_debit)
+    assert other.debit_usd == D(other_debit)
+
+
+def test_split_fills_carry_rounding_accumulator_instead_of_new_whole_cent_each_time():
+    first = kalshi_taker_fill_fee(D(".27"), D(".5"), D(1), balance_grid_usd=D(".01"))
+    second = kalshi_taker_fill_fee(D(".27"), D(".5"), D(1), balance_grid_usd=D(".01"),
+                                   rounding_accumulator_usd=first.rounding_accumulator_usd)
+    assert first.rebate_usd == 0 and second.rebate_usd == D(".01")
+    assert first.debit_usd + second.debit_usd == D(".29")
+    assert first.net_fee_usd >= 0 and second.net_fee_usd >= 0
+
+
+def test_conservative_debit_reserve_is_not_replaced_by_model_fee(market):
+    instrument, fee, now = bound(market)
+    model = kalshi_taker_fill_fee(D(".27"), D(1), D(1), balance_grid_usd=D(".01"))
+    assert fee.maximum_fee(instrument, D(1), now) >= model.net_fee_usd
+    assert D(".27") + fee.maximum_fee(instrument, D(1), now) >= model.debit_usd
+
+
+def test_one_dollar_debit_cap_cannot_be_authorized_by_a_cheaper_one_fill_example(market):
+    instrument, fee, now = bound(market)
+    one_fill = kalshi_taker_fill_fee(D(".27"), D(1), D(1), balance_grid_usd=D(".01"))
+    cap = D(1)
+    assert one_fill.debit_usd == D(".29") < cap
+    assert instrument.cost_for(D(1), D(".27")) + fee.maximum_fee(instrument, D(1), now) > cap
+
+
+def test_event_fee_override_and_scheduled_change_are_bound_to_exact_market(market):
+    change_at = utcnow()+timedelta(seconds=10)
+    _, fee, _ = bound(market, event_override=("quadratic", D("1.5")), event_changes=[
+        {"id": "event-change", "event_ticker": "EVENT", "series_ticker": "SERIES",
+         "scheduled_ts": change_at.isoformat()}])
+    assert fee.per_unit_usd == D(".02625")
+    assert fee.valid_until == change_at
+    with pytest.raises(ReconciliationError, match="event fee change"):
+        bound(market, event_changes=[{"id": "foreign", "event_ticker": "OTHER",
+            "series_ticker": "SERIES", "scheduled_ts": change_at.isoformat()}])

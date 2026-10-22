@@ -5,6 +5,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from evplatform.core.models import utcnow
+from evplatform.core.config import PricingConfig
+from evplatform.core.reference_profiles import ReferenceProfile, ReferenceFreshnessRule, quote_eligibility
 from evplatform.core.settlement_bridge import ExceptionalSettlementBound, estimate_bridge
 from test_signal_api import HEADERS, quiet_app
 
@@ -90,3 +92,26 @@ def test_read_only_api_does_not_create_order_or_authorize_execution(tmp_path, ma
         assert response.json()["conservative_payout_fraction"] == "0.588"
         assert response.json()["execution_eligible"] is False
         assert client.get("/api/native/orders").json()["orders"] == []
+
+
+def test_model_approval_cannot_turn_different_settlement_into_exact_reference(market, quotes):
+    source, target = paired_markets(market)
+    profile = ReferenceProfile(selectors=[{"sport": source.sport, "league": source.league,
+        "market_type": source.market_type}], weights_percent={"pinnacle": D(50), "circa": D(50)},
+        required_any_anchor=("pinnacle",), min_distinct_books=2, status="owner_approved_model",
+        live_execution_allowed=True)
+    config = PricingConfig(reference_profile_mode="strict", reference_profiles={"owner": profile},
+        enabled_reference_profiles=["owner"], profile_freshness_rules=[
+            ReferenceFreshnessRule(sport=source.sport, league=source.league, market_type=source.market_type,
+                provider=quote.provider, bookmaker=quote.bookmaker, ttl_seconds=D(5), verified=True,
+                evidence="OFFLINE synthetic exact quote/status contract") for quote in quotes[:2]])
+    now = utcnow()
+    for quote in quotes[:2]:
+        observed = quote.model_copy(update={"market_id": target.id, "synthetic": False,
+            "source_observed_at": now, "observation_verified": True,
+            "observation_complete": True, "market_status_verified": True,
+            "settlement_equivalence_verified": False})
+        eligible, reasons, _ = quote_eligibility(config, target, observed, now)
+        assert not eligible and any("settlement comparison" in reason for reason in reasons)
+    assert estimate_bridge(source, target, source.outcomes[0], D(".6"),
+                           bound(source, target)).execution_eligible is False

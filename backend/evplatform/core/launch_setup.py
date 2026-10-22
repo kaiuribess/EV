@@ -133,6 +133,9 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                 "identity_verified": current,
                 "reconciled": bool(current and snapshot.reconciled),
                 "cash_available_verified": bool(current and snapshot.cash_available_verified),
+                "exchange_index": snapshot.exchange_index if current else None,
+                "open_order_count": snapshot.open_order_count if current else None,
+                "position_count": snapshot.position_count if current else None,
                 "balance_usd": str(snapshot.balance_usd) if current and snapshot.cash_available_verified
                     and snapshot.balance_usd is not None else None,
                 "observed_at": snapshot.observed_at.isoformat() if snapshot else None,
