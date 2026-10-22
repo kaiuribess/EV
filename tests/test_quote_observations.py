@@ -83,6 +83,38 @@ def test_parlay_fanduel_bilateral_native_links_certify_only_that_rest_prop_obser
     assert not partial.market_status_verified
 
 
+def test_parlay_game_links_certify_each_fanduel_side_status_but_not_quote_clock():
+    event = {"id": "native-event", "home_team": "Home", "away_team": "Away",
+             "bookmakers": [{"key": "fanduel", "markets": [{"key": "h2h",
+                 "last_update": (NOW - timedelta(seconds=2)).isoformat(),
+                 "outcomes": [
+                     {"name": "Home", "price": 1.8, "link": "https://sportsbook.fanduel.com/home"},
+                     {"name": "Away", "price": 2.1, "link": "https://sportsbook.fanduel.com/away"},
+                 ]}]}]}
+
+    def offer_for(data, *, provider="parlay_rest", kind="snapshot", headers=None):
+        envelope = ProviderEnvelope(provider, kind, [data], NOW, 1,
+                                    metadata={"headers": headers or {}})
+        return extract_offers(envelope)[0]
+
+    valid = offer_for(event)
+    assert valid.market_status_verified
+    assert not valid.observation_verified and not valid.observation_complete
+    assert "link" not in valid.context
+
+    one_link = {**event, "bookmakers": [{**event["bookmakers"][0],
+        "markets": [{**event["bookmakers"][0]["markets"][0], "outcomes": [
+            event["bookmakers"][0]["markets"][0]["outcomes"][0],
+            {"name": "Away", "price": 2.1}]}]}]}
+    assert not offer_for(one_link).market_status_verified
+    assert not offer_for(event, kind="initial_state").market_status_verified
+    other_book = {**event, "bookmakers": [{**event["bookmakers"][0], "key": "pinnacle"}]}
+    assert not offer_for(other_book).market_status_verified
+    assert not offer_for(event, headers={"x-result-truncated": "true"}).market_status_verified
+    topped_up = {**event, "bookmakers": [{**event["bookmakers"][0], "topped_up": True}]}
+    assert not offer_for(topped_up).market_status_verified
+
+
 @pytest.mark.parametrize("extra", [
     {"last_observed": None}, {"last_update_type": None}, {"last_update_type": "price_change"},
     {"last_observed": "invalid"}, {"last_observed": NOW + timedelta(seconds=1)},

@@ -1,6 +1,6 @@
 # Quote observation evidence
 
-Reviewed against official documentation on 2026-10-20. Protocol fixtures are offline tests, not proof of authenticated connectivity or current source coverage.
+Reviewed against official documentation on 2026-10-20 and updated with a bounded authenticated ParlayAPI check on 2026-10-22. Protocol fixtures are offline tests, not proof of authenticated connectivity or current source coverage.
 
 `source_time` preserves the existing source clock for compatibility. Strict reference profiles use the separate `source_observed_at` and require `observation_verified`, `observation_complete`, and `market_status_verified`. `source_price_changed_at` records price movement when its meaning is documented; it never refreshes an observation. Provider publication and local receipt remain separate.
 
@@ -19,6 +19,28 @@ Flat Parlay streaming and REST prop batches now isolate malformed rows. The fail
 Streaming `commence_time` and subscription sport now survive discovery as `scheduled_start` and `event_sport`. Missing values stay missing. These facts contribute to the source signature; previously authored mappings without this context require fresh review rather than silent migration. No existing real mappings were present when this repair was installed.
 
 All 25 retained malformed real spread rows parsed successfully after the repair. A new 30-second authenticated NBA capture saw 68 FanDuel/DraftKings moneyline and spread offers with zero extraction errors. It still supplied no verified quote-bound observation or active-status evidence; no execution eligibility was inferred. The captures are bounded windows, not a coverage census. Local artifacts: `data/first-scope-bad-rows-20261021.json` (protected raw rows) and `data/first-scope-feed-fixed-20261021.json` (summary).
+
+### October 22 FanDuel game-link status check
+
+The current `/v1/sports/{sport_key}/odds` contract supports `includeLinks=true`.
+It returns an individual FanDuel game-outcome link only for an eligible native
+quote observed within five minutes whose market and runner were OPEN/ACTIVE.
+The REST adapter now requests these links and marks the exact main market's
+status verified only when every priced outcome has a valid link, the response
+is not partial/truncated/degraded or topped up, and the market is not suspended.
+It does not retain links in normalized offers or use them for order placement.
+This status evidence does **not** provide a quote-bound observation clock: the
+REST game `last_update` and book/fixture heartbeat fields still cannot establish
+current price freshness. [Current OpenAPI](https://parlay-api.com/openapi.json),
+[WebSocket and timestamp guidance](https://api.parlay-api.com/docs/websocket).
+
+Two one-credit read-only NBA FanDuel moneyline requests on October 22 returned
+14 complete two-sided game offers each. After the parser change, 14/14 had
+link-based active-status evidence; 0/14 had verified quote-bound observation,
+and 0/14 met both conditions. This is a narrow live sample, not proof that
+other books, sports, markets, or future responses carry links. Strict reference
+eligibility and native order submission remain blocked without the missing
+freshness, settlement and market-mapping evidence.
 
 ### Withdrawal precedence repair, October 21
 
@@ -54,6 +76,12 @@ status. No sampled provider group established market-status verification, and
 no TTL was approved. The single Oddize metered read consumed one credit.
 Artifact: `data/freshness-final-audit-20261021.json`. This supersedes any inference
 of absent Pinnacle coverage from an earlier shorter capture, without claiming
-complete sport/prop coverage.
+complete sport/prop coverage. The October 22 Parlay FanDuel REST status result
+above is a later, narrower exception; it does not alter the October 21 sample.
 
-These fields do not supply a validated provider/book/market freshness limit, settlement match, active-status guarantee or native lifecycle evidence. Missing evidence still blocks strict profiles. An unchanged price can have a new verified observation; a newly received packet can contain an old price. Neither means an execution target is liquid or profitable.
+The October 21 fields do not supply a validated provider/book/market freshness
+limit, settlement match, active-status guarantee or native lifecycle evidence.
+The narrow October 22 FanDuel status exception does not close those other gaps.
+Missing evidence still blocks strict profiles. An unchanged price can have a new
+verified observation; a newly received packet can contain an old price. Neither
+means an execution target is liquid or profitable.

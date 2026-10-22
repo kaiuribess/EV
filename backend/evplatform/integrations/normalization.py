@@ -271,6 +271,20 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                 status = "suspended" if market.get("suspended") or book.get("suspended") else "active"
                 if event.get("phase") in {"suspended", "closed"} or event.get("status") in {"suspended", "closed"}:
                     status = "suspended"
+                # /odds?includeLinks=true carries links on individual FanDuel
+                # outcomes only for a matching recently observed native quote
+                # whose market and runner were OPEN/ACTIVE. Require every side
+                # of this exact main line. This verifies status only: no
+                # quote-bound observation clock is supplied by the game shape.
+                native_status = (
+                    envelope.provider_id == "parlay_rest"
+                    and envelope.kind == "snapshot"
+                    and book.get("key") == "fanduel"
+                    and market.get("key") in {"h2h", "spreads", "totals"}
+                    and len(prices) >= 2 and status == "active"
+                    and all(_valid_native_link(outcome.get("link")) for outcome in outcomes)
+                    and _observation_problem(envelope, event, book, market) is None
+                )
                 result.append(SourceOffer(
                     envelope.provider_id, str(book["key"]), str(event.get("eventId") or event.get("id")),
                     str(market["key"]), None, None, market.get("period"), points, prices,
@@ -279,6 +293,7 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                     **(_parlay_observation(envelope, market, complete=len(prices) >= 2,
                                            scopes=(event, book))
                        if envelope.provider_id.startswith("parlay") else {}),
+                    market_status_verified=native_status,
                 ))
                 # Alternate lines are separate source identities. Missing sides never
                 # inherit prices or timestamps from a primary rung.

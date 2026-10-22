@@ -102,6 +102,7 @@ async def test_parlay_rest_documented_header_endpoint_and_cost():
         result = await provider.fetch_snapshot("basketball_nba")
         assert requests[0].url.path == "/v1/sports/basketball_nba/odds"
         assert requests[0].url.params["oddsFormat"] == "decimal"
+        assert requests[0].url.params["includeLinks"] == "true"
         assert provider.quota.billable_requests == 3
         assert provider.quota.provider_remaining == 97
         assert result.synthetic is False
