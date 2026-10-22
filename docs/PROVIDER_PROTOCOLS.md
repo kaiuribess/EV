@@ -1,11 +1,11 @@
 # Provider protocols and verification status
 
-Checked against official documentation on 2026-10-20. The installed transports
+Checked against official documentation on 2026-10-20 and 2026-10-21. The installed transports
 are real HTTPX/WebSocket implementations; automated tests use controlled responses.
 Parlay REST was separately authenticated against the real service: sport discovery
 and NBA moneylines from DraftKings, FanDuel, and Pinnacle succeeded. The current
 paid WebSocket connection was verified on October 20, 2026 local time: the server
-reported Business access, NBA became ready, and real game-line and player-prop
+reported paid access, NBA became ready, and real game-line and player-prop
 offers continued arriving. This replaces the earlier entitlement-denied status.
 Synthetic demo data comes from the separate demo plugin, never these adapters.
 
@@ -42,9 +42,9 @@ a new initial state. [Official WebSocket reference](https://parlay-api.com/docs/
 
 The local `account_tier` setting never grants entitlement. Health separately
 reports the current server-provided tier and push settings, and clears them
-when that connection ends. The observed current connection reported `tier: business`,
-`push_mode: coalesced`, and `min_push_interval_s: 1.0`, with authenticated streaming,
-`basketball_nba` ready, no pending snapshot, and zero reported errors. Successive
+when that connection ends. The current October 21 connection reports
+`tier: scale`, `push_mode: raw`, and `min_push_interval_s: 0.0` for NBA, NFL,
+MLB and NHL, with authenticated streaming and zero reported errors. Successive
 checks received changing game and prop offers; source mappings remained
 unreviewed, so all such markets stayed quarantined and `mapped_quotes` stayed zero.
 Automation remained off, the kill switch active, and native orders zero. Local

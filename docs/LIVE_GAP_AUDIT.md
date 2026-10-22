@@ -396,3 +396,13 @@ spent no provider quota and armed no native orders. An MVP-or-higher Owls key,
 actual response sampling, a validated exact-source TTL and additional
 independent active references would still be needed before a strict live
 profile can be reviewed.
+
+After the current build restarted, the paper workspace remained sample-free,
+with authenticated Parlay raw streaming and Oddize REST connected. Across its
+bounded 10,000-observation in-process sample at about **02:34 UTC**,
+bus-publication-to-calculation measured **11.001 ms median, 39.422 ms p95,
+50.024 ms p99**. These are internal processing times, not source-to-client,
+submission, acknowledgment or fill delay; there were zero paper/native orders
+and zero fills in this restart window. Production still had zero launch
+profiles, verified native markets and qualifying real reference markets, so
+automatic native trading remained paused.
