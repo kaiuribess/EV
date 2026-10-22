@@ -113,6 +113,19 @@ def test_parlay_game_links_certify_each_fanduel_side_status_but_not_quote_clock(
     assert not offer_for(event, headers={"x-result-truncated": "true"}).market_status_verified
     topped_up = {**event, "bookmakers": [{**event["bookmakers"][0], "topped_up": True}]}
     assert not offer_for(topped_up).market_status_verified
+    for market_change in ({"status": "CLOSED"}, {"available": False}):
+        unavailable = {**event, "bookmakers": [{**event["bookmakers"][0],
+            "markets": [{**event["bookmakers"][0]["markets"][0], **market_change}]}]}
+        offer = offer_for(unavailable)
+        assert offer.status == "suspended" and not offer.market_status_verified
+    finished = offer_for({**event, "status": "final"})
+    assert finished.status == "suspended" and not finished.market_status_verified
+    outcomes = event["bookmakers"][0]["markets"][0]["outcomes"]
+    withdrawn_side = {**event, "bookmakers": [{**event["bookmakers"][0],
+        "markets": [{**event["bookmakers"][0]["markets"][0],
+            "outcomes": [outcomes[0], {**outcomes[1], "available": False}]}]}]}
+    withdrawn = offer_for(withdrawn_side)
+    assert withdrawn.status == "suspended" and not withdrawn.market_status_verified
 
 
 @pytest.mark.parametrize("extra", [

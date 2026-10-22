@@ -1,5 +1,34 @@
 # Live readiness audit — October 21, 2026
 
+## October 22 current-state check
+
+The production monitor was restarted on the tested build and remained paused:
+`auto_trade=false`, `kill_switch=true`, with no reviewed launch profile or
+source/native market mapping. The live-input paper workspace restarted with
+synthetic odds off and simulated trading on. Its real-signal ledger had zero
+eligible episodes; repeated `NO SIGNAL` evaluations are tracked but are not
+profitable opportunities or placed orders. The full offline check passed 2,114
+backend tests, 103 dashboard tests and the frontend build.
+
+Four authenticated, read-only account diagnostics at 08:44 PDT returned:
+
+| Venue | Available cash evidence | Inventory | Trading permission | Account/location limits |
+| --- | ---: | --- | --- | --- |
+| Kalshi | Verified in the read-only probe | 0 open orders, 0 positions; reconciled | Verified | A time-limited location attestation exists; no execution profile |
+| Novig | Verified in the read-only probe | 0 open orders, 0 positions; reconciled | Verified | No location attestation in this probe; no execution profile |
+| ProphetX | Unverified | Counts and reconciliation unverified | Unverified | Signed identity verified, funded-cash/inception review missing |
+| Polymarket US | Unverified | 0 reported orders/positions, reconciliation unverified | Unverified | Retail account identity/cash and paid settlement join unresolved |
+
+Each diagnostic returned `usable_for_execution=false`; the values are a
+momentary account read, not permission to submit an order. Kalshi and Novig
+cash balances are not pooled. The [quote evidence review](QUOTE_OBSERVATION_CONTRACT.md)
+also now records a narrow FanDuel REST game-status improvement: 14 sampled
+NBA moneylines had both active-status links, but none had a verified
+quote-bound observation clock. This did not produce an eligible live reference
+or remove the mapping, settlement and genuine lifecycle gates. The existing
+database retention/compaction had reduced the workspace to about 8.6 GB,
+below the requested 10 GB target.
+
 ## Existing-key follow-up (02:42 UTC October 22)
 
 Only the already configured ParlayAPI and Oddize credentials were used. Parlay's

@@ -27,7 +27,8 @@ It returns an individual FanDuel game-outcome link only for an eligible native
 quote observed within five minutes whose market and runner were OPEN/ACTIVE.
 The REST adapter now requests these links and marks the exact main market's
 status verified only when every priced outcome has a valid link, the response
-is not partial/truncated/degraded or topped up, and the market is not suspended.
+is not partial/truncated/degraded or topped up, and no event, bookmaker,
+market or outcome explicitly reports closed, suspended or unavailable status.
 It does not retain links in normalized offers or use them for order placement.
 This status evidence does **not** provide a quote-bound observation clock: the
 REST game `last_update` and book/fixture heartbeat fields still cannot establish

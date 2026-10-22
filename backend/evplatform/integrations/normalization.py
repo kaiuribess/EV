@@ -142,6 +142,23 @@ def _valid_native_link(value: Any) -> bool:
         return False
 
 
+_UNAVAILABLE_STATUSES = frozenset({
+    "suspended", "closed", "complete", "completed", "final", "settled",
+    "cancelled", "canceled", "void", "voided", "postponed", "withdrawn",
+    "inactive", "unavailable",
+})
+
+
+def _explicitly_unavailable(scope: Any) -> bool:
+    if not isinstance(scope, dict):
+        return False
+    if scope.get("suspended") is True or scope.get("available") is False:
+        return True
+    return any(isinstance(scope.get(key), str)
+               and scope[key].strip().casefold() in _UNAVAILABLE_STATUSES
+               for key in ("status", "phase"))
+
+
 def _matches_scope(offer: SourceOffer, selectors: dict) -> bool:
     return all(getattr(offer, name) == value for name, value in selectors.items())
 
@@ -268,9 +285,8 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                 # freshest-poll meanings for book.last_update_ms, so it cannot
                 # establish this market's source observation clock.
                 observed = parse_timestamp(market.get("last_update"))
-                status = "suspended" if market.get("suspended") or book.get("suspended") else "active"
-                if event.get("phase") in {"suspended", "closed"} or event.get("status") in {"suspended", "closed"}:
-                    status = "suspended"
+                status = ("suspended" if any(_explicitly_unavailable(scope)
+                    for scope in (event, book, market, *outcomes)) else "active")
                 # /odds?includeLinks=true carries links on individual FanDuel
                 # outcomes only for a matching recently observed native quote
                 # whose market and runner were OPEN/ACTIVE. Require every side
