@@ -443,16 +443,17 @@ def test_owls_pinnacle_realtime_uses_main_market_confirmation_only():
         return extract_offers(replace(raw, payload=changed))[0]
 
     for changes in ({"phase": "suspended"}, {"phase": "live"}, {"status": "final"},
+                    {"isLive": 0},
                     {"commence_time": (NOW - timedelta(minutes=1)).isoformat()}):
         result = first(changes)
         assert result.status == "suspended" and not result.market_status_verified
-    for market_changes in ({"suspended": True}, {"last_seen": None},
+    for market_changes in ({"suspended": True}, {"suspended": 0}, {"last_seen": None},
                            {"last_seen": (NOW + timedelta(seconds=1)).isoformat()},
                            {"last_update": NOW.isoformat()}):
         result = first(market_changes=market_changes)
         assert result.status == "suspended" and not result.observation_verified
     for meta_changes in ({"available": False}, {"freshness": {"stale": True}},
-                         {"feed": {"resubscribing": True}}):
+                         {"feed": {"resubscribing": True}}, {"feed": {"resubscribing": 0}}):
         result = first(meta_changes=meta_changes)
         assert result.status == "suspended" and not result.observation_verified
     assert extract_offers(replace(raw, payload={**payload, "meta": {**payload["meta"],

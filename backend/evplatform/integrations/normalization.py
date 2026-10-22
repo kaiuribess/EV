@@ -429,7 +429,7 @@ def _owls_pinnacle_realtime_offers(envelope: ProviderEnvelope) -> list[SourceOff
     feed = meta.get("feed") if isinstance(meta.get("feed"), dict) else {}
     freshness = meta.get("freshness") if isinstance(meta.get("freshness"), dict) else {}
     feed_ready = (meta.get("available") is True and freshness.get("stale") is False
-                  and feed.get("resubscribing") is not True)
+                  and (feed.get("resubscribing") is None or feed.get("resubscribing") is False))
     result = []
     for event in events:
         if not isinstance(event, dict):
@@ -437,7 +437,8 @@ def _owls_pinnacle_realtime_offers(envelope: ProviderEnvelope) -> list[SourceOff
         phase = event.get("phase")
         start = parse_timestamp(event.get("commence_time"))
         pregame = (phase == "scheduled" and event.get("status") in {None, "scheduled"}
-                   and event.get("isLive") is not True and start is not None
+                   and (event.get("isLive") is None or event.get("isLive") is False)
+                   and start is not None
                    and start > envelope.received_at)
         context = {"event_sport": event.get("sport_key") or meta.get("sport"),
                    "participants": [event.get("home_team"), event.get("away_team")],
@@ -467,7 +468,8 @@ def _owls_pinnacle_realtime_offers(envelope: ProviderEnvelope) -> list[SourceOff
                 # sport-level freshness and REST arrival cannot replace it.
                 seen_valid = (seen is not None and seen <= envelope.received_at
                               and (changed is None or changed <= seen))
-                status_active = (feed_ready and pregame and market.get("suspended") is not True
+                status_active = (feed_ready and pregame
+                                 and (market.get("suspended") is None or market.get("suspended") is False)
                                  and seen_valid)
                 verified = status_active
                 result.append(SourceOffer(
