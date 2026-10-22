@@ -378,3 +378,22 @@ offline tests; account-specific validation is outstanding. An explicitly reviewe
 IOC settlement policy can satisfy capability admission; it still requires genuine
 account-bound lifecycle and settlement evidence, and stops on exceptional results. Supplying keys alone cannot
 satisfy these requirements. See [GO_LIVE.md](GO_LIVE.md).
+
+## October 21 live-input paper restart check
+
+The existing Parlay Scale and Oddize Developer credentials authenticated after
+`start_live_paper.ps1 -NoBrowser` started port 8001 against the dedicated
+`data/live-paper.db`. Sample odds were off and paper automation on. The live
+state contained 47 paper markets, 132 real-source quotes, 47 recorded signal
+states and zero paper orders at the check; no qualifying opportunity was
+present. This is a real-feed paper observation, not a native execution test.
+
+The launcher now records its database path and refuses to treat an unrelated
+paper database as the already-running live-paper workspace. The previous
+default `evplatform.db` and its history were preserved. An unchanged Parlay
+book heartbeat no longer republishes a quote plus two hypothetical book sides;
+eligibility transitions still publish them. A 15-second sample after restart
+recorded 401 total audit events, including 90 provider frames and 3 signal
+observations. That sample measures local logging volume, not feed latency or
+trading performance. The full backend suite passed **2,074 tests** (one
+third-party deprecation warning), and both edited PowerShell launchers parsed.

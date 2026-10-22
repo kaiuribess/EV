@@ -11,9 +11,9 @@ It is **not a completed production autonomous trading release**.
 | Pricing | 11 typed sport/market priors; exact pregame selectors, anchor/quorum gates, canonical-book dedup, documented observation/TTL/status gates, power plus proportional sensitivity at size/revalidation, research-only diagnostics and profile-bound live permission | Verified source TTL/status policies; calibrated real-market weights; validated push/different-line models; native live fee feeds |
 | Strategies | Positive EV, independent strategy interface, required input and market metadata | Arbitrage, cross-exchange multi-leg execution, middles, steam and ML strategies |
 | Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
-| Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger | Genuine sandbox lifecycle certification; supported venue settlement proof; no native orders have been sent |
+| Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger; one Novig Paper play-money IOC fill reconciled | Production lifecycle and paid settlement proof; a Paper fill is not production certification |
 | Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
-| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper subscriptions and production account/book reads verified; owner opened and funded a trading wallet with $25; protected setup and durable recovery | Account-backed order lifecycle tests and complete launch evidence; unusual/shared-position settlement remains blocked |
+| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper subscriptions and production account/book reads verified; protected setup and durable recovery; one play-money Paper IOC order filled and reconciled | Actual production order lifecycle, location preflight at placement, paid settlement and complete launch evidence; unusual/shared-position settlement remains blocked |
 | ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, matched-fill/wallet accounting and restricted funded-cash win/loss settlement; production read-only subscriptions and market messages verified | Genuine complete history, funded-cash and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
 | Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; earlier actual signed production read/stream checks passed | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, account-aware live setup, actionable launch blockers and separate native order ledger; final owner enable control bound to current launch scope | Broader browser/device QA; no current production scope passes the gate |
@@ -31,6 +31,19 @@ was ready with no pending snapshot and zero reported connection errors. Real
 game-line and player-prop offers continued arriving across successive checks.
 This supersedes the earlier entitlement refusal; current Business access is verified.
 
+On October 21 at 20:13 PDT, the currently configured Parlay key authenticated
+four requested game-board sports and the server reported Scale/raw streaming.
+The live-feed paper workspace on port 8001 also authenticated Oddize's existing
+Developer key and began receiving real source updates with sample odds off.
+The latest scoped Parlay NBA player-points probe found 48 FanDuel rows, one
+two-sided row with both native links, and **zero rows** with a recent validated
+collector-observation pair. A fresh Parlay NBA h2h REST read returned FanDuel
+and Pinnacle prices, but no book or market had that observation pair. These are
+working data connections, not verified active sportsbook offers. Production
+pricing still has zero reviewed real-market mappings and sends no orders.
+The running paper workspace records NO SIGNAL where its profile lacks a fresh
+anchor or quorum; it does not create an edge by removing that requirement.
+
 The evidence is saved locally in `data/parlay-paid-access.json` (03:08:55–03:09:07
 UTC on October 21). All unreviewed real markets remained quarantined, with
 `mapped_quotes: 0`; automation was off, the kill switch was active, and native
@@ -45,8 +58,9 @@ or reviewed settlement mappings. See [Oddize evidence](ODDIZE.md).
 
 Novig paper testing verified signed discovery and authenticated book/private
 subscriptions. ProphetX production testing verified authentication, Talaria
-channel acknowledgements, and real market messages. No native order or
-cancellation was submitted, and no native fill was validated. See
+channel acknowledgements, and real market messages. These earlier read-only
+checks sent no native orders. A later Novig Paper play-money order filled and
+reconciled, as described in [the Paper probe](NOVIG_PAPER_PROBE.md). See
 [venue evidence and limits](VENUE_PROTOCOLS.md).
 
 Offline tests validate documented request construction, parsing, authentication

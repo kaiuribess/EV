@@ -168,6 +168,12 @@ class ParlayPaperNormalizer:
             current = (self._poll_current(sport, key[2], envelope.received_at)
                 and quote.source_time is not None
                 and 0 <= (envelope.received_at - quote.source_time).total_seconds() <= self.max_age_seconds)
+            # Heartbeats report a book poll, not a new observation of this
+            # outcome. Publish only a change in paper eligibility; otherwise
+            # every five-second heartbeat duplicates the same quote and both
+            # simulated book sides in the durable audit without new evidence.
+            if current == (quote.quality == 1.0):
+                continue
             revised = quote.model_copy(update={"quality": 1.0 if current else 0.0,
                 "verification_reason": ("paper_only_book_polled_quote_status_unverified" if current
                     else "paper_only_book_poll_missing_or_stale")})

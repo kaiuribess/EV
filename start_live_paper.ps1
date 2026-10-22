@@ -24,15 +24,29 @@ $previous = $null
 try { $previous = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 5 } catch { }
 if ($previous) {
     $native = Invoke-RestMethod -Uri "$baseUrl/api/native/orders" -TimeoutSec 5
+    $runtimePath = Join-Path $PSScriptRoot "data\runtime-$Port.json"
+    $runningDatabase = $null
+    if (Test-Path -LiteralPath $runtimePath) {
+        try {
+            $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
+            if ($runtime.port -eq $Port -and $runtime.mode -eq 'paper' -and
+                $runtime.database_path -is [string]) {
+                $runningDatabase = [IO.Path]::GetFullPath($runtime.database_path)
+            }
+        } catch { }
+    }
+    $correctDatabase = $runningDatabase -and $runningDatabase.Equals($database,
+        [StringComparison]::OrdinalIgnoreCase)
     if ($previous.mode -eq 'paper' -and $previous.sample_feed_enabled -eq $false -and
-        $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0) {
+        $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0 -and
+        $correctDatabase) {
         & "$PSScriptRoot\setup_live_inputs.ps1" -Port $Port -EnablePaperAutomation:(-not $Paused)
         $previous = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
         Write-Host "Live-input paper workspace is already running at $baseUrl. Paper automation: $($previous.auto_trade)."
         if (-not $NoBrowser) { Start-Process -FilePath "$baseUrl/?page=providers" }
         return
     }
-    if ($previous.mode -notin @('demo', 'paper') -or $previous.auto_trade -ne $false -or
+    if ($previous.mode -notin @('demo', 'paper') -or
         $native.native_execution_enabled -ne $false -or @($native.orders).Count -ne 0 -or
         @($previous.orders | Where-Object { $_.status -in @('open', 'partial', 'cancel_pending', 'unknown') }).Count -ne 0) {
         throw 'Stop active or native execution before changing the paper workspace; no account or order action was taken.'

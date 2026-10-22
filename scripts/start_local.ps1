@@ -41,11 +41,17 @@ finally { $probe.Stop() }
 $oldAuto = $env:EV_AUTO_TRADE
 $oldPort = $env:EV_PORT
 $oldDatabase = $env:EV_DATABASE_PATH
+$databaseForRuntime = $null
 try {
     $env:EV_AUTO_TRADE = if ($AutoTrade) { "true" } else { "false" }
     $env:EV_PORT = [string]$Port
     if ($Mode -in @("sandbox", "production")) {
         $env:EV_DATABASE_PATH = Join-Path $projectRoot "data\native-$Mode.db"
+    }
+    $databaseForRuntime = if ($env:EV_DATABASE_PATH) {
+        [IO.Path]::GetFullPath($env:EV_DATABASE_PATH)
+    } else {
+        [IO.Path]::GetFullPath((Join-Path $projectRoot "data\evplatform.db"))
     }
     $launchArgs = @("-m", "evplatform", "--mode", $Mode, "--port", [string]$Port)
     if ($AutoTrade) { $launchArgs += "--auto-trade" }
@@ -69,7 +75,8 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
     Start-Sleep -Milliseconds 500
 }
 if (-not $ready) { throw "Backend did not become ready. See data\server-$Port.err.log; process ID $($server.Id)." }
-@{ pid = $server.Id; port = $Port; mode = $Mode; url = $dashboardUrl } |
+@{ pid = $server.Id; port = $Port; mode = $Mode; url = $dashboardUrl;
+    database_path = $databaseForRuntime } |
     ConvertTo-Json | Set-Content -LiteralPath "data\runtime-$Port.json" -Encoding UTF8
 Write-Host "EV Platform $Mode is running at $dashboardUrl (PID $($server.Id))." -ForegroundColor Green
 if ($Mode -in @("demo", "paper")) {

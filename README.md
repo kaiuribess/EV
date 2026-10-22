@@ -72,6 +72,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start_live_paper.ps1
 The launcher stops a paused demo instance on port 8001, opens
 `data/live-paper.db`, and restores its enabled input and account-monitor
 plugins. It never copies synthetic trade history or trading authorization.
+Use this launcher to resume a real-feed paper session. It checks the recorded
+database path before reusing a running paper process; a paper process started
+against the default demo database is moved to `data/live-paper.db` after its
+open orders are checked. Existing database files are preserved.
 It also runs the same `setup_live_inputs.ps1` feed/profile setup used by
 `start_native.ps1`; there is one source of sportsbook weights and feed scopes.
 It configures four priority sports across a broad Parlay prop stream, a

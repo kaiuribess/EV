@@ -114,6 +114,20 @@ def test_missing_or_old_book_poll_suspends_paper_capacity():
     assert all(item.status == "suspended" for item in stale if isinstance(item, OrderBook))
 
 
+def test_repeated_book_heartbeat_does_not_republish_unchanged_paper_quote():
+    normalizer = ParlayPaperNormalizer()
+    normalizer.apply(frame())
+    assert normalizer.apply(heartbeat())
+    assert normalizer.apply(heartbeat()) == []
+    stale = normalizer.apply(heartbeat(books=()))
+    assert len([item for item in stale if isinstance(item, Quote)]) == 3
+    assert all(item.quality == 0 for item in stale if isinstance(item, Quote))
+    assert normalizer.apply(heartbeat(books=())) == []
+    restored = normalizer.apply(heartbeat())
+    assert len([item for item in restored if isinstance(item, Quote)]) == 3
+    assert all(item.quality == 1 for item in restored if isinstance(item, Quote))
+
+
 async def test_one_sport_reconnect_keeps_other_paper_baseline():
     """A scoped upstream gap must not erase healthy sport sockets."""
     normalizer = ParlayPaperNormalizer()
