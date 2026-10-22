@@ -105,6 +105,45 @@ async def test_event_props_reject_wrong_served_event_and_reference():
         assert provider.quota.calls == calls
 
 
+async def test_auto_prop_cycle_uses_current_snapshot_identity_and_one_metered_event():
+    future = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.path == "/api/v1/account/usage":
+            return httpx.Response(200, json={"plan_id": "api_developer", "credits_remaining": 50})
+        if request.url.path == "/api/v1/sports":
+            return httpx.Response(200, json={"sports": []})
+        if request.url.path == "/api/v1/books":
+            return httpx.Response(200, json={"books": []})
+        if request.url.path == "/api/v1/offer-types":
+            return httpx.Response(200, json={"offer_types": []})
+        if request.url.path == "/api/v1/odds/latest":
+            return httpx.Response(200, json={"sport": "nba", "events": [
+                {"event_id": "first", "sport": "nba", "team1": "AWAY", "team2": "HOME",
+                 "start_date": future, "odds": []}]})
+        if request.url.path == "/api/v1/events/nba/first/props":
+            assert request.url.params.get_list("prop_types") == ["player_pts"]
+            return httpx.Response(200, json={"sport": "nba", "event_id": "first", "props": []})
+        raise AssertionError("Unexpected Oddize request")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = OddizeRest({"enabled": True, "sports": ["nba"], "include_props": True,
+            "prop_types": {"nba": ["player_pts"]}, "auto_prop_event_limit": 1,
+            "session_request_budget": 3}, client=client, credential="offline-secret")
+        stream = provider.stream_updates()
+        frames = [await anext(stream) for _ in range(6)]
+        await stream.aclose()
+        await provider.disconnect()
+    assert [frame.kind for frame in frames] == ["account_capabilities", "sport_discovery",
+        "bookmaker_discovery", "market_discovery", "snapshot", "props_snapshot"]
+    assert frames[-1].metadata["event_ref"] == {"event_id": "first", "sport": "nba",
+        "team1": "AWAY", "team2": "HOME", "start_date": future}
+    assert paths.count("/api/v1/events/nba/first/props") == 1
+    assert provider.quota.billable_requests == 3
+
+
 async def test_exact_header_auth_and_repeated_query_filters():
     seen = []
 
