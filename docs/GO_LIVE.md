@@ -90,6 +90,20 @@ does not establish sportsbook quote status, contract equivalence, liquidity or
 order permission. The tournament/event flow follows the
 [ProphetX Trading API integration guide](https://docs.prophetx.co/docs/integration).
 
+To compare current NBA fixtures from Parlay/Oddize with that native catalog,
+without approving any wager contract, run:
+
+```powershell
+$env:PYTHONPATH='backend'
+.\.venv\Scripts\python.exe scripts\review_event_crosswalk.py --url http://127.0.0.1:8002 --tournament-id 132
+```
+
+The report requires exact verified team aliases and close scheduled start
+times. It rejects missing clocks, unknown teams, ambiguous native fixtures and
+conflicting times under a single source event ID. `candidate_only: true`
+means the shared fixture still needs exact selection, period, settlement,
+active-quote and fee/depth evidence before a real order can be considered.
+
 That workspace also starts paused and uses `data/native-production.db`.
 Neither command grants order authorization or turns on automation, including
 after a restart. Native launch artifacts currently share the paths below;

@@ -14,22 +14,10 @@ from ..core.models import Envelope, Market, ProviderFrame, Quote, utcnow
 from ..core.plugins import InputPlugin, Manifest
 from ..integrations.base import ProviderEnvelope, parse_timestamp
 from ..integrations.normalization import SourceOffer, extract_offers
+from ..integrations.team_aliases import NBA_TEAMS
 
 
-# Codes are from the account's /api/v1/sports/nba/teams catalog. Names must
-# match an exact Parlay participant; unknown codes are deliberately not guessed.
-NBA_TEAMS = {
-    "ATL": "Atlanta Hawks", "BOS": "Boston Celtics", "BRK": "Brooklyn Nets",
-    "CHI": "Chicago Bulls", "CHO": "Charlotte Hornets", "CLE": "Cleveland Cavaliers",
-    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets", "DET": "Detroit Pistons",
-    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
-    "LAC": "Los Angeles Clippers", "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies",
-    "MIA": "Miami Heat", "MIL": "Milwaukee Bucks", "MIN": "Minnesota Timberwolves",
-    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks", "OKC": "Oklahoma City Thunder",
-    "ORL": "Orlando Magic", "PHI": "Philadelphia 76ers", "PHO": "Phoenix Suns",
-    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
-    "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
-}
+# Unknown team codes are deliberately not guessed.
 BOOKS = {"pin": "pinnacle", "circa": "circa", "dk": "draftkings",
          "fd": "fanduel", "czr": "caesars", "b365": "bet365",
          "boag": "betonline", "mgm": "betmgm"}

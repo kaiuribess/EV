@@ -1,5 +1,7 @@
+import asyncio
 from collections import Counter
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -7,6 +9,7 @@ from evplatform.core.plugins import PluginRegistry
 from evplatform.plugins.external import NativeMonitor, ProviderBridge
 from evplatform.integrations.parlay import ParlayWebSocket
 from evplatform.venues.novig import NovigClient, NovigSettings
+from evplatform.venues.polymarket_us import PolymarketUSClient, PolymarketUSMonitorConfig, PolymarketUSSettings
 
 
 @pytest.mark.asyncio
@@ -82,3 +85,37 @@ async def test_local_invalidation_is_not_counted_as_received_exchange_frame():
     assert monitor.frames == 0
     assert engine.metrics.counters["native_messages:novig"] == 0
     assert engine.metrics.counters["native_invalidations:novig"] == 1
+
+
+@pytest.mark.asyncio
+async def test_prophetx_discovery_fields_do_not_leak_into_other_native_configs(monkeypatch):
+    monkeypatch.setenv("TEST_POLY_ID", "fixture")
+    monkeypatch.setenv("TEST_POLY_SECRET", "fixture")
+
+    class Client:
+        def __init__(self): self.config = None
+
+        async def connect(self): return {}
+
+        async def configure_subscriptions(self, config):
+            self.config = PolymarketUSMonitorConfig.model_validate(config)
+
+        async def disconnect(self): pass
+
+        async def stream_updates(self):
+            await asyncio.sleep(3600)
+            yield {}
+
+    engine = SimpleNamespace(native=SimpleNamespace(on_frame=AsyncMock()),
+        metrics=SimpleNamespace(counters=Counter()), notice=AsyncMock())
+    monitor = NativeMonitor(PolymarketUSClient, PolymarketUSSettings,
+        {"api_key_id": "TEST_POLY_ID", "secret_key": "TEST_POLY_SECRET"}, engine,
+        config_model=PolymarketUSMonitorConfig)
+    fake = Client()
+    monitor.factory = lambda _: fake
+    try:
+        await monitor.start(SimpleNamespace(config={"environment": "production",
+            "market_slugs": [], "private_updates": True}))
+        assert fake.config is not None and not hasattr(fake.config, "event_ids")
+    finally:
+        await monitor.stop()

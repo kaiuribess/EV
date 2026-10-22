@@ -27,6 +27,22 @@ field. The currently sampled source observations had zero verified active
 statuses. No native order was submitted. The full backend suite passed 2,029
 tests, plus the added one-cycle discovery regression passed separately.
 
+A subsequent read-only event crosswalk found the same Lakers–Warriors scheduled
+NBA fixture at 02:00 UTC under distinct ProphetX, Parlay REST/WebSocket and
+Oddize IDs. Across the bounded NBA window it produced 23 candidate
+source-to-ProphetX event pairs; 11 source IDs had conflicting start times in
+their retained Parlay rows (typically a later tip time) and were rejected as
+unambiguous candidates. This is **event discovery only**. No outcome,
+settlement, quote status, or execution mapping was published.
+
+A production smoke check caught a config regression before any order could be
+armed: ProphetX's discovery-only `event_ids` had been passed to the strict
+Polymarket US monitor config. The dispatch is now venue-specific and has a
+regression test. After the repair and restart, Kalshi, Novig, ProphetX and
+Polymarket US all reported authenticated streaming again; automatic orders
+remained off and the native order ledger remained empty. The full backend
+suite then passed **2,034 tests**.
+
 **Result: blocked.** Rechecked the local application, authenticated account
 history, quarantined real prices, and current official API documentation. No
 orders, cancellations, transfers, or live activation were performed.

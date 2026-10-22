@@ -292,9 +292,12 @@ class NativeMonitor(Plugin):
             await self._refresh_discovery()
         configure = getattr(self.client, "configure_subscriptions", None)
         if configure is not None:
-            selected = list(dict.fromkeys([*context.config.get("event_ids", []), *self.discovered_event_ids]))
-            await configure({**context.config, "event_ids": selected})
-            self._subscribed_event_ids = selected
+            if self.manifest.name == "prophetx":
+                selected = list(dict.fromkeys([*context.config.get("event_ids", []), *self.discovered_event_ids]))
+                await configure({**context.config, "event_ids": selected})
+                self._subscribed_event_ids = selected
+            else:
+                await configure(context.config)
         elif context.config.get("market_ids"):
             await self.client.subscribe(context.config["market_ids"])
         self.task = asyncio.create_task(self._run(), name=f"native-monitor:{self.manifest.name}")
