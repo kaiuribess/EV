@@ -117,6 +117,22 @@ class NativeSettlementProbabilities(NativeContract):
             raise ValueError("Settlement probability bounds exceed one")
         return self
 
+    def non_decisive_probability(self) -> Decimal:
+        return self.push_probability_upper_bound + self.void_probability_upper_bound
+
+
+class WinnerOnlyNormalOutcome(NativeContract):
+    """Conditional WIN/LOSS estimate, with exceptional states outside the model.
+
+    This carries no assertion that exceptional outcomes have zero real-world
+    probability or that the venue would refund a contract.
+    """
+    source: Literal["winner_only_binary: conditional normal WIN/LOSS estimate; exceptional settlements excluded"] = (
+        "winner_only_binary: conditional normal WIN/LOSS estimate; exceptional settlements excluded")
+
+    def non_decisive_probability(self) -> Decimal:
+        return D(0)  # Zero mass *inside the conditional normal-resolution model*.
+
 
 class NativeCandidate(NativeContract):
     id: str
@@ -137,6 +153,8 @@ class NativeCandidate(NativeContract):
     qualified: bool
     synthetic: Literal[False] = False
     model: str
+    normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
+    estimate_label: str = "Settlement-aware estimated EV"
     settlement_probability_source: str
     reference_profile_id: str | None = None
     reference_policy_digest: str | None = None
@@ -152,10 +170,18 @@ class NativeCandidate(NativeContract):
     sizing: StakeSizing | None = None
 
 
-def _settlement_bounds(market: Market) -> NativeSettlementProbabilities:
+def _settlement_bounds(market: Market, *, winner_only: bool = False) -> NativeSettlementProbabilities | WinnerOnlyNormalOutcome:
     rules = market.settlement
-    if rules.contract_type != "binary" or len(market.outcomes) != 2 or rules.currency != "USD":
+    if rules.contract_type != "binary" or len(market.outcomes) not in ({2, 3} if winner_only else {2}) or rules.currency != "USD":
         raise NoSignal("Native pricing needs reviewed two-outcome USD settlement")
+    if winner_only:
+        # A three-way sportsbook reference includes draws in its probability
+        # distribution; one native YES selection still has a binary payout.
+        # An integer-line push can occur in an otherwise normally completed
+        # game and is therefore NOT an exceptional state we may discard.
+        if rules.push_rule != "not_applicable":
+            raise NoSignal("Normal-completion push requires an unconditional probability model")
+        return WinnerOnlyNormalOutcome()
     needs_push = rules.push_rule != "not_applicable"
     needs_void = rules.void_rule != "not_applicable"
     raw = market.extensions.get("native_settlement_probabilities_v1")
@@ -175,7 +201,7 @@ def _settlement_bounds(market: Market) -> NativeSettlementProbabilities:
 
 
 def _validate_market(market: Market, fair: FairValue, book: NativeBook,
-                     config: PricingConfig, now: datetime) -> NativeSettlementProbabilities:
+                     config: PricingConfig, now: datetime) -> NativeSettlementProbabilities | WinnerOnlyNormalOutcome:
     config = market_config(config, market)
     instrument = book.instrument
     if not instrument.verified or instrument.canonical_market_id != market.id or book.market_fingerprint != market.identity():
@@ -198,11 +224,11 @@ def _validate_market(market: Market, fair: FairValue, book: NativeBook,
         raise NoSignal("Reference profile is research-only: validated observations, status and TTL are required")
     if any(reference["bookmaker"] == instrument.venue for reference in fair.references):
         raise NoSignal("Target native venue cannot be its own independent reference")
-    return _settlement_bounds(market)
+    return _settlement_bounds(market, winner_only=config.normal_outcome_policy == "winner_only_binary")
 
 
 def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: PricingConfig,
-                    intent: NativeOrderIntent, bounds: NativeSettlementProbabilities,
+                    intent: NativeOrderIntent, bounds: NativeSettlementProbabilities | WinnerOnlyNormalOutcome,
                     now: datetime, *, durable_intent: NativeOrderIntent | None = None) -> NativeCandidate:
     config = market_config(config, market)
     probability = fair.probabilities[intent.instrument.outcome]
@@ -211,7 +237,7 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
     cost, payout = intent.maximum_cost_usd, intent.minimum_gross_payout_usd
     if not payout or not cost:
         raise NoSignal("Native order size is below representable cash bounds")
-    non_decisive = bounds.push_probability_upper_bound + bounds.void_probability_upper_bound
+    non_decisive = bounds.non_decisive_probability()
     # Refunded cost earns no edge; retain the entire fee cap even when a
     # venue might return some fees. Use the worse endpoint for negative edges.
     def profit_at(p):
@@ -233,7 +259,11 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
         fair_probability=probability, expected_profit_usd=expected_profit, ev_per_usd_payout=ev,
         roi=roi, book_revision=book.revision, references=fair.references, calculated_at=now,
         quote_age_ms=max([book.age_ms(now), *ref_ages]),
-        qualified=qualified, model=fair.model, settlement_probability_source=bounds.source,
+        qualified=qualified, model=fair.model, normal_outcome_policy=fair.normal_outcome_policy,
+        estimate_label=("Winner-only estimated EV — exceptional settlements excluded"
+                        if fair.normal_outcome_policy == "winner_only_binary"
+                        else "Settlement-aware estimated EV"),
+        settlement_probability_source=bounds.source,
         reference_profile_id=fair.reference_profile_id, reference_policy_digest=fair.reference_policy_digest,
         reference_profile_status=fair.reference_profile_status, live_execution_allowed=fair.live_execution_allowed,
         execution_eligible=qualified and fair.execution_eligible, ineligibility_reasons=reasons,

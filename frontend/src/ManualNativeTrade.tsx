@@ -75,7 +75,7 @@ export function ManualNativeTrade({ state, connected }: { state: State; connecte
     {message && <p className="manual-trade-message" role="status">{message}</p>}
     {native && candidates.length > 0 && <div className="manual-trade-list">{candidates.slice(0, 12).map((candidate: Json) => <div className="manual-trade-row" key={candidate.id}>
       <div><strong>{human(candidate.venue)} · {human(candidate.outcome)}</strong><small>{text(candidate.market_id)} · {human(candidate.intent?.instrument?.quantity_unit)}</small></div>
-      <div><strong>{money(candidate.intent?.reserved_cost_usd)} max</strong><small>Limit {text(candidate.intent?.limit_price)} · ROI {percent(candidate.roi, 2)}</small></div>
+      <div><strong>{money(candidate.intent?.reserved_cost_usd)} max</strong><small>Limit {text(candidate.intent?.limit_price)} · ROI {percent(candidate.roi, 2)}</small><small>{text(candidate.estimate_label ?? 'Estimated EV')}</small></div>
       <button className="button quiet" disabled={!canReview || busy} onClick={() => void preview(candidate)}>Review trade</button>
     </div>)}</div>}
     <p className="quiet-message">A manual click uses current launch checks, account cash, configured stake sizing, price limits, conflict protection and durable order reconciliation. The order may remain unfilled or settle at a loss.</p>
@@ -90,6 +90,7 @@ export function ManualNativeTrade({ state, connected }: { state: State; connecte
         <div><dt>Maximum cost including fees</dt><dd>{money(intent?.reserved_cost_usd)}</dd></div>
         <div><dt>Maximum fee</dt><dd>{money(intent?.max_fee_usd)}</dd></div>
         <div><dt>Estimated fair probability / net ROI</dt><dd>{percent(c?.fair_probability, 2)} / {percent(c?.roi, 2)}</dd></div>
+        <div><dt>Pricing assumption</dt><dd>{text(c?.estimate_label ?? 'Estimated EV')}</dd></div>
         <div><dt>Reference books</dt><dd>{(c?.references ?? []).map((r: Json) => human(r.bookmaker)).join(', ')}</dd></div>
       </dl>
       <p className="manual-trade-warning"><TriangleAlert size={17} />{validReview ? `Review expires in ${Math.max(0, Math.ceil((Date.parse(review.expires_at) - now) / 1000))}s. The server will reprice before sending.` : 'This review expired or the trading state changed. Close it and review again.'}</p>

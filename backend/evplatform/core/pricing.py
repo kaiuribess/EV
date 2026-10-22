@@ -108,11 +108,16 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
                          and quote.status == "unknown")
         if quote.market_id != market.id or (quote.status != "active" and not paper_unknown):
             continue
+        if config.normal_outcome_policy == "winner_only_binary" and quote.market_fingerprint != market.identity():
+            continue
         if not quote.bookmaker or quote.bookmaker != quote.bookmaker.strip():
             continue
         if eligible is not None and quote.bookmaker not in eligible:
             continue
         if set(quote.decimal_odds) != set(market.outcomes):
+            continue
+        if profile is None and config.normal_outcome_policy == "winner_only_binary" and (
+                not quote.normal_outcome_verified or not quote.normal_outcome_evidence):
             continue
         if profile is None and not quote.fresh(config.max_quote_age_ms, now):
             continue
@@ -177,6 +182,7 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
     for book, quote in sorted(by_book.items()):
         observed = quote.source_observed_at if profile and quote.observation_verified else quote.source_time
         evidence = {"bookmaker": book, "provider": quote.provider,
+            "market_fingerprint": quote.market_fingerprint,
             "age_ms": (now - observed).total_seconds() * 1000 if observed else None,
             "source_time": observed.isoformat() if observed else None, "weight": str(weights[book]),
             "probabilities": {k: str(v) for k, v in probabilities[book].items()}}
@@ -188,12 +194,15 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
                 "observation_verified": quote.observation_verified, "observation_complete": quote.observation_complete,
                 "market_status_verified": quote.market_status_verified,
                 "settlement_equivalence_verified": quote.settlement_equivalence_verified,
+                "normal_outcome_verified": quote.normal_outcome_verified,
+                "normal_outcome_evidence": quote.normal_outcome_evidence,
                 "execution_eligible": eligible,
                 "freshness_factor": "1" if eligible else "0", "ttl_seconds": str(rule.ttl_seconds) if rule else None,
                 "sensitivity_probabilities": {k: str(v) for k, v in sensitivity[book].items()}})
         references.append(evidence)
     return FairValue(market_id=market.id, probabilities=result, references=references,
-                     model=config.devig_method, calculated_at=now, disagreement=disagreement,
+                     model=config.devig_method, normal_outcome_policy=config.normal_outcome_policy,
+                     calculated_at=now, disagreement=disagreement,
                      synthetic=any(q.synthetic for q in by_book.values()),
                      reference_profile_id=profile_id, reference_policy_digest=digest,
                      reference_profile_status=profile.status if profile else None,
@@ -232,6 +241,8 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
         raise NoSignal("Fair-value calculation is stale or future-dated")
     if fair.model != config.devig_method:
         raise NoSignal("Fair-value method changed; recalculation required")
+    if fair.normal_outcome_policy != config.normal_outcome_policy:
+        raise NoSignal("Normal-outcome pricing policy changed; recalculation required")
     if profile:
         sensitivity = fair.sensitivity_probabilities
         if (fair.sensitivity_model != profile.sensitivity_devig or sensitivity is None
@@ -259,10 +270,16 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
         if profile:
             rule = freshness_rule(config, market, reference.get("provider"), bookmaker)
             if fair.execution_eligible and (rule is None or source_time is None
+                    or (config.normal_outcome_policy == "winner_only_binary"
+                        and reference.get("market_fingerprint") != market.identity())
                     or reference.get("source_observed_at") != raw_time
                     or any(reference.get(flag) is not True for flag in (
                         "execution_eligible", "observation_verified", "observation_complete",
-                        "market_status_verified", "settlement_equivalence_verified"))
+                        "market_status_verified",
+                        "normal_outcome_verified" if config.normal_outcome_policy == "winner_only_binary"
+                        else "settlement_equivalence_verified"))
+                    or (config.normal_outcome_policy == "winner_only_binary"
+                        and not reference.get("normal_outcome_evidence"))
                     or reference_age < 0 or D(str(reference_age)) > rule.ttl_seconds * 1000):
                 raise NoSignal("Reference profile observation/TTL eligibility expired or is unverified")
         elif reference_age is None or not 0 <= reference_age <= config.max_quote_age_ms:
@@ -349,7 +366,10 @@ def opportunity(market: Market, fair: FairValue, book: OrderBook, config: Pricin
         reference_profile_status=fair.reference_profile_status, live_execution_allowed=fair.live_execution_allowed,
         execution_eligible=fair.execution_eligible and not reasons, ineligibility_reasons=tuple(dict.fromkeys(reasons)),
         reference_inputs_eligible=fair.execution_eligible and not self_reference,
-        primary_model=fair.model, sensitivity_model=fair.sensitivity_model,
+        primary_model=fair.model, normal_outcome_policy=fair.normal_outcome_policy,
+        estimate_label=("Winner-only estimated EV — exceptional settlements excluded"
+                        if fair.normal_outcome_policy == "winner_only_binary" else "Estimated EV"),
+        sensitivity_model=fair.sensitivity_model,
         sensitivity_fair_probability=sensitivity_p, sensitivity_ev_per_contract=sensitivity_ev,
         sensitivity_roi=sensitivity_ev / price if sensitivity_ev is not None else None,
     )

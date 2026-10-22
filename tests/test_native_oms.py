@@ -273,6 +273,27 @@ async def test_settlement_requires_final_account_identity_and_is_idempotent(syst
         await manager.settle(settlement.model_copy(update={"payout_usd": D(0)}))
 
 
+@pytest.mark.parametrize("payout,fee_refund,expected_pnl", [
+    (".45", ".001", "0"),  # actual cash/fee refund on an exceptional grade
+    (".225", "0", "-.226"),  # actual partial payout is not a fabricated total loss
+])
+async def test_exceptional_cash_settlement_uses_authoritative_payout_not_binary_loss(
+        system, market, payout, fee_refund, expected_pnl):
+    manager, risk, _, adapter = system
+    placed = await manager.execute(order(market))
+    adapter.report = report(placed, quantity="100", cost=".45", fees=".001",
+                            status="filled", terminal=True)
+    await manager.reconcile(placed.id)
+    result = NativeSettlement(order_id=placed.id, venue="novig", account_fingerprint="a"*64,
+        environment="sandbox", market_fingerprint=market.identity(), settlement_id="offline-cash-grade",
+        payout_usd=payout, fee_refund_usd=fee_refund, settled_at=utcnow(),
+        evidence="OFFLINE authoritative cash-settlement fixture")
+    await manager.settle(result)
+    assert risk.daily_realized == D(expected_pnl)
+    assert manager.realized_today() == D(expected_pnl)
+    assert risk.exposures() == 0
+
+
 async def test_stale_reconciliation_cannot_reopen_terminal_order(system, market):
     manager, risk, storage, adapter = system
     placed = await manager.execute(order(market))

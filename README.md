@@ -32,6 +32,11 @@ status evidence blocks execution. See [reference profiles](docs/REFERENCE_MODEL.
 and [the source review](docs/BOOK_WEIGHT_RESEARCH.md); these are not fitted or
 proven-profitable weights.
 
+The optional [winner-only binary pricing policy](docs/WINNER_ONLY_BINARY.md)
+estimates EV conditional on a normal WIN/LOSS result while keeping exceptional
+settlement accounting separate. It is disabled by default and does not relax
+source freshness or live authorization.
+
 ## Start on Windows
 
 Prerequisites: Python 3.12+, Node.js 22.12+ or a compatible current LTS, PowerShell,

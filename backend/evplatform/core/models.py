@@ -148,6 +148,8 @@ class TimedData(Contract):
 
 class Quote(TimedData):
     market_id: str
+    # A stable ID alone cannot prove that a player, line or period was unchanged.
+    market_fingerprint: str | None = None
     provider: str
     bookmaker: str
     decimal_odds: dict[str, Decimal]
@@ -160,6 +162,10 @@ class Quote(TimedData):
     observation_complete: bool = False
     market_status_verified: bool = False
     settlement_equivalence_verified: bool = True
+    # Independent review of the ordinary WIN/LOSS condition. This does not
+    # certify that exceptional sportsbook and venue payouts are equivalent.
+    normal_outcome_verified: bool = False
+    normal_outcome_evidence: str | None = None
     source_price_changed_at: datetime | None = None
     verification_reason: str | None = None
 
@@ -233,6 +239,7 @@ class FairValue(Contract):
     probabilities: dict[str, Decimal]
     references: tuple[dict[str, Any], ...]
     model: str
+    normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
     calculated_at: datetime
     disagreement: Decimal
     synthetic: bool
@@ -271,6 +278,8 @@ class Candidate(Contract):
     reference_inputs_eligible: bool = True
     ineligibility_reasons: tuple[str, ...] = ()
     primary_model: str | None = None
+    normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
+    estimate_label: str = "Estimated EV"
     sensitivity_model: str | None = None
     sensitivity_fair_probability: Decimal | None = None
     sensitivity_ev_per_contract: Decimal | None = None

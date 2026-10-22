@@ -9,14 +9,14 @@ class NativePositiveEV(StrategyPlugin):
     config_model = PricingConfig
     manifest = Manifest(
         name="native_positive_ev", kind="strategy",
-        description="Reviewed native-unit opportunities with conservative fee and settlement bounds",
+        description="Reviewed native-unit opportunities with strict or conditional WIN/LOSS pricing",
         sports=["*"], markets=["moneyline", "spread", "total", "player_prop"],
         input_schemas=["odds.quote@1", "exchange.native_book@1", "sports.market@1"],
         output_schemas=["trade.native_candidate@1"],
         capabilities={"devig": ["proportional", "power"], "direct_order_access": False,
                       "quantity_units": ["fractional_contracts", "whole_cent_contracts", "usd_stake"],
                       "requires_reviewed_mapping": True, "requires_fee_bounds": True,
-                      "requires_settlement_probability_bounds": True,
+                      "normal_outcome_policies": ["strict_settlement_equivalence", "winner_only_binary"],
                       "synthetic_execution_allowed": False},
         config_schema=PricingConfig.model_json_schema(),
     )

@@ -11,6 +11,10 @@ from .paths import PROJECT_ROOT
 class PricingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     devig_method: Literal["proportional", "power"] = "proportional"
+    # This is a pricing assumption, not a statement about actual venue grades.
+    # Changing it changes the launch profile's pricing digest and needs a new
+    # scoped owner authorization before production execution.
+    normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
     min_references: int = Field(default=2, ge=1)
     eligible_books: list[str] | None = Field(default=None, description=(
         "Exact reviewed bookmaker identities eligible for fair value. Null preserves all mapped "

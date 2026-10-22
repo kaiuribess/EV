@@ -137,7 +137,10 @@ def quote_eligibility(config, market: Market, quote: Quote, now: datetime) -> tu
         reasons.append("Synchronized complete outcome observation is unverified")
     if not quote.market_status_verified:
         reasons.append("Current outcome-level market status is unverified")
-    if not quote.settlement_equivalence_verified:
+    if config.normal_outcome_policy == "winner_only_binary":
+        if not quote.normal_outcome_verified or not quote.normal_outcome_evidence:
+            reasons.append("Normal WIN/LOSS condition has no reviewed source-to-target match")
+    elif not quote.settlement_equivalence_verified:
         reasons.append("Source-to-target exceptional settlement comparison is unresolved")
     rule = freshness_rule(config, market, quote.provider, quote.bookmaker)
     if rule is None:

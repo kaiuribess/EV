@@ -109,6 +109,8 @@ class VerifiedOfferMapping(BaseModel):
     # Identity-only mappings may be displayed, but strict live references stop
     # at the contract-review gate until the source and target rules are bridged.
     settlement_equivalence_verified: bool = True
+    normal_outcome_verified: bool = False
+    normal_outcome_evidence: str | None = None
 
     @model_validator(mode="after")
     def complete_outcomes(self):
@@ -116,6 +118,8 @@ class VerifiedOfferMapping(BaseModel):
             raise ValueError("Mapping must be explicitly verified")
         if not self.evidence.strip():
             raise ValueError("Mapping requires verification evidence")
+        if self.normal_outcome_verified and not (self.normal_outcome_evidence and self.normal_outcome_evidence.strip()):
+            raise ValueError("Normal WIN/LOSS review requires its own source-to-target evidence")
         if set(self.outcome_map.values()) != set(self.market.outcomes):
             raise ValueError("Mapping must cover every canonical outcome")
         if len(self.outcome_map) != len(self.market.outcomes):
@@ -1003,6 +1007,7 @@ class VerifiedProviderMapper:
                 continue
             quote = Quote(
                 market_id=mapping.market.id, provider=envelope.provider_id, bookmaker=mapping.bookmaker,
+                market_fingerprint=mapping.market.identity(),
                 decimal_odds={mapping.outcome_map[key]: price for key, price in offer.prices.items()},
                 source_time=offer.observed_at, provider_time=offer.provider_time,
                 source_observed_at=offer.source_observed_at,
@@ -1012,6 +1017,8 @@ class VerifiedProviderMapper:
                 verification_reason=offer.verification_reason,
                 market_status_verified=offer.market_status_verified,
                 settlement_equivalence_verified=mapping.settlement_equivalence_verified,
+                normal_outcome_verified=mapping.normal_outcome_verified,
+                normal_outcome_evidence=mapping.normal_outcome_evidence,
                 received_at=envelope.received_at, synthetic=envelope.synthetic,
                 status=offer.status, original_market_id=offer.market_key,
             )

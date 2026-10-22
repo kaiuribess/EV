@@ -1,9 +1,10 @@
 """Conservative quarter Kelly in USD, using one account's available cash.
 
 Fees are bounded at the smallest legal order so fixed-fee dilution cannot
-inflate the Kelly fraction. Refund/void probability is treated as a loss for
-sizing only. This is deliberately more conservative than binary Kelly when
-settlement has additional outcomes; it never claims fitted probabilities.
+inflate the Kelly fraction. Under strict settlement modeling, bounded
+refund/void probability is treated as a loss for sizing only. Under the
+winner-only policy, sizing is conditional on normal resolution instead; it
+does not assert zero real-world exceptional-event probability.
 """
 from decimal import Decimal as D, ROUND_CEILING, localcontext
 
@@ -57,7 +58,7 @@ def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_
         # for a cash rounding loss on every smallest legal partial match.
         gross = ins.minimum_split_payout(quantity, price) / quantity
         unit_cost = reserved / quantity
-        p = probability * (1 - bounds.push_probability_upper_bound - bounds.void_probability_upper_bound)
+        p = probability * (1 - bounds.non_decisive_probability())
         fraction = max(D(0), min(D(1), (p * gross - unit_cost) / (gross - unit_cost))) if gross > unit_cost else D(0)
         budget = cash * D("0.25") * fraction
         if max_stake_usd is not None:
