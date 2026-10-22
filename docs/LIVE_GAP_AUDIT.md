@@ -109,6 +109,14 @@ above found actual bilateral NBA props, but did not supply the missing active
 status; combining the feeds does not turn either source into an eligible live
 reference.
 
+After restarting both local workspaces on the tested build, the production
+quarantine review examined 3,104 distinct valid observations from 3,110 rows.
+**Zero** passed quote evidence and **zero** had verified market status; the
+five-second diagnostic found 17 within-limit legacy source clocks, which are
+not a quote-validity or provider-specific TTL result. No source/native mapping
+or launch profile was approved. The local report is
+`data/readiness-review-20261021-evening.json` (ignored by Git).
+
 The paused production Kalshi monitor completed a fresh read-only inventory:
 identity, $50.00 available cash, zero open orders/positions, trading permission
 and the current location attestation were reported verified. The local pilot
