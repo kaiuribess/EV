@@ -1,5 +1,14 @@
 # Validation - 2026-10-20
 
+October 21 at about 21:20 PDT: **2,110 backend tests passed** in 42.57
+seconds, with one third-party Starlette warning. New Kalshi tests cover
+bounded series selection across sports, wrong-series/clock rejection,
+read-failure retention and reconnect-based scope rotation. Public production
+catalog reads returned current NBA/NFL/MLB/NHL game markets; authenticated
+production monitoring then streamed eight selected books while automatic
+orders remained off. These checks placed no orders and do not verify a
+sportsbook/contract settlement match, live quote status, fees, or profitability.
+
 October 21 at 21:15 PDT: **2,099 backend tests passed** in 42.76 seconds,
 with one third-party Starlette warning. New Polymarket US tests cover public
 league discovery, bounded multi-league moneyline selection, wrong-status and

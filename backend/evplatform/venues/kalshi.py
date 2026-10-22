@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -288,6 +289,9 @@ class KalshiClient(NativeTransport):
     def health_check(self) -> dict:
         return {**super().health_check(), "authenticated": self.authenticated and not self._closed,
                 "streaming": self.health == "streaming" and self._ws is not None and not self._closed,
+                "requested_monitor_markets": len(self.tickers),
+                "orderbook_markets": len(self.book.books),
+                "invalid_book_markets": len(self.book.invalid),
                 "reason": self.health_reason}
 
     async def discover_events(self, **params) -> dict:
@@ -341,6 +345,17 @@ class KalshiClient(NativeTransport):
         self.tickers = list(dict.fromkeys(market_ids))
         if self._ws:
             await self._subscribe_current()
+
+    async def replace_monitor_markets(self, market_ids: list[str]) -> None:
+        """Rotate public book scope by reconnecting for fresh private/book baselines."""
+        if (not isinstance(market_ids, list) or len(market_ids) > 100
+                or any(not isinstance(ticker, str)
+                       or not re.fullmatch(r"[A-Z0-9-]{1,128}", ticker)
+                       for ticker in market_ids)):
+            raise ValueError("Kalshi monitor accepts at most 100 public market tickers")
+        self.tickers = list(dict.fromkeys(market_ids))
+        if self._ws is not None:
+            await self._ws.close()
 
     async def _subscribe_current(self):
         if self.tickers:

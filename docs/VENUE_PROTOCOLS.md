@@ -22,6 +22,13 @@ Placement uses `/trade-api/v2/portfolio/events/orders`, with fixed-point price/c
 
 Books retain opposing bids and derive executable asks by complement. Sequence continuity is tracked per subscription; a gap invalidates all books on that subscription and triggers a new connection/snapshot. Private fill events remain separate. See [order book messages](https://docs.kalshi.com/websockets/orderbook-updates).
 
+The production monitor can also query the documented public
+[`GET /markets`](https://docs.kalshi.com/api-reference/market/get-markets)
+route by explicit sports series, selecting nearby active binary game markets
+within a bounded page. Rotating that scope reconnects for new public and
+private snapshots; the catalog itself grants no order permission and does not
+establish a reviewed cross-provider settlement match.
+
 ## Novig details
 
 `NOVIG_API_KEY` holds the v3 key UUID, not a bearer token. `NOVIG_PRIVATE_KEY_PATH` is also required. The signer implements the official six-line `NOVIG-V3` canonical representation, preserving literal `+`, repeated query parameters, path escaping, and the exact transmitted body. Offline tests include all 30 official canonicalization vectors, without copying their published private test keys. See [signing](https://docs.novig.com/api/signing).

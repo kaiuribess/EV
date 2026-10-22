@@ -177,6 +177,27 @@ class NativeMonitorConfig(BaseModel):
 class KalshiMonitorConfig(NativeMonitorConfig):
     credential_profile: Literal["legacy", "environment"] = Field(default="environment",
         description="Environment selects the separate Kalshi demo key for sandbox and the production key for production. Legacy preserves older configuration explicitly.")
+    discovery_series: list[str] = Field(default_factory=list, max_length=4,
+        description="Documented public Kalshi sports series tickers for bounded current-book discovery")
+    discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    max_discovered_markets: int = Field(default=8, ge=1, le=100)
+
+    @field_validator("discovery_series")
+    @classmethod
+    def valid_series(cls, values):
+        if len(set(values)) != len(values) or any(
+            not value or len(value) > 40 or not value.isascii()
+            or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" for ch in value)
+            for value in values
+        ):
+            raise ValueError("Use distinct uppercase Kalshi series tickers")
+        return values
+
+    @model_validator(mode="after")
+    def bounded_discovery_scope(self):
+        if self.discovery_series and len(self.market_ids) + self.max_discovered_markets > 100:
+            raise ValueError("Kalshi explicit and discovered market caps must total at most 100")
+        return self
 
 
 class NovigMonitorConfig(NativeMonitorConfig):
@@ -335,6 +356,8 @@ class NativeMonitor(Plugin):
             await self._refresh_discovery()
         if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
             await self._refresh_novig_discovery()
+        if self.manifest.name == "kalshi" and context.config.get("discovery_series"):
+            await self._refresh_kalshi_discovery()
         if self.manifest.name == "polymarket_us" and context.config.get("discovery_leagues"):
             await self._refresh_polymarket_discovery()
         configure = getattr(self.client, "configure_subscriptions", None)
@@ -356,6 +379,12 @@ class NativeMonitor(Plugin):
                 self._subscribed_market_ids = selected
             else:
                 await configure(context.config)
+        elif self.manifest.name == "kalshi":
+            selected = list(dict.fromkeys([*context.config.get("market_ids", []),
+                                           *self.discovered_market_ids]))
+            if selected:
+                await self.client.subscribe(selected)
+            self._subscribed_market_ids = selected
         elif context.config.get("market_ids"):
             await self.client.subscribe(context.config["market_ids"])
         self.task = asyncio.create_task(self._run(), name=f"native-monitor:{self.manifest.name}")
@@ -363,6 +392,8 @@ class NativeMonitor(Plugin):
             self.discovery_task = asyncio.create_task(self._discover_periodically(), name="prophetx-event-discovery")
         if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
             self.discovery_task = asyncio.create_task(self._discover_novig_periodically(), name="novig-market-discovery")
+        if self.manifest.name == "kalshi" and context.config.get("discovery_series"):
+            self.discovery_task = asyncio.create_task(self._discover_kalshi_periodically(), name="kalshi-market-discovery")
         if self.manifest.name == "polymarket_us" and context.config.get("discovery_leagues"):
             self.discovery_task = asyncio.create_task(self._discover_polymarket_periodically(),
                                                       name="polymarket-us-market-discovery")
@@ -387,6 +418,45 @@ class NativeMonitor(Plugin):
             return
         self.discovered_market_ids = selected
         self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
+
+    async def _refresh_kalshi_discovery(self):
+        from ..integrations.kalshi_discovery import balanced_open_markets
+
+        config = self.context.config
+        try:
+            payloads = [await self.client.discover_markets(
+                series_ticker=series, status="open", limit=1000, mve_filter="exclude")
+                for series in config["discovery_series"]]
+            selected, truncated = balanced_open_markets(payloads,
+                series=config["discovery_series"], now=utcnow(),
+                max_markets=config.get("max_discovered_markets", 8))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.discovery_status = "read_failed"
+            return
+        self.discovered_market_ids = selected
+        self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
+
+    async def _discover_kalshi_periodically(self):
+        try:
+            while True:
+                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
+                await self._refresh_kalshi_discovery()
+                if self.discovery_status == "read_failed":
+                    continue
+                selected = list(dict.fromkeys([*self.context.config.get("market_ids", []),
+                                               *self.discovered_market_ids]))
+                if selected == self._subscribed_market_ids:
+                    continue
+                try:
+                    await self.client.replace_monitor_markets(selected)
+                except Exception:
+                    self.discovery_status = "subscription_failed"
+                    continue
+                self._subscribed_market_ids = selected
+        except asyncio.CancelledError:
+            raise
 
     async def _discover_novig_periodically(self):
         try:

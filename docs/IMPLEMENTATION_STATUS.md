@@ -12,7 +12,7 @@ It is **not a completed production autonomous trading release**.
 | Strategies | Positive EV, independent strategy interface, required input and market metadata | Arbitrage, cross-exchange multi-leg execution, middles, steam and ML strategies |
 | Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
 | Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger; one Novig Paper play-money IOC fill reconciled | Production lifecycle and paid settlement proof; a Paper fill is not production certification |
-| Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
+| Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified; bounded public NBA/NFL/MLB/NHL discovery rotates current game-book subscriptions | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
 | Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; bounded current-market discovery rotates a multi-league book subscription through fresh snapshots; authenticated paper subscriptions and production account/book reads verified; protected setup and durable recovery; one play-money Paper IOC order filled and reconciled | Actual production order lifecycle, location preflight at placement, paid settlement and complete launch evidence; unusual/shared-position settlement remains blocked |
 | ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, matched-fill/wallet accounting and restricted funded-cash win/loss settlement; production read-only subscriptions and market messages verified | Genuine complete history, funded-cash and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
 | Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; actual signed production read/stream checks passed; bounded public NBA/NFL/MLB/NHL discovery now rotates current open moneyline monitoring scope | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
@@ -130,6 +130,14 @@ trade gate remained false. A later GET/subscription-only check at 04:13:21 UTC
 confirmed all three private channels, reconciled spendable cash and private-state
 synchronization (see VALIDATION.md). Genuine order lifecycle testing, reviewed
 mappings/fees and settlement certification still block a Kalshi launch.
+
+On October 21 at about 21:20 PDT, public `GET /markets` reads filtered to the
+observed `KXNBAGAME`, `KXNFLGAME`, `KXMLBGAME` and `KXNHLGAME` series found
+nearby open binary game contracts. The paused production monitor now selects
+eight of these across sports, rotates its scope on a five-minute discovery
+cycle, and resubscribes for fresh books. It authenticated and streamed after
+the change with zero reported connection errors. The bounded selection is
+truncated and is not an exhaustive catalog or reviewed betting match.
 
 The personal Polymarket US retail connection also passed read-only production
 checks on October 20, 2026 at 20:19:57 PDT: signed balance access returned one
