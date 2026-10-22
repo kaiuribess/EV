@@ -40,6 +40,16 @@ if ($previous) {
     if ($previous.mode -eq 'paper' -and $previous.sample_feed_enabled -eq $false -and
         $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0 -and
         $correctDatabase) {
+        # ProphetX limits sessions per API key. The paper workspace uses
+        # Parlay/Oddize prices and does not need a second production login.
+        $paperProphetX = @($previous.plugins | Where-Object {
+            $_.manifest.name -eq 'prophetx' -and $_.enabled -and $_.config.environment -eq 'production'
+        })
+        if ($paperProphetX.Count -gt 0) {
+            Invoke-RestMethod -Uri "$baseUrl/api/plugins/prophetx/toggle" -Method Post `
+                -ContentType 'application/json' -Headers $controlHeaders -Body '{"enabled":false}' -TimeoutSec 30 | Out-Null
+            Write-Host 'Stopped the duplicate paper-side production ProphetX session.'
+        }
         & "$PSScriptRoot\setup_live_inputs.ps1" -Port $Port -EnablePaperAutomation:(-not $Paused)
         $previous = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
         Write-Host "Live-input paper workspace is already running at $baseUrl. Paper automation: $($previous.auto_trade)."
@@ -61,6 +71,7 @@ if ($previous) {
         if ($_.enabled -ne $true -or -not ($_.config -is [pscustomobject])) { return $false }
         $kind = $_.manifest.kind
         $capabilities = $_.manifest.capabilities
+        if ($_.manifest.name -eq 'prophetx' -and $_.config.environment -eq 'production') { return $false }
         return (($kind -eq 'input' -and $_.manifest.name -ne 'synthetic_schedule') -or
             ($kind -eq 'execution' -and $capabilities.orderbook -eq $true) -or
             ($kind -eq 'observer' -and $capabilities.monitor_only -eq $true))

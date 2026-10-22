@@ -116,3 +116,15 @@ def test_stream_discovery_preserves_stated_start_and_sport_without_inventing_the
     assert "scheduled_start" not in missing.context and "event_sport" not in missing.context
     changed, = extract_offers(replace(raw, payload={"data": [sample_row(commence_time="2026-10-22T23:00:00Z")]}))
     assert changed.signature != offer.signature  # A changed schedule requires renewed mapping review.
+
+
+def test_equivalent_source_start_spellings_keep_one_review_signature():
+    raw = batch(sample_row(commence_time="2026-10-21T23:00:00Z"))
+    original, = extract_offers(raw)
+    for equivalent in ("2026-10-21T23:00:00.000Z", "2026-10-21T16:00:00-07:00"):
+        revised, = extract_offers(replace(raw, payload={"data": [sample_row(commence_time=equivalent)]}))
+        assert revised.signature == original.signature
+        assert revised.context["scheduled_start"] == equivalent
+    moved, = extract_offers(replace(raw, payload={"data": [
+        sample_row(commence_time="2026-10-21T23:01:00Z")]}))
+    assert moved.signature != original.signature

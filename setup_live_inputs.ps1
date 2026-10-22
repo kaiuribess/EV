@@ -12,6 +12,8 @@ $state = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 $native = Invoke-RestMethod -Uri "$baseUrl/api/native/orders" -TimeoutSec 10
 $oddizePaperWasEnabled = @($state.plugins | Where-Object { $_.manifest.name -eq 'oddize_paper_input' -and $_.enabled }).Count -eq 1
 $oddizeRestWasEnabled = @($state.plugins | Where-Object { $_.manifest.name -eq 'oddize_rest' -and $_.enabled }).Count -eq 1
+$parlayPaperWasEnabled = @($state.plugins | Where-Object { $_.manifest.name -eq 'parlay_paper_input' -and $_.enabled }).Count -eq 1
+$parlayGameWasEnabled = @($state.plugins | Where-Object { $_.manifest.name -eq 'parlay_game_ws' -and $_.enabled }).Count -eq 1
 $isPaper = $state.mode -eq 'paper' -and $state.sample_feed_enabled -eq $false -and
     $native.native_execution_enabled -eq $false -and @($native.orders).Count -eq 0
 $isNative = $state.mode -in @('sandbox', 'production') -and $state.sample_feed_enabled -eq $false -and
@@ -84,7 +86,7 @@ if ($isPaper) {
 # its first metered snapshot need not be fetched twice.
 Configure-Input 'oddize_rest' @{
     sports = @('nba'); bookmakers = @('pin', 'circa', 'dk', 'fd', 'czr', 'b365', 'mgm'); markets = @('ml');
-    poll_interval_seconds = [double]3600; session_request_budget = 30;
+    poll_interval_seconds = [double]3600; session_request_budget = 1200;
     monthly_credit_budget = 1200; include_past = $false;
     use_delta_polling = $false; include_props = $false
 }
@@ -144,12 +146,15 @@ Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
     -ContentType 'application/json' -Body $riskBody -TimeoutSec 30 | Out-Null
 
 if ($isPaper) {
-    # The paper consumer must see a fresh complete snapshot after it starts.
-    # Restart the existing game-board source rather than opening more sockets.
-    Invoke-RestMethod -Uri "$baseUrl/api/plugins/parlay_game_ws/toggle" -Method Post -Headers $headers `
-        -ContentType 'application/json' -Body '{"enabled":false}' -TimeoutSec 30 | Out-Null
-    Invoke-RestMethod -Uri "$baseUrl/api/plugins/parlay_game_ws/toggle" -Method Post -Headers $headers `
-        -ContentType 'application/json' -Body '{"enabled":true}' -TimeoutSec 30 | Out-Null
+    # A newly started consumer may have missed the game's initial snapshot.
+    # Repeating setup on an already synchronized workspace must not interrupt
+    # the only live game board merely to refresh configuration.
+    if (-not $parlayPaperWasEnabled -or -not $parlayGameWasEnabled) {
+        Invoke-RestMethod -Uri "$baseUrl/api/plugins/parlay_game_ws/toggle" -Method Post -Headers $headers `
+            -ContentType 'application/json' -Body '{"enabled":false}' -TimeoutSec 30 | Out-Null
+        Invoke-RestMethod -Uri "$baseUrl/api/plugins/parlay_game_ws/toggle" -Method Post -Headers $headers `
+            -ContentType 'application/json' -Body '{"enabled":true}' -TimeoutSec 30 | Out-Null
+    }
     if ($oddizeRestWasEnabled -and -not $oddizePaperWasEnabled) {
         # The newly enabled consumer missed the older source snapshot. Fetch
         # one new metered snapshot; subsequent setup runs keep the poll timer.

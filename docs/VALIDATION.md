@@ -1,5 +1,15 @@
 # Validation - 2026-10-20
 
+October 21, 2026 follow-up: **2,076 backend tests passed** in 40.41 seconds
+with one third-party Starlette deprecation warning. Focused Parlay/Oddize and
+ProphetX tests passed. PowerShell parsed `start_live_paper.ps1` and
+`setup_live_inputs.ps1` without syntax errors. A paused production restart
+restored the single ProphetX monitor to authenticated Talaria streaming;
+paper retained live Parlay/Oddize inputs and native execution stayed off.
+The production workspace still has zero reviewed market mappings and zero
+native orders. These checks did not validate real-money order or settlement
+behavior.
+
 ## Latest automated checks
 
 Sport/market profile integration: **1,531 backend tests passed in 40.06 seconds**,

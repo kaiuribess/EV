@@ -40,8 +40,8 @@ def test_nonidentical_contract_cannot_pass(field, value):
 
 def test_same_sporting_question_with_different_void_payout_requires_transform():
     source = review()
-    target = review(source="OFFLINE venue", void_rule="fair_value",
-                    payout_rule="OFFLINE fair value on cancellation")
+    target = source.model_copy(update={"source": "OFFLINE venue", "void_rule": "fair_value",
+                                       "payout_rule": "OFFLINE fair value on cancellation"})
     result = compare_contracts(source, target)
     assert result["normal_sporting_scope_matches"]
     assert result["settlement_transform_required"]

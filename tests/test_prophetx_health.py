@@ -110,6 +110,8 @@ async def test_denied_or_indeterminate_login_is_not_retried(status, code, state)
         assert not health["authenticated"]
         assert not health["streaming"]
         assert "untrusted server detail" not in health["reason"]
+        assert health["last_auth_failure"] == {
+            "operation": "login", "http_status": status, "provider_code": code}
     assert len(calls) == 1
 
 
@@ -129,6 +131,8 @@ async def test_unknown_login_outcome_does_not_create_a_second_session(outcome):
             with pytest.raises(VenueError):
                 await native.connect()
         assert native.health == "auth_outcome_unknown"
+        assert native.health_check()["last_auth_failure"] == {
+            "operation": "login", "error_type": "VenueError" if outcome == "timeout" else "KeyError"}
     assert len(calls) == 1
 
 
@@ -169,6 +173,30 @@ async def test_refresh_rejection_never_falls_back_to_login():
             with pytest.raises(VenueError):
                 await native.connect()
         assert not native.health_check()["authenticated"]
+        assert native.health_check()["last_auth_failure"] == {
+            "operation": "refresh", "http_status": 401, "provider_code": "invalid_token"}
+    assert calls == ["/partner/auth/refresh"]
+
+
+async def test_transient_refresh_failure_revokes_health_without_exposing_response():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(500, json={"message": "sensitive diagnostic"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        native = ProphetXClient(settings(), http)
+        native._access_token, native._refresh_token = "existing-token", "existing-refresh"
+        native._access_expires, native.authenticated = time.time() + 20, True
+        with pytest.raises(VenueError):
+            await native.connect()
+        health = native.health_check()
+        assert health["state"] == "auth_refresh_failed"
+        assert health["authenticated"] is False
+        assert health["last_auth_failure"] == {
+            "operation": "refresh", "http_status": 500, "provider_code": None}
+        assert "sensitive diagnostic" not in json.dumps(health)
     assert calls == ["/partner/auth/refresh"]
 
 

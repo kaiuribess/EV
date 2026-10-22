@@ -341,6 +341,7 @@ def test_conservative_budget_scales_with_sports_and_props():
     props = OddizeRest({"sports": ["nba"], "include_props": True, "event_ids": {"nba": ["a", "b"]},
                         "prop_types": {"nba": ["player_pts"]}}, credential="")
     assert one.effective_poll_interval() == 3600
+    assert one.config.session_request_budget >= one.config.monthly_credit_budget
     assert many.effective_poll_interval() >= 31 * 86400 * 6 / 1200
     assert props.effective_poll_interval() >= 31 * 86400 * 5 / 1200
 

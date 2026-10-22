@@ -27,7 +27,10 @@ from .base import (
 class OddizeConfig(ProviderConfig):
     markets: list[str] = Field(default_factory=lambda: ["ml"])
     poll_interval_seconds: float = Field(default=3600, ge=60)
-    session_request_budget: int = Field(default=30, ge=1)
+    # A 30-credit cap stopped an hourly unattended feed after 30 hours. The
+    # separate monthly pacing and server-reported remaining allowance still
+    # bound actual consumption; this ceiling only spans one process lifetime.
+    session_request_budget: int = Field(default=1200, ge=1)
     # Schedule this credit budget over a month across all configured sports.
     # The server's remaining allowance is an additional independent restriction.
     monthly_credit_budget: int = Field(default=1200, ge=1)

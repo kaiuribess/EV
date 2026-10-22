@@ -141,6 +141,12 @@ evidence, account preflight, and the live activation gates. A complete provider
 game board is only a scoped baseline; it does not verify each retained price is
 still offered or that an exchange contract has equivalent settlement rules.
 Both workspaces block overlapping events and players and display a $5 unit.
+Owls and OddsPapi are optional reference adapters; this setup uses the
+existing Parlay and Oddize credentials and does not require keys from either.
+The paper launcher omits a duplicate production ProphetX monitor so its API
+key is used by the paused native workspace only. ProphetX limits simultaneous
+sessions per key, and reconnecting the paper dashboard must not consume a
+second session slot. The paper data path remains Parlay plus Oddize.
 Paper stakes stay capped at $5 because the simulator has no account cash.
 The paused native workspace stores quarter-Kelly sizing with authenticated
 available-cash limits instead of a fixed dollar cap. Its independent account

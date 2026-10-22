@@ -44,6 +44,26 @@ pricing still has zero reviewed real-market mappings and sends no orders.
 The running paper workspace records NO SIGNAL where its profile lacks a fresh
 anchor or quorum; it does not create an edge by removing that requirement.
 
+On October 21 at 20:32 PDT, the paper workspace had 65 real-input comparison
+markets and 170 visible quotes, with sample odds off and zero orders. Parlay
+and Oddize remained authenticated. The production workspace had both feeds
+authenticated and native automation off, with zero reviewed canonical markets
+or native orders. Authenticated production account probes read $50 Kalshi and
+$25 Novig spendable cash, empty order/position inventories and trading-key
+scope; these are read-only observations, not launch permission. ProphetX
+Talaria authenticated and resumed streaming after its redundant paper-side
+production monitor was stopped. That duplicate session used the same key and
+could compete for ProphetX's per-key session pool. The paper launcher now
+keeps the production ProphetX session on the paused native workspace only.
+
+The live Oddize Developer NBA feed still polls hourly within its 1,500-credit
+monthly allowance. Its prior 30-credit process cap would stop an otherwise
+healthy hourly feed after 30 paid snapshots; the session ceiling is now 1,200
+while provider remaining credits and the monthly pacing rule remain enforced.
+Equivalent Parlay schedule timestamp spellings now yield one source signature;
+an actual schedule change still requires renewed mapping review. No existing
+reviewed production mapping needed migration because none is installed.
+
 The evidence is saved locally in `data/parlay-paid-access.json` (03:08:55–03:09:07
 UTC on October 21). All unreviewed real markets remained quarantined, with
 `mapped_quotes: 0`; automation was off, the kill switch was active, and native

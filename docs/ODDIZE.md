@@ -76,7 +76,7 @@ This configuration is suitable for an additional background reference feed:
   "bookmakers": ["pin", "circa", "dk", "fd", "czr", "b365", "mgm"],
   "markets": ["ml"],
   "poll_interval_seconds": 3600,
-  "session_request_budget": 30,
+  "session_request_budget": 1200,
   "monthly_credit_budget": 1200,
   "include_past": false,
   "use_delta_polling": false,
@@ -95,6 +95,8 @@ and per-event props therefore make the interval longer. The monthly setting is
 a **scheduling budget**, not a persistent accounting ledger across restarts or
 manual diagnostic calls. The server's actual remaining balance and the local
 session credit cap are independently enforced before requests.
+The session cap is large enough for an hourly feed to run beyond 30 hours;
+it does not increase the one-credit request cadence or the provider allowance.
 
 ## Live-paper comparison with Parlay
 

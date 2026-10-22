@@ -110,6 +110,7 @@ class ProphetXClient(NativeTransport):
         self._confirmed_channels: set[str] = set()
         self._market_frames = 0
         self._refresh_task: asyncio.Task | None = None
+        self._last_auth_failure: dict | None = None
         from .prophetx_private import ProphetXPrivateState
         self.private = ProphetXPrivateState()
 
@@ -138,7 +139,8 @@ class ProphetXClient(NativeTransport):
                 "signin_confirmed": self._signin_confirmed,
                 "subscriptions_confirmed": len(self._confirmed_channels), "subscriptions_expected": len(self.channels),
                 "market_frames": self._market_frames, "access_expires_at": self._access_expires or None,
-                "market_data_received": self._market_frames > 0, "trading_enabled": False}
+                "market_data_received": self._market_frames > 0, "trading_enabled": False,
+                "last_auth_failure": self._last_auth_failure}
 
     def _require_credentials(self):
         if not self.settings.api_key or not self.settings.secret_key.get_secret_value():
@@ -159,18 +161,27 @@ class ProphetXClient(NativeTransport):
                     or not math.isfinite(expires) or expires <= time.time()):
                 raise ValueError("Invalid session response")
         except VenueHTTPError as exc:
+            self._last_auth_failure = {"operation": "refresh" if path == "/auth/refresh" else "login",
+                                       "http_status": exc.status_code, "provider_code": exc.code}
+            self.authenticated = False
             self._http_failure(exc)
             if self.health not in self.TERMINAL_STATES:
                 self.health = "auth_outcome_unknown" if path == "/auth/login" else "auth_refresh_failed"
                 self.reason = "Authentication did not complete; no automatic login retry"
             raise
-        except (VenueError, ValueError, KeyError, TypeError):
+        except (VenueError, ValueError, KeyError, TypeError) as exc:
+            # Transport exceptions are already redacted by NativeTransport.
+            # Retain only their class, never response bodies or token strings.
+            self._last_auth_failure = {"operation": "refresh" if path == "/auth/refresh" else "login",
+                                       "error_type": type(exc).__name__}
+            self.authenticated = False
             self.health = "auth_outcome_unknown" if path == "/auth/login" else "auth_refresh_failed"
             self.reason = "Authentication outcome is unknown; retrying login can consume another session slot"
             raise VenueError(self.reason) from None
         self._access_token, self._refresh_token = session["access_token"], session["refresh_token"]
         # Read server expiry: the reference says 10 min while the guide says 20.
         self._access_expires = expires
+        self._last_auth_failure = None
         self.authenticated, self.reason = True, ""
         if self._ws is None:
             self.health = "authenticated"

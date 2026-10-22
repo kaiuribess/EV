@@ -71,11 +71,19 @@ class SourceOffer:
     market_status_verified: bool = False
 
     def identity(self) -> dict[str, Any]:
+        context = dict(self.context)
+        # Providers can spell the same instant as Z, .000Z or with a UTC
+        # offset. A formatting-only change must not rotate a reviewed mapping.
+        # A real schedule change still changes the signature. Keep invalid or
+        # timezone-less values verbatim so they cannot gain false identity.
+        raw_start = context.get("scheduled_start")
+        if isinstance(raw_start, str) and (start := parse_timestamp(raw_start)) is not None:
+            context["scheduled_start"] = start.isoformat()
         return {
             "provider": self.provider, "bookmaker": self.bookmaker,
             "event_id": self.event_id, "market_key": self.market_key,
             "player_key": self.player_key, "line": self.line, "period": self.period,
-            "outcome_points": self.outcome_points, "context": self.context,
+            "outcome_points": self.outcome_points, "context": context,
         }
 
     @property
