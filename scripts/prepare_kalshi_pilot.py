@@ -37,11 +37,11 @@ PILOT_LIMITS = {
     "unit_size_usd": "5",
     "max_open_orders": 1,
     "max_orders_per_minute": 1,
+    "max_native_order_attempts": 1,
 }
 RUNTIME_LIMITS = {
     **{key.removesuffix("_usd") if key != "unit_size_usd" else key: value
        for key, value in PILOT_LIMITS.items()},
-    "max_native_order_attempts": 1,
 }
 
 

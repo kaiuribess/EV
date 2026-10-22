@@ -3,7 +3,7 @@ import test from 'node:test'
 import { build } from 'esbuild'
 const bundle = await build({ entryPoints: ['src/launchSetupModel.ts'], bundle: true, write: false, format: 'esm', platform: 'node' })
 const model = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
-const { parseSetupReport, activationGate, activationBody, candidateCounts, weightSummary, profileFreshnessCoverage, candidateIsResearch, candidateCanQualify, candidateDisplayStatus, referenceObservationAge, collectionEditorValue, collectionField } = model
+const { parseSetupReport, activationGate, activationBody, deferredPilotRequirement, candidateCounts, weightSummary, profileFreshnessCoverage, candidateIsResearch, candidateCanQualify, candidateDisplayStatus, referenceObservationAge, collectionEditorValue, collectionField } = model
 const NOW = Date.parse('2026-10-21T05:00:00Z')
 const DIGEST = 'a'.repeat(64)
 function report() {
@@ -56,6 +56,29 @@ test('valid current production approval can prepare a digest-bound body without 
   const parsed = parseSetupReport(report())
   assert.equal(activationGate(parsed, NOW, NOW).allowed, true)
   assert.deepEqual(activationBody(parsed, NOW, DIGEST, NOW), { auto_trade: true, kill_switch: false, expected_launch_digest: DIGEST })
+})
+test('one-order pilot defers only historical proof after the backend approves the exact live scope', () => {
+  const raw = report()
+  raw.launch_scope[0].venue = raw.accounts[0].venue = 'kalshi'
+  raw.launch_scope[0].validation_pilot = true
+  raw.risk_policy.values.max_native_order_attempts = 1
+  raw.risk_policy.values.max_order_stake_usd = '1'
+  raw.requirements.push(...['native_lifecycle', 'restart_recovery', 'settlement_reconciliation'].map(kind => ({
+    code: `evidence.${kind}`, status: 'pending', title: kind, detail: 'Review after first order', external_evidence_required: true,
+  })))
+  const parsed = parseSetupReport(raw)
+  assert.equal(activationGate(parsed, NOW, NOW).allowed, true)
+  assert.equal(deferredPilotRequirement(parsed, 'evidence.native_lifecycle'), true)
+  for (const change of [
+    r => r.launch_scope[0].validation_pilot = false,
+    r => r.requirements.push({ code: 'pricing.profiles', status: 'pending', title: 'Pricing', detail: 'Not verified', external_evidence_required: true }),
+    r => r.safe_to_arm = false,
+  ]) {
+    const invalid = structuredClone(raw); change(invalid)
+    assert.equal(activationGate(parseSetupReport(invalid), NOW, NOW).allowed, false)
+  }
+  const malformed = structuredClone(raw); malformed.risk_policy.values.max_native_order_attempts = '1'
+  assert.throws(() => parseSetupReport(malformed))
 })
 for (const [name, mutate] of [
   ['wrong schema', r => r.schema_version = 2], ['string authorization', r => r.safe_to_arm = 'true'],
@@ -179,9 +202,10 @@ test('strict readiness requires the specific backend profile requirement, not a 
   raw.requirements.push({ code: 'pricing.profiles', status: 'pending', title: 'Reference profiles', detail: 'Research only', external_evidence_required: true })
   assert.equal(activationGate(parseSetupReport(raw), NOW, NOW).allowed, false)
   raw.requirements[1].status = 'passed'
-  assert.equal(activationGate(parseSetupReport(raw), NOW, NOW).allowed, false)
+  // The backend validates the selected market scope. A research-only profile
+  // elsewhere in the enabled catalog must not veto its approved scope.
+  assert.equal(activationGate(parseSetupReport(raw), NOW, NOW).allowed, true)
   raw.pricing.reference_profiles.nba_points.live_execution_allowed = true
-  // Backend approval remains required; the UI does not infer full readiness from TTL counts.
   assert.equal(activationGate(parseSetupReport(raw), NOW, NOW).allowed, true)
   raw.pricing.enabled_reference_profiles = []
   assert.equal(activationGate(parseSetupReport(raw), NOW, NOW).allowed, false)

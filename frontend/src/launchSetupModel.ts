@@ -31,7 +31,8 @@ export type SetupReport = {
   risk_policy: { source: string; values: RecordValue | null; applied: boolean; error: string | null };
   accounts: SetupAccount[];
   launch_scope: { venue: string; environment: string; account_fingerprint: string;
-    markets: { id: string; name: string }[]; strategy_ids: string[]; provider_ids: string[]; settlement_policy: string }[];
+    markets: { id: string; name: string }[]; strategy_ids: string[]; provider_ids: string[];
+    settlement_policy: string; validation_pilot?: boolean }[];
   software_blockers?: SetupBlocker[];
   requirements: { code: string; status: 'passed' | 'pending'; title: string; detail: string; external_evidence_required: boolean }[];
   pricing: { devig_method: string; eligible_books: string[] | null; required_books: string[]; min_references: number;
@@ -114,6 +115,8 @@ export function parseSetupReport(value: unknown): SetupReport {
       || values.max_order_stake_usd === null && values.stake_sizing !== 'quarter_kelly'
       || values.stake_sizing !== undefined && !['capped', 'quarter_kelly'].includes(values.stake_sizing as string)
       || values.unit_size_usd !== undefined && (!decimal(values.unit_size_usd) || Number(values.unit_size_usd) <= 0)
+      || values.max_native_order_attempts !== undefined && values.max_native_order_attempts !== null
+        && (!count(values.max_native_order_attempts) || Number(values.max_native_order_attempts) < 1)
       || !bools(values, ['available_cash_only', 'block_overlapping_events', 'block_overlapping_players'])
       || !['max_open_orders', 'max_orders_per_minute'].every(k => count(values[k]) && Number(values[k]) > 0)) return fail()
   }
@@ -144,6 +147,7 @@ export function parseSetupReport(value: unknown): SetupReport {
   if (!Array.isArray(value.launch_scope) || value.launch_scope.some(s => !record(s)
       || !words(s, ['venue', 'environment', 'account_fingerprint', 'settlement_policy'])
       || typeof s.account_fingerprint !== 'string' || s.account_fingerprint.trim().length === 0
+      || s.validation_pilot !== undefined && typeof s.validation_pilot !== 'boolean'
       || !strings(s.strategy_ids) || !strings(s.provider_ids) || !Array.isArray(s.markets)
       || s.markets.some(m => !record(m) || !words(m, ['id', 'name']) || !m.id || !m.name)
       || new Set(s.markets.map(m => m.id)).size !== s.markets.length)
@@ -158,6 +162,14 @@ export function parseSetupReport(value: unknown): SetupReport {
 }
 
 export const SETUP_MAX_AGE_MS = 12_000
+const PILOT_DEFERRED_EVIDENCE = new Set([
+  'evidence.native_lifecycle', 'evidence.restart_recovery', 'evidence.settlement_reconciliation',
+])
+export function deferredPilotRequirement(report: SetupReport, code: string): boolean {
+  return report.launch_scope.length > 0
+    && report.launch_scope.every(scope => scope.venue === 'kalshi' && scope.validation_pilot === true)
+    && PILOT_DEFERRED_EVIDENCE.has(code)
+}
 export function setupIsCurrent(report: SetupReport | null, receivedAt: number | null, now: number, error: string | null): boolean {
   if (!report || error || receivedAt === null || !Number.isFinite(receivedAt) || !Number.isFinite(now)) return false
   const age = now - Date.parse(report.checked_at), localAge = now - receivedAt
@@ -170,12 +182,12 @@ export function activationGate(report: SetupReport | null, receivedAt: number | 
   if (!report.activation.scope_digest || !/^[0-9a-f]{64}$/.test(report.activation.scope_digest)) return { allowed: false, reason: 'The reviewed trading scope is unavailable.' }
   if (report.pricing.reference_profile_mode === 'strict'
       && !report.requirements.some(r => r.code === 'pricing.profiles' && r.status === 'passed')) return { allowed: false, reason: 'The reference profiles still need the backend’s live-execution validation.' }
-  if (report.pricing.reference_profile_mode === 'strict' && (!report.pricing.enabled_reference_profiles?.length
-      || report.pricing.enabled_reference_profiles.some(name => report.pricing.reference_profiles?.[name]?.live_execution_allowed !== true))) return { allowed: false, reason: 'The selected reference profiles are not approved for real trading.' }
+  if (report.pricing.reference_profile_mode === 'strict' && !report.pricing.enabled_reference_profiles?.length)
+    return { allowed: false, reason: 'No reference profile is enabled.' }
   if (!report.scope.profile_count || !report.scope.verified_native_markets || !report.risk_policy.applied || report.risk_policy.values === null || report.risk_policy.error
       || report.accounts.filter(a => a.profile_configured).length !== report.scope.profile_count
       || report.launch_scope.length !== report.scope.profile_count
-      || report.requirements.length === 0 || report.requirements.some(r => r.status !== 'passed')) return { allowed: false, reason: 'The account, market and applied-limit checks are incomplete.' }
+      || report.requirements.length === 0 || report.requirements.some(r => r.status !== 'passed' && !deferredPilotRequirement(report, r.code))) return { allowed: false, reason: 'The account, market and applied-limit checks are incomplete.' }
   if (report.launch_scope.some(scope => scope.environment !== 'production' || scope.markets.length === 0
       || scope.strategy_ids.length === 0 || scope.provider_ids.length === 0
       || !report.accounts.some(a => a.venue === scope.venue && a.profile_configured && a.settlement_policy === scope.settlement_policy))) return { allowed: false, reason: 'The exact reviewed account and market scope is incomplete.' }

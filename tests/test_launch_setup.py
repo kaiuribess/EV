@@ -7,10 +7,11 @@ from fastapi.testclient import TestClient
 import pytest
 
 from evplatform.api import create_app
-from evplatform.core.config import Settings
+from evplatform.core.config import PricingConfig, Settings
 from evplatform.core.launch_setup import launch_setup, operator_limits_draft
 from evplatform.core.models import utcnow
 from evplatform.core.readiness import LiveLimits
+from evplatform.core.reference_profiles import ReferenceFreshnessRule, ReferenceProfile
 from evplatform.engine import Engine
 from evplatform.plugins.external import register_external
 from evplatform.venues.account_probe import NativeAccountSnapshot
@@ -73,6 +74,35 @@ def test_review_scope_uses_only_profile_whitelist_and_nonsecret_identity(engine,
     assert market.event_name in scope[0]["markets"][0]["name"]
     assert scope[0]["markets"][1] == {"id": "not_loaded", "name": "not_loaded"}
     assert "outside_launch" not in str(scope)
+
+
+def test_pricing_launch_check_only_requires_scoped_books_and_profile(engine, market):
+    market = market.model_copy(update={"status": "scheduled", "start_time": utcnow()+timedelta(hours=1)})
+    profile, *_ = ready_fixture("production")
+    engine.native.profile = profile.model_copy(update={"venue": "kalshi", "market_ids": (market.id,),
+        "provider_ids": ("parlay_ws",), "settlement_policy": "kalshi_ioc_binary_halt_on_exception"})
+    engine.markets[market.id] = market
+    selector = {"sport": market.sport, "league": market.league,
+                "market_type": market.market_type, "statistic": market.statistic}
+    enabled = ReferenceProfile(selectors=(selector,), weights_percent={
+        "fanduel": Decimal("50"), "draftkings": Decimal("50")},
+        required_any_anchor=("fanduel",), min_distinct_books=2,
+        status="reviewed", live_execution_allowed=True)
+    unrelated = ReferenceProfile(selectors=({"sport": "hockey", "league": "NHL",
+        "market_type": "moneyline"},), weights_percent={"pinnacle": Decimal("100")},
+        required_any_anchor=("pinnacle",), min_distinct_books=1, status="paper",
+        live_execution_allowed=False)
+    rules = [ReferenceFreshnessRule(**selector, provider="parlay_ws", bookmaker=book,
+        ttl_seconds="5", verified=True, evidence="offline fixture")
+        for book in ("fanduel", "draftkings")]
+    engine.settings.pricing = PricingConfig(reference_profile_mode="strict",
+        reference_profiles={"selected": enabled, "unrelated": unrelated},
+        enabled_reference_profiles=["selected", "unrelated"], profile_freshness_rules=rules)
+    requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
+    assert requirements["pricing.profiles"]["status"] == "passed"
+    engine.settings.pricing.profile_freshness_rules = rules[:1]
+    requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
+    assert requirements["pricing.profiles"]["status"] == "pending"
 
 
 def test_unsupported_settlement_is_visible_even_without_launch_profile(engine):

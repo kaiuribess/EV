@@ -45,6 +45,8 @@ class LiveLimits(StrictRecord):
     unit_size_usd: Decimal = Field(default=Decimal("5"), gt=0, allow_inf_nan=False)
     max_open_orders: int = Field(ge=1)
     max_orders_per_minute: int = Field(ge=1)
+    # A durable intent counts even if submission fails or its outcome is unknown.
+    max_native_order_attempts: int | None = Field(default=None, ge=1)
 
     @field_validator("max_order_stake_usd", "max_event_exposure_usd", "max_player_exposure_usd",
                      "max_venue_exposure_usd", "max_correlated_exposure_usd",
@@ -134,7 +136,33 @@ class LaunchProfile(StrictRecord):
     settlement_policy: Literal["full", "novig_ioc_win_loss_halt_on_exception",
                                "kalshi_ioc_binary_halt_on_exception",
                                "prophetx_funded_cash_win_loss_halt_on_exception"] = "full"
+    # A first, capped production order cannot already have genuine lifecycle
+    # and settlement evidence. Defer only those historical checks for this
+    # narrow validation pilot; current account, market, quote and risk checks
+    # remain mandatory at every stage of the order.
+    validation_pilot: bool = False
     evidence: tuple[LaunchEvidence, ...] = ()
+
+    @model_validator(mode="after")
+    def bounded_validation_pilot(self):
+        if not self.validation_pilot:
+            return self
+        limits = self.limits
+        caps = (limits.max_order_stake_usd, limits.max_event_exposure_usd,
+                limits.max_player_exposure_usd, limits.max_venue_exposure_usd,
+                limits.max_correlated_exposure_usd, limits.max_total_exposure_usd)
+        if (self.venue != "kalshi" or self.environment != "production"
+                or self.settlement_policy != "kalshi_ioc_binary_halt_on_exception"
+                or any(cap is None or cap > Decimal("1") for cap in caps)
+                or limits.max_native_order_attempts != 1
+                or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1
+                or not limits.available_cash_only or not limits.block_overlapping_events
+                or not limits.block_overlapping_players
+                or limits.stake_sizing != "quarter_kelly" or limits.unit_size_usd != Decimal("5")
+                or set(self.strategy_ids) != {"native_positive_ev"}
+                or self.min_reference_books < 2):
+            raise ValueError("Validation pilot requires one $1 Kalshi attempt with cash and overlap limits")
+        return self
 
     @field_validator("market_ids", "strategy_ids", "provider_ids")
     @classmethod
@@ -145,7 +173,14 @@ class LaunchProfile(StrictRecord):
 
     def digest(self) -> str:
         """Scope/limits/configuration changes invalidate previously issued evidence."""
-        return digest_json(self.model_dump(mode="json", exclude={"evidence"}))
+        payload = self.model_dump(mode="json", exclude={"evidence"})
+        # Preserve the digest of existing version-1 profiles. Adding an opt-in
+        # pilot must not invalidate unrelated reviewed accounts/evidence.
+        if not self.validation_pilot:
+            payload.pop("validation_pilot")
+        if self.limits.max_native_order_attempts is None:
+            payload["limits"].pop("max_native_order_attempts")
+        return digest_json(payload)
 
 
 def digest_json(value) -> str:
@@ -212,6 +247,7 @@ class RuntimeReadiness(StrictRecord):
     account_identity_verified: bool = False
     unresolved_unknown_orders: int = Field(default=0, ge=0)
     reconciliation_discrepancies: int = Field(default=0, ge=0)
+    native_pilot_prior_attempts: int = Field(default=0, ge=0)
     feeds: tuple[FeedReadiness, ...] = ()
     markets: tuple[MarketReadiness, ...] = ()
     live_enabled: bool = False
@@ -329,6 +365,11 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
               "Create a reviewed, account-specific launch profile with explicit limits",
               category="authorization")
     else:
+        pilot = profile.validation_pilot
+        if pilot and runtime.native_pilot_prior_attempts:
+            block("pilot.consumed", "The one-order validation pilot has already been attempted",
+                  "Reconcile and review its outcome before any further live order",
+                  category="authorization", scope=profile.venue)
         for name in ("environment", "venue", "account_fingerprint", "build_id", "mapping_digest", "pricing_digest"):
             if getattr(profile, name) != getattr(runtime, name):
                 block(f"profile.{name}_mismatch", f"Launch profile {name.replace('_', ' ')} differs from runtime",
@@ -389,6 +430,10 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         digest = profile.digest()
         for kind in ("account_access", "native_lifecycle", "restart_recovery", "settlement_reconciliation", "risk_authorization",
                      *(("geographic_eligibility",) if profile.environment == "production" else ())):
+            if (pilot and runtime.native_pilot_prior_attempts == 0
+                    and kind in {"native_lifecycle", "restart_recovery", "settlement_reconciliation"}
+                    and not any(e.kind == kind for e in profile.evidence)):
+                continue
             candidates = [e for e in profile.evidence if e.kind == kind]
             # A later failed/revoked check must not be hidden by an earlier pass.
             if candidates:

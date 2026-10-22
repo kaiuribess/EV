@@ -353,7 +353,8 @@ async def test_expired_preflight_after_transport_pacing_never_sends():
 
 async def test_central_dispatch_guard_runs_after_wait_and_does_not_block_owned_cancel():
     calls=[]; guarded=[]
-    adapter=adapter_for(intent(),lambda request:calls.append(request) or httpx.Response(200,json={}))
+    original = intent()
+    adapter=adapter_for(original,lambda request:calls.append(request) or httpx.Response(200,json={}))
     def changed_risk(original):
         guarded.append(time.monotonic())
         raise PreflightRequired("OFFLINE kill switch changed")
@@ -362,10 +363,10 @@ async def test_central_dispatch_guard_runs_after_wait_and_does_not_block_owned_c
     deadline=started+0.08
     adapter.client._next_request=deadline
     with pytest.raises(PreflightRequired):
-        await adapter.submit_intent(intent(),"one-use-test-token")
+        await adapter.submit_intent(original,"one-use-test-token")
     assert not calls and guarded[0]-started>0.04
-    adapter.bind_native_intent("exchange-order-1",intent())
+    adapter.bind_native_intent("exchange-order-1",original)
     adapter.preflight=adapter.preflight.model_copy(update={"valid_until":0})
-    assert (await adapter.cancel_native("exchange-order-1",intent())).status=="cancel_pending"
+    assert (await adapter.cancel_native("exchange-order-1",original)).status=="cancel_pending"
     assert len(calls)==1 and len(guarded)==1
     await adapter.client.disconnect()

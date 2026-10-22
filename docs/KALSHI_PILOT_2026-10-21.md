@@ -50,3 +50,20 @@ monitor, `auto_trade=false`, no reviewed launch profile, no native mapping,
 no qualified real candidate and **zero native order attempts**. A current
 readiness check returned `safe_to_arm=false`. The fresh public listing is a
 discovery lead, not a validated EV signal. No $1 production pilot was sent.
+
+At 00:12 UTC on October 22, another authenticated full-game Parlay WebSocket
+probe with `max_age_s=120` returned 36 FanDuel and 29 DraftKings NBA rows,
+and no Pinnacle rows. None of the returned FanDuel/DraftKings rows had the
+documented `last_observed`/`collector_observation` pair or an explicit active
+status. This confirms the live feed is connected, but it still cannot certify
+the outcome-level quote evidence required for production pricing.
+
+The code now supports an opt-in, one-attempt $1 Kalshi validation profile and
+a local watcher that waits for the existing live release gate. This removes
+the first-order lifecycle/settlement evidence deadlock without manufacturing
+that evidence. The watcher was checked against the production account and
+reported `waiting_for_reviewed_profile`; the app still has zero reviewed
+native mappings and no eligible real reference market. It remains paused and
+has sent no real order. The actual first fill, cancellation/restart behavior,
+and settlement remain unvalidated until a qualifying real market is reviewed
+and a real pilot order finishes its lifecycle.

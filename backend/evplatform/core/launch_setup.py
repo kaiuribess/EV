@@ -148,7 +148,8 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         launch_scope.append({"venue": venue, "environment": profile.environment,
             "account_fingerprint": profile.account_fingerprint,
             "markets": scoped_markets, "strategy_ids": list(profile.strategy_ids),
-            "provider_ids": list(profile.provider_ids), "settlement_policy": profile.settlement_policy})
+            "provider_ids": list(profile.provider_ids), "settlement_policy": profile.settlement_policy,
+            "validation_pilot": profile.validation_pilot})
     requirements = []
 
     def requirement(code, passed, title, detail, *, external=False):
@@ -162,15 +163,32 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
     pricing = engine.settings.pricing
     reference_profiles_ready = True
     if pricing.reference_profile_mode == "strict":
-        selected_references = [pricing.reference_profiles[name] for name in pricing.enabled_reference_profiles]
-        reference_profiles_ready = bool(selected_references) and all(
-            profile.live_execution_allowed and all(
-                any(rule.verified and rule.key() == selector.key() and rule.bookmaker == book
-                    for rule in pricing.profile_freshness_rules)
-                for selector in profile.selectors for book in profile.weights_percent)
-            for profile in selected_references)
+        from .reference_profiles import profile_for_market
+
+        scoped = []
+        for launch_profile in profiles.values():
+            for market_id in launch_profile.market_ids:
+                market = engine.markets.get(market_id)
+                try:
+                    selected = profile_for_market(pricing, market, now) if market else None
+                except ValueError:
+                    selected = None
+                scoped.append((launch_profile, market, selected))
+        reference_profiles_ready = bool(scoped)
+        for launch_profile, market, selected in scoped:
+            if market is None or selected is None:
+                reference_profiles_ready = False
+                continue
+            _, profile = selected
+            rules = {rule.bookmaker for rule in pricing.profile_freshness_rules
+                if rule.verified and rule.provider in launch_profile.provider_ids
+                and rule.matches(market) and rule.phase == profile.phase
+                and rule.bookmaker in profile.weights_percent}
+            if (not profile.live_execution_allowed or len(rules) < profile.min_distinct_books
+                    or not set(profile.required_any_anchor).intersection(rules)):
+                reference_profiles_ready = False
         requirement("pricing.profiles", reference_profiles_ready, "Validate reference profiles for live execution",
-            "Starting weights remain research settings. Validate each enabled profile and exact-source freshness policy; every current quote must also pass status, completeness, anchor and sensitivity checks.", external=True)
+            "Validate only the selected launch markets with enough independent exact-source freshness rules and an anchor; every current quote must still pass status, completeness and sensitivity checks.", external=True)
     relevant_software = [item for item in software_blockers if not profiles or item.scope in profiles]
     requirement("software.settlement", bool(accounts) and not relevant_software,
         "Complete venue settlement support",
@@ -191,6 +209,12 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         ("risk_authorization", "Confirm the reviewed trading scope", "Authorization must bind the exact accounts, markets, build, pricing and requested limits."),
     ):
         passed = bool(profiles) and not any(b.code == f"evidence.{kind}" for b in aggregate.blockers)
+        deferred = (bool(profiles) and all(p.validation_pilot for p in profiles.values())
+                    and kind in {"native_lifecycle", "restart_recovery", "settlement_reconciliation"}
+                    and any(not any(e.kind == kind for e in p.evidence) for p in profiles.values()))
+        if deferred:
+            passed = False
+            detail += " A one-order, $1 validation pilot defers this historical proof; it is not a completed check."
         if kind == "geographic_eligibility" and any(p.environment != "production" for p in profiles.values()):
             passed = False
         requirement(f"evidence.{kind}", passed, title, detail, external=kind != "risk_authorization")

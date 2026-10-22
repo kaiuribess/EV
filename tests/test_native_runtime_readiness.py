@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from evplatform.core.config import RiskConfig, Settings
-from evplatform.core.models import utcnow
-from evplatform.core.native_runtime import NativeRuntime
+from evplatform.core.models import OrderStatus, utcnow
+from evplatform.core.native_runtime import NativeRuntime, pilot_prior_attempts
 from evplatform.engine import Engine
 from evplatform.venues.account_probe import NativeAccountSnapshot
 
@@ -29,6 +29,18 @@ class Worker:
     def get_name(self): return self.name
     def done(self): return self.stopped
     def cancelled(self): return False
+
+
+def test_first_unsent_pilot_intent_does_not_consume_its_own_preflight():
+    order = SimpleNamespace(status=OrderStatus.SUBMITTING, venue_order_id=None,
+                            filled_quantity=Decimal(0))
+    assert pilot_prior_attempts([order]) == 0
+    for status in (OrderStatus.UNKNOWN, OrderStatus.REJECTED, OrderStatus.FILLED):
+        order.status = status
+        assert pilot_prior_attempts([order]) == 1
+    order.status = OrderStatus.SUBMITTING
+    order.venue_order_id = "native-id"
+    assert pilot_prior_attempts([order]) == 1
 
 
 @pytest.fixture

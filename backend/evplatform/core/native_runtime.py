@@ -34,6 +34,13 @@ def build_fingerprint():
     return digest.hexdigest()
 
 
+def pilot_prior_attempts(orders) -> int:
+    """Do not let the first unsent durable intent fail its own preflight."""
+    return sum(not (order.status in {OrderStatus.INTENT, OrderStatus.SUBMITTING}
+                    and not order.venue_order_id and order.filled_quantity == 0)
+               for order in orders)
+
+
 class NativeRuntime:
     def __init__(self, engine):
         self.engine = engine
@@ -550,7 +557,12 @@ class NativeRuntime:
                     block_overlapping_events=risk.block_overlapping_events,
                     block_overlapping_players=risk.block_overlapping_players,
                     stake_sizing=risk.stake_sizing, unit_size_usd=risk.unit_size_usd,
-                    max_open_orders=risk.max_open_orders, max_orders_per_minute=risk.max_orders_per_minute)
+                    max_open_orders=risk.max_open_orders, max_orders_per_minute=risk.max_orders_per_minute,
+                    # Legacy profiles did not authorize a lifetime attempt
+                    # count. Preserve their prior comparison while a pilot
+                    # binds and rechecks its explicit one-attempt limit.
+                    max_native_order_attempts=(risk.max_native_order_attempts
+                        if p and p.limits.max_native_order_attempts is not None else None))
         except (ValueError, TypeError):
             # Contradictory runtime limits are a missing authorization, not a
             # dashboard exception and never a reason to weaken the limits.
@@ -625,6 +637,12 @@ class NativeRuntime:
                 executable_liquidity=any(b.asks for b in books),
                 synthetic=fair is None or fair.synthetic or any(b.synthetic for b in books)))
         unknown = sum(o.status == OrderStatus.UNKNOWN for o in engine.risk.native_orders.values())
+        # The first pilot intent must survive the durable reservation and both
+        # preflight checks. Count it as consumed once an outcome exists (or its
+        # identity is uncertain), but not while this one unsent intent is being
+        # checked. The shared OMS lock and one-attempt risk cap prevent a second
+        # intent during that short window.
+        prior_attempts = pilot_prior_attempts(engine.risk.native_orders.values())
         storage_healthy = (engine.storage.connection is not None and engine.storage.failure is None
             and running(engine.storage.task) and not engine.storage.queue.full())
         execution_workers = worker("risk-routing") and worker("normalization-strategy") and worker("native-reconciliation")
@@ -656,6 +674,7 @@ class NativeRuntime:
             native_credentials_present=bool(record and record.credential_status != "missing"),
             account_identity_verified=account_current, unresolved_unknown_orders=unknown,
             reconciliation_discrepancies=(1 if snapshot and not snapshot.reconciled else 0) + len(self.manager.invalidated_settlements),
+            native_pilot_prior_attempts=prior_attempts,
             feeds=tuple(feeds), markets=tuple(markets), live_enabled=engine.settings.live_enabled,
             auto_trade=engine.risk.auto_trade, kill_switch=engine.risk.kill_switch)
 

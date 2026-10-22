@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from evplatform.core.models import utcnow
 from evplatform.core.readiness import (
     FeedReadiness, LaunchEvidence, LaunchProfile, LiveLimits, MarketReadiness,
-    RuntimeReadiness, evaluate_readiness,
+    RuntimeReadiness, digest_json, evaluate_readiness,
 )
 from evplatform.integrations.normalization import MappingFile, VerifiedOfferMapping
 from evplatform.venues.bridge import VerifiedVenueMapping
@@ -108,6 +108,75 @@ def test_complete_scoped_evidence_and_facts_can_pass_without_profit_claim():
     assert report.safe_to_arm and report.live_trading_ready
     assert not report.blockers
     assert report.performance.conclusion == "not_established"
+
+
+def pilot_fixture():
+    profile, runtime, now = ready_fixture()
+    pilot_limits = LiveLimits.model_validate({**profile.limits.model_dump(),
+        "max_order_stake_usd": "1", "max_event_exposure_usd": "1",
+        "max_player_exposure_usd": "1", "max_venue_exposure_usd": "1",
+        "max_correlated_exposure_usd": "1", "max_total_exposure_usd": "1",
+        "available_cash_only": True, "block_overlapping_events": True,
+        "block_overlapping_players": True, "stake_sizing": "quarter_kelly",
+        "unit_size_usd": "5", "max_open_orders": 1, "max_orders_per_minute": 1,
+        "max_native_order_attempts": 1})
+    profile = profile.model_copy(update={"venue": "kalshi", "limits": pilot_limits,
+        "strategy_ids": ("native_positive_ev",),
+        "settlement_policy": "kalshi_ioc_binary_halt_on_exception", "validation_pilot": True,
+        "evidence": ()})
+    evidence = tuple(item.model_copy(update={"venue": "kalshi", "profile_digest": profile.digest()})
+        for item in ready_fixture()[0].evidence
+        if item.kind in {"account_access", "geographic_eligibility", "risk_authorization"})
+    profile = profile.model_copy(update={"evidence": evidence})
+    market = runtime.markets[0].model_copy(update={"order_minimum_verified": True})
+    runtime = runtime.model_copy(update={"venue": "kalshi", "configured_limits": pilot_limits,
+        "enabled_strategy_ids": ("native_positive_ev",), "markets": (market,)})
+    return profile, runtime, now
+
+
+def test_one_dollar_first_order_pilot_defers_only_historical_validation():
+    profile, runtime, now = pilot_fixture()
+    report = evaluate_readiness(profile, runtime, now=now)
+    assert report.safe_to_arm and report.live_trading_ready
+    assert not {f"evidence.{kind}" for kind in
+        ("native_lifecycle", "restart_recovery", "settlement_reconciliation")} & codes(report)
+    assert not evaluate_readiness(profile, runtime.model_copy(update={
+        "private_stream_synchronized": False}), now=now).safe_to_arm
+    assert not evaluate_readiness(profile, runtime.model_copy(update={
+        "markets": (runtime.markets[0].model_copy(update={"usable_reference_books": 1}),)}), now=now).safe_to_arm
+
+
+def test_one_order_pilot_is_consumed_by_any_completed_attempt():
+    profile, runtime, now = pilot_fixture()
+    report = evaluate_readiness(profile, runtime.model_copy(update={
+        "native_pilot_prior_attempts": 1}), now=now)
+    assert not report.safe_to_arm
+    assert "pilot.consumed" in codes(report)
+
+
+def test_known_failed_lifecycle_evidence_is_not_waived_for_pilot():
+    profile, runtime, now = pilot_fixture()
+    failed = profile.evidence[0].model_copy(update={"kind": "native_lifecycle", "passed": False})
+    report = evaluate_readiness(profile.model_copy(update={
+        "evidence": (*profile.evidence, failed)}), runtime, now=now)
+    assert "evidence.native_lifecycle" in codes(report)
+
+
+def test_validation_pilot_rejects_unbounded_or_non_kalshi_scope():
+    profile, _, _ = pilot_fixture()
+    with pytest.raises(ValidationError):
+        LaunchProfile.model_validate({**profile.model_dump(), "venue": "novig"})
+    with pytest.raises(ValidationError):
+        LaunchProfile.model_validate({**profile.model_dump(), "limits": {
+            **profile.limits.model_dump(), "max_native_order_attempts": None}})
+
+
+def test_legacy_profile_digest_stays_stable_without_pilot():
+    profile, _, _ = ready_fixture()
+    legacy = profile.model_dump(mode="json", exclude={"evidence"})
+    legacy.pop("validation_pilot")
+    legacy["limits"].pop("max_native_order_attempts")
+    assert profile.digest() == digest_json(legacy)
 
 
 def test_sandbox_is_not_live_and_arm_state_is_separate():

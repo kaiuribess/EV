@@ -94,6 +94,38 @@ creates launch evidence. Re-running shared feed setup preserves any stricter
 native money caps; it cannot silently reset this pilot's saved cap. Use the
 actual production port if different from 8002.
 
+The first genuine order cannot itself be preceded by evidence of its own fills
+and settlement. A reviewed Kalshi production profile may therefore opt into
+`validation_pilot: true` with the `kalshi_ioc_binary_halt_on_exception` policy.
+That option requires a $1 cap on every exposure, one lifetime native attempt,
+quarter-Kelly with a $5 unit, cash-only sizing, and event/player overlap blocks.
+It defers only historical lifecycle, restart and settlement evidence until the
+first order can be observed. Account/location authorization, exact live market
+mapping, current active reference quotes, fee/depth checks, synchronized
+private state and per-order preflight remain required. A failed or unknown
+durable attempt uses the one attempt; it cannot be retried automatically.
+The dashboard shows those three items as **After pilot** and permits its
+one-order review only when the backend approves the selected market scope.
+Other research-only profiles do not veto that selected scope. After the first
+durable native attempt, the backend pauses automatic trading.
+
+To leave that **one attempt pending** while completing the launch checks, run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\watch_kalshi_one_shot.py --url http://127.0.0.1:8002
+```
+
+The watcher binds the currently authenticated Kalshi account fingerprint. It
+waits while the launch profile or real quote checks are incomplete. Only when
+the backend reports the exact profile safe to arm does it enable the $1 pilot
+with that profile's digest; the backend still makes every final order decision.
+It pauses after the first native intent. Inspect
+`data/kalshi_one_shot_status.json` for `pending`, `armed`, `attempted` or
+`blocked`. `--check-only` reports the state without waiting or arming. Keep the
+production workspace running; a restart pauses native automation and requires
+a new watcher check. The watcher does not turn a stale or missing quote into an
+EV opportunity.
+
 Stop a managed workspace safely with its actual port:
 
 ```powershell
@@ -102,13 +134,13 @@ Stop a managed workspace safely with its actual port:
 
 ## Read the actual blockers
 
-With the sandbox workspace running on port 8002:
+With a workspace running on its configured port:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/check_live_readiness.py --url http://127.0.0.1:8002
 ```
 
-Use port 8003 for the production example above. The Trading page also shows the
+Use port 8002 for the current production workspace. The Trading page also shows the
 same live readiness checks and their next actions. **Live setup** also lists
 configured native monitors before any launch profile exists, separates real
 market coverage from synthetic opportunities, and distinguishes saved limits
@@ -170,6 +202,10 @@ The limit does not relax launch readiness, reference quality, settlement
 matching, quarter-Kelly sizing, account-cash checks, or the approved stake cap.
 It is a total attempt cap for this ledger, so an existing native order exhausts
 it. Review the order and exchange history before changing or removing the cap.
+The explicit first-order validation pilot described above is the sole narrow
+exception for *historical* order/settlement evidence; it does not waive current
+market or risk checks. The dashboard labels those historical checks pending
+until genuine evidence exists.
 
 ### Current unresolved release work
 
