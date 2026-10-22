@@ -355,6 +355,19 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
         status = "withdrawn" if row.get("action") == "remove" else (
             "suspended" if row.get("suspended") is True or row.get("status") == "suspended" or row.get("available") is False else "active"
         )
+        observation = _parlay_observation(envelope, row, complete=len(prices) >= 2)
+        # /props?includeLinks=true emits FanDuel side links only when the
+        # stored native market was OPEN and that runner ACTIVE. Require both
+        # sides, a complete collector-bound observation and the documented
+        # REST shape. A single link does not certify the opposing price.
+        status_verified = (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
+                           and row.get("bookmaker") == "fanduel" and has_totals and not has_outcome
+                           and not has_moneyline and set(prices) == {"over", "under"}
+                           and all(isinstance(row.get(f"{side}_link"), str)
+                                   and row[f"{side}_link"].startswith("https://")
+                                   for side in ("over", "under"))
+                           and observation["observation_verified"] and observation["observation_complete"]
+                           and status == "active")
         result.append(SourceOffer(
             envelope.provider_id, str(row.get("bookmaker", "")),
             str(row.get("canonical_event_id") or row.get("event_id") or row.get("eventId") or ""),
@@ -366,7 +379,8 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
             {**_row_context(row), "participants": [row.get("home_team"), row.get("away_team")],
              **({"scheduled_start": row["commence_time"]} if "commence_time" in row else {}),
              **({"event_sport": envelope.metadata["sport"]} if envelope.metadata.get("sport") else {})},
-            **_parlay_observation(envelope, row, complete=len(prices) >= 2),
+            **observation,
+            market_status_verified=status_verified,
         ))
     return result
 

@@ -91,7 +91,10 @@ class ParlayRest(RestProvider):
         return replace(result, metadata={**result.metadata, "sport": sport, "odds_format": "decimal"})
 
     async def fetch_props(self, sport: str, **filters: Any) -> ProviderEnvelope:
-        params: dict[str, Any] = {"maxAgeSec": self.config.max_age_seconds, "limit": self.config.props_limit}
+        # Parlay documents FanDuel per-side links only for stored native OPEN /
+        # ACTIVE observations. They are evidence fields, never order URLs here.
+        params: dict[str, Any] = {"maxAgeSec": self.config.max_age_seconds, "limit": self.config.props_limit,
+                                  "includeLinks": True}
         if self.config.bookmakers:
             params["bookmakers"] = ",".join(self.config.bookmakers)
         params.update(filters)

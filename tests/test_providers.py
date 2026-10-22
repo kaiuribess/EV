@@ -107,6 +107,19 @@ async def test_parlay_rest_documented_header_endpoint_and_cost():
         assert result.synthetic is False
 
 
+async def test_parlay_props_requests_documented_native_status_link_evidence():
+    def handle(request):
+        assert request.url.path == "/v1/sports/basketball_nba/props"
+        assert request.url.params["includeLinks"] == "true"
+        assert request.headers["X-API-Key"] == "fixture-secret"
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ParlayRest({"enabled": True, "bookmakers": ["fanduel"]},
+                              client=client, credential="fixture-secret")
+        await provider.fetch_props("basketball_nba")
+
+
 async def test_owls_bearer_uses_publication_not_quote_time():
     def handle(request):
         assert request.headers["Authorization"] == "Bearer fixture-secret"

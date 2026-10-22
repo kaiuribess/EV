@@ -72,6 +72,20 @@ $env:PYTHONPATH = 'backend'
 .\.venv\Scripts\python.exe scripts\review_event_crosswalk.py --url http://127.0.0.1:8002 --tournament-id 132 --event-id 1700099993
 ```
 
+Parlay's current [OpenAPI contract](https://parlay-api.com/openapi.json) adds
+`includeLinks=true` to `/v1/sports/{sport_key}/props`. It documents FanDuel
+per-side links only when the stored native market was OPEN and runner ACTIVE.
+The REST adapter now requests that metadata and treats **both** HTTPS side
+links as active-status evidence only when the same two-sided prop row also has
+an unambiguous, complete `last_observed` / `collector_observation` clock. The
+links are not exposed in normalized quotes or sent to an order venue.
+An authenticated NBA FanDuel sample (three credits) returned two Stephen
+Curry rows, each with an Over link but no Under link and no collector clock;
+a second bounded NBA query (three credits) returned no rows. Neither response
+made a quote live-eligible. This rule applies only to the documented FanDuel
+REST prop shape. Other books and main lines still lack equivalent verified
+status evidence in the current feeds.
+
 **Result: blocked.** Rechecked the local application, authenticated account
 history, quarantined real prices, and current official API documentation. No
 orders, cancellations, transfers, or live activation were performed.

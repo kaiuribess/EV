@@ -51,7 +51,8 @@ async def test_rest_props_supports_large_scoped_page_without_extra_charge():
     await provider.fetch_props("basketball_nba")
     provider.request.assert_awaited_once_with(
         "/v1/sports/basketball_nba/props",
-        params={"maxAgeSec": 30, "limit": 5000, "bookmakers": "fanduel"}, cost=3,
+        params={"maxAgeSec": 30, "limit": 5000, "includeLinks": True,
+                "bookmakers": "fanduel"}, cost=3,
     )
 
 

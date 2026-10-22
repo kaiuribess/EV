@@ -64,6 +64,24 @@ def test_observation_is_distinct_from_retained_clock_price_change_and_delivery()
     assert not quote.market_status_verified
 
 
+def test_parlay_fanduel_bilateral_native_links_certify_only_that_rest_prop_observation():
+    row = parlay_row(over_link="https://sportsbook.fanduel.com/over",
+                     under_link="https://sportsbook.fanduel.com/under")
+    rest = ProviderEnvelope("parlay_rest", "props_snapshot", [row], NOW, 1)
+    offer, = extract_offers(rest)
+    assert offer.observation_verified and offer.observation_complete and offer.market_status_verified
+    assert not extract_offers(parlay(row))[0].market_status_verified  # WS has no documented link contract.
+    for change in ({"under_link": None}, {"over_link": "not-a-url"},
+                   {"last_observed": None}, {"last_update_type": "price_change"},
+                   {"bookmaker": "draftkings"}, {"under_price": None}):
+        candidate, = extract_offers(ProviderEnvelope("parlay_rest", "props_snapshot",
+            [{**row, **change}], NOW, 1))
+        assert not candidate.market_status_verified
+    partial, = extract_offers(ProviderEnvelope("parlay_rest", "props_snapshot",
+        [row], NOW, 1, metadata={"headers": {"x-result-truncated": "true"}}))
+    assert not partial.market_status_verified
+
+
 @pytest.mark.parametrize("extra", [
     {"last_observed": None}, {"last_update_type": None}, {"last_update_type": "price_change"},
     {"last_observed": "invalid"}, {"last_observed": NOW + timedelta(seconds=1)},
