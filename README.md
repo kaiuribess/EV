@@ -357,7 +357,7 @@ treating sportsbook and exchange prices as interchangeable.
 configuration. Never delete an active database or its WAL/SHM files. Stop the app
 before copying the database for a backup.
 
-Operational SQLite databases are capped at 4 GiB apiece after compaction. A
+Operational SQLite databases are capped at 5 GiB apiece after compaction. A
 background task removes raw quote/event detail, per-tick signal snapshots, and
 transition detail older than six hours. It keeps order/fill/settlement events,
 all order and fill tables, signal results, compact signal episodes, and cumulative
@@ -379,6 +379,8 @@ if multiple databases or old test artifacts accumulate, so inspect `data` when
 adding another long-running workspace.
 For a large stopped historical database, add `--fast-offline` to prune in larger
 committed ranges before compaction; an interrupted run can be repeated safely.
+If pruning finished but compaction was interrupted, rerun with `--compact-only`
+after confirming the service is still stopped.
 
 `fixtures/demo_replay.jsonl` contains fixed-clock synthetic frames including stale,
 suspended, sequence-gap, and recovery cases. Regenerate it with:

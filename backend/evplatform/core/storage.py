@@ -33,7 +33,7 @@ class Storage:
     # retained separately and are never selected by this raw-detail policy.
     RAW_DETAIL_HOURS = 6
     RETENTION_BATCH = 2000
-    MAX_DATABASE_BYTES = 4 * 1024**3
+    MAX_DATABASE_BYTES = 5 * 1024**3
     PERMANENT_EVENT_SCHEMAS = (
         "trade.order", "trade.fill", "trade.settlement", "native.order",
         "native.settlement", "signal.result", "system.notice",

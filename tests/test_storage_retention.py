@@ -6,7 +6,7 @@ import pytest
 from evplatform.core.models import utcnow
 from evplatform.core.signals import SignalLedger
 from evplatform.core.storage import Storage
-from scripts.maintain_storage import _fast_offline_prune
+from scripts.maintain_storage import _compact, _fast_offline_prune
 
 
 @pytest.mark.asyncio
@@ -100,6 +100,7 @@ async def test_offline_bulk_prune_keeps_permanent_events_and_counts_once(tmp_pat
         "events": 1, "signal_observations": 0, "signal_transitions": 1}
     assert _fast_offline_prune(path, chunk_size=2) == {
         "events": 0, "signal_observations": 0, "signal_transitions": 0}
+    assert _compact(path)["quick_check"] == "ok"
     storage = Storage(str(path))
     await storage.open()
     try:

@@ -11,6 +11,7 @@ import ctypes
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from evplatform.core.storage import Storage  # noqa: E402
 
 class MaintenanceStorage(Storage):
     # A pre-existing oversized database needs room for cursor/aggregate writes
-    # while old detail is removed. The normal 4 GiB cap is set after VACUUM.
+    # while old detail is removed. The normal 5 GiB cap is set after VACUUM.
     MAX_DATABASE_BYTES = 100 * 1024**3
 
 
@@ -90,7 +91,7 @@ def _fast_offline_prune(path: Path, *, chunk_size: int = 250_000) -> dict[str, i
     """
     cutoff = (utcnow() - timedelta(hours=Storage.RAW_DETAIL_HOURS)).isoformat()
     totals = {"events": 0, "signal_observations": 0, "signal_transitions": 0}
-    with sqlite3.connect(path, timeout=30) as conn:
+    with closing(sqlite3.connect(path, timeout=30)) as conn:
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("""CREATE TABLE IF NOT EXISTS signal_transition_totals (
@@ -131,25 +132,25 @@ def _fast_offline_prune(path: Path, *, chunk_size: int = 250_000) -> dict[str, i
                 if upper % 1_000_000 == 0 or upper == maximum:
                     print(json.dumps({"table": table, "through_seq": upper,
                                       "deleted_old_detail": totals}), flush=True)
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     return totals
 
 
 def _compact(path: Path) -> dict:
     # VACUUM needs a closed operational connection and enough temporary disk.
-    with sqlite3.connect(path, timeout=30) as conn:
+    with closing(sqlite3.connect(path, timeout=30)) as conn:
         conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        conn.execute("PRAGMA journal_mode=DELETE").fetchone()
         conn.execute("PRAGMA auto_vacuum=FULL")
         conn.execute("VACUUM")
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA journal_mode=WAL").fetchone()
         conn.execute("PRAGMA journal_size_limit=67108864")
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
         requested = Storage.MAX_DATABASE_BYTES // page_size
         applied = conn.execute(f"PRAGMA max_page_count={requested}").fetchone()[0]
         if applied > requested:
-            raise RuntimeError("Database remains above the 4 GiB cap after compaction")
+            raise RuntimeError("Database remains above the 5 GiB cap after compaction")
         check = conn.execute("PRAGMA quick_check").fetchone()[0]
         if check != "ok":
             raise RuntimeError(f"SQLite integrity check failed: {check}")
@@ -163,11 +164,17 @@ def main() -> None:
     parser.add_argument("--compact", action="store_true", help="Reclaim disk after pruning")
     parser.add_argument("--fast-offline", action="store_true",
                         help="Use large SQLite batches for a stopped historical database")
+    parser.add_argument("--compact-only", action="store_true",
+                        help="Compact a stopped database after an already completed pruning pass")
     args = parser.parse_args()
     path = _check_path(args.database)
     before = path.stat().st_size
-    pruned = _fast_offline_prune(path) if args.fast_offline else asyncio.run(_prune(path))
-    result = _compact(path) if args.compact else {}
+    if args.compact_only and (args.fast_offline or args.compact):
+        parser.error("--compact-only cannot be combined with other maintenance modes")
+    pruned = ({"events": 0, "signal_observations": 0, "signal_transitions": 0}
+              if args.compact_only else _fast_offline_prune(path) if args.fast_offline
+              else asyncio.run(_prune(path)))
+    result = _compact(path) if args.compact or args.compact_only else {}
     print(json.dumps({"database": str(path), "before_bytes": before,
                       "after_bytes": path.stat().st_size, "scanned_old_detail": pruned,
                       **result}), flush=True)
