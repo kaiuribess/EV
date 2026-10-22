@@ -501,6 +501,51 @@ async def test_realtime_rest_poll_failure_invalidates_cached_reference():
         await provider.disconnect()
 
 
+def test_owls_realtime_fallback_requires_new_market_confirmation_to_recover():
+    def snapshot(seen, received):
+        return ProviderEnvelope("owls_pinnacle_realtime", "snapshot", {
+            "meta": {"source": "pinnacle", "sport": "nba", "available": True,
+                     "freshness": {"stale": False}},
+            "data": [{"id": "event-1", "sport_key": "nba", "home_team": "Team A",
+                      "away_team": "Team B", "commence_time": (NOW + timedelta(hours=2)).isoformat(),
+                      "phase": "scheduled", "status": "scheduled", "isLive": False,
+                      "bookmakers": [{"key": "pinnacle", "markets": [{
+                          "key": "h2h", "last_seen": seen.isoformat(),
+                          "last_update": (NOW - timedelta(minutes=2)).isoformat(),
+                          "outcomes": [{"name": "Team A", "price": -120},
+                                       {"name": "Team B", "price": 110}],
+                      }]}]}],
+        }, received, 1_000_000, snapshot_complete=True, metadata={"sport": "nba"})
+
+    first = snapshot(NOW - timedelta(seconds=5), NOW)
+    offer = extract_offers(first)[0]
+    canonical = market().model_copy(update={
+        "id": "nba-h2h", "market_type": "moneyline", "player": None, "player_id": None,
+        "statistic": None, "line": None, "outcomes": ("Team A", "Team B"),
+        "settlement": Settlement(),
+    })
+    mapper = VerifiedProviderMapper([VerifiedOfferMapping(
+        signature=offer.signature, market=canonical,
+        outcome_map={"Team A": "Team A", "Team B": "Team B"},
+        bookmaker="pinnacle", verified=True, evidence="Controlled exact market fixture",
+    )])
+    quotes = mapper(first)
+    assert len(quotes) == 1 and quotes[0][1].observation_complete
+    assert quotes[0][1].market_status_verified
+
+    invalidated = mapper(ProviderEnvelope(
+        "owls_pinnacle_realtime", "feed_invalidated", {"sport": "nba"},
+        NOW + timedelta(seconds=1), 2_000_000, metadata={"sport": "nba"}))
+    assert len(invalidated) == 1 and invalidated[0][1].status == "suspended"
+    same = mapper(snapshot(NOW - timedelta(seconds=5), NOW + timedelta(seconds=2)))
+    assert len(same) == 1 and same[0][1].observation_complete is False
+    assert same[0][1].verification_reason == "new_complete_verified_observation_required"
+    fresh = mapper(snapshot(NOW + timedelta(seconds=2), NOW + timedelta(seconds=3)))
+    assert fresh[-1][1].status == "active"
+    assert fresh[-1][1].observation_complete is True
+    assert fresh[-1][1].market_status_verified is True
+
+
 def test_oddspapi_price_and_bookmaker_clocks_are_distinct():
     outcome = {"price": 1.91, "active": True, "bookmakerChangedAt": None, "changedAt": NOW.isoformat()}
     raw = replace(envelope(), provider_id="oddspapi_rest", kind="snapshot", payload={
