@@ -40,7 +40,11 @@ async def main(database_argument: str | None = None):
     saved = PricingConfig.model_validate_json(row[0])
     if saved.normal_outcome_policy != "winner_only_binary":
         return {"ok": False, "reason": "Production normal-outcome policy is not winner_only_binary"}
-    research = saved.model_copy(update={"reference_quality_mode": "trusted_provider"})
+    if (saved.reference_quality_mode != "trusted_provider"
+            and not any(override.get("reference_quality_mode") == "trusted_provider"
+                        for override in saved.market_overrides.values())):
+        return {"ok": False, "reason": "Production trusted-provider research mode is not configured"}
+    research = saved
     mapper = VerifiedProviderMapper()
     mapper.research_projector = TrustedSourceProjector(lambda: research)
     client = ParlayRest({"enabled": True, "sports": ["basketball_nba"],
@@ -84,7 +88,7 @@ async def main(database_argument: str | None = None):
             probability, rejection, references = None, str(exc), []
         if probability is not None:
             category_counts[category]["fair"] += 1
-        if len(quotes) < 2 and probability is None:
+        if category == "moneyline" and len(quotes) < 2 and probability is None:
             continue
         if findings[category] is not None and (findings[category]["fair_probabilities"] is not None or probability is None):
             continue

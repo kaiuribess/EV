@@ -83,6 +83,23 @@ def test_trusted_delivery_expires_without_relabeling_cached_price():
         fair_value(market, [q for _, q in updates], config(), NOW+timedelta(seconds=31))
 
 
+def test_research_game_delivery_window_can_be_scoped_without_changing_strict_ttl():
+    _, updates = projected(frame())
+    market = updates[0][0]
+    quotes = [q.model_copy(update={"source_scope_poll_at": None,
+        "source_scope_is_current": None}) for _, q in updates]
+    scoped = config().model_copy(update={"reference_quality_mode": "strict_verified",
+        "market_overrides": {"basketball:moneyline": {
+            "reference_quality_mode": "trusted_provider",
+            "trusted_max_delivery_age_ms": 300000}}})
+    fair = fair_value(market, quotes, scoped, NOW+timedelta(minutes=2))
+    assert fair.execution_eligible is False
+    assert all(ref["source_observed_at"] is None for ref in fair.references)
+    assert scoped.max_quote_age_ms == 5000
+    with pytest.raises(NoSignal, match="Insufficient"):
+        fair_value(market, quotes, scoped, NOW+timedelta(minutes=6))
+
+
 def test_trusted_rejects_suspension_incomplete_pair_and_stale_poll():
     for case in (frame(suspended=True), frame(incomplete=True), frame(poll_age=31)):
         _, updates = projected(case)
