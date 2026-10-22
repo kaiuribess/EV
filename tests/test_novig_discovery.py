@@ -1,0 +1,147 @@
+"""Read-only Novig discovery rotates native book scope without order access."""
+
+import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from evplatform.integrations.novig_discovery import balanced_open_market_ids, open_market_ids
+from evplatform.plugins.external import NativeMonitor, NovigMonitorConfig
+from evplatform.venues.novig import NovigClient
+
+
+NOW = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
+EVENT = "11111111-1111-4111-8111-111111111111"
+LIVE = "22222222-2222-4222-8222-222222222222"
+NEXT = "33333333-3333-4333-8333-333333333333"
+CLOSED = "44444444-4444-4444-8444-444444444444"
+
+
+def market(market_id, minutes, status="OPEN", event_id=EVENT):
+    return {"marketId": market_id, "eventId": event_id,
+            "startsTs": int(NOW.timestamp() * 1000) + minutes * 60_000,
+            "status": status}
+
+
+def test_catalog_selects_current_and_nearby_open_markets_without_trading_claim():
+    rows = {"items": [market(NEXT, 40), market(LIVE, -10), market(CLOSED, 1, "CLOSED")]}
+    assert open_market_ids(rows, now=NOW, max_markets=10) == ([LIVE, NEXT], False)
+    assert open_market_ids(rows, now=NOW, max_markets=1) == ([LIVE], True)
+    assert open_market_ids({**rows, "next": "opaque"}, now=NOW, max_markets=10) == ([LIVE, NEXT], True)
+
+
+def test_selection_reserves_coverage_across_requested_leagues():
+    nba = {"items": [market(LIVE, -10), market(CLOSED, 20)]}
+    nfl = {"items": [market(NEXT, 40)]}
+    assert balanced_open_market_ids([nba, nfl], now=NOW, max_markets=2) == ([LIVE, NEXT], True)
+    assert balanced_open_market_ids([nba, nfl], now=NOW, max_markets=3) == ([LIVE, NEXT, CLOSED], False)
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"items": None}, {"items": [market(LIVE, 1), market(LIVE, 2)]},
+    {"items": [market("bad", 1)]}, {"items": [market(LIVE, 1)], "next": 17},
+])
+def test_uncertain_catalog_is_rejected_without_guessing(payload):
+    with pytest.raises(ValueError):
+        open_market_ids(payload, now=NOW, max_markets=10)
+
+
+def test_discovery_config_is_bounded_and_backward_compatible():
+    assert NovigMonitorConfig().discovery_leagues == []
+    assert NovigMonitorConfig(discovery_leagues=["NBA"],
+                              discovery_market_types=["MONEY"]).max_discovered_markets == 50
+    for config in (
+        {"discovery_leagues": ["NBA"]},
+        {"discovery_market_types": ["MONEY"]},
+        {"discovery_leagues": ["nba"], "discovery_market_types": ["MONEY"]},
+        {"discovery_leagues": ["NBA", "NBA"], "discovery_market_types": ["MONEY"]},
+        {"discovery_leagues": ["NBA"], "discovery_market_types": ["MONEY"],
+         "market_ids": [LIVE] * 51},
+    ):
+        with pytest.raises(ValueError):
+            NovigMonitorConfig.model_validate(config)
+
+
+@pytest.mark.asyncio
+async def test_monitor_read_failure_retains_last_discovered_scope(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+
+    class Client:
+        fail = False
+
+        async def discover_markets(self, **params):
+            assert params == {"league": "NBA" if self.calls % 2 == 0 else "NFL",
+                              "marketType": "MONEY", "limit": 500}
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("secret provider response")
+            return {"items": [market(NEXT if params["league"] == "NFL" else LIVE,
+                                     40 if params["league"] == "NFL" else -10)]}
+
+    client = Client()
+    client.calls = 0
+    monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
+        "discovery_leagues": ["NBA", "NFL"], "discovery_market_types": ["MONEY"],
+        "max_discovered_markets": 1}), discovery_status="disabled", discovered_market_ids=[])
+    await NativeMonitor._refresh_novig_discovery(monitor)
+    assert monitor.discovered_market_ids == [LIVE] and monitor.discovery_status == "truncated"
+    client.fail = True
+    await NativeMonitor._refresh_novig_discovery(monitor)
+    assert monitor.discovered_market_ids == [LIVE] and monitor.discovery_status == "read_failed"
+
+
+@pytest.mark.asyncio
+async def test_market_rotation_uses_reconnect_snapshot_only_after_success(monkeypatch):
+    cycles = 0
+
+    async def one_cycle(_):
+        nonlocal cycles
+        cycles += 1
+        if cycles > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
+
+    class Client:
+        def __init__(self):
+            self.selections = []
+
+        async def replace_monitor_markets(self, ids):
+            self.selections.append(ids)
+
+    client = Client()
+
+    async def refresh():
+        monitor.discovered_market_ids = [NEXT]
+        monitor.discovery_status = "current"
+
+    monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
+        "discovery_interval_seconds": 60, "market_ids": [LIVE]}),
+        discovered_market_ids=[LIVE], _subscribed_market_ids=[LIVE],
+        discovery_status="current", _refresh_novig_discovery=refresh)
+    with pytest.raises(asyncio.CancelledError):
+        await NativeMonitor._discover_novig_periodically(monitor)
+    assert client.selections == [[LIVE, NEXT]]
+    assert monitor._subscribed_market_ids == [LIVE, NEXT]
+
+
+@pytest.mark.asyncio
+async def test_client_rotation_never_sends_an_order_and_validates_before_closing():
+    class Socket:
+        closes = 0
+
+        async def close(self):
+            self.closes += 1
+
+    client = NovigClient()
+    socket = Socket()
+    client._ws = socket
+    with pytest.raises(ValueError):
+        await client.replace_monitor_markets(["invalid-id"])
+    assert socket.closes == 0
+    await client.replace_monitor_markets([LIVE])
+    assert socket.closes == 1 and client._configured_market_ids == (LIVE,)
+    assert client.request_count == 0
+    client._ws = None
+    await client.disconnect()

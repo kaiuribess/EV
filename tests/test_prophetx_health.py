@@ -88,6 +88,29 @@ async def test_auth_health_and_refresh_reuse_the_existing_session():
     assert [path for path, _ in calls] == ["/partner/auth/login", "/partner/auth/refresh"]
 
 
+async def test_access_only_refresh_retains_existing_refresh_token_without_new_login():
+    calls = []
+
+    def handler(request):
+        calls.append((request.url.path, json.loads(request.content)))
+        if request.url.path.endswith("/auth/refresh"):
+            return httpx.Response(200, json={"data": {"access_token": f"renewed-{len(calls)}",
+                "access_expire_time": time.time() + 600}})
+        return httpx.Response(200, json=session())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        native = ProphetXClient(settings(), http)
+        await native.connect()
+        for _ in range(2):
+            native._access_expires = time.time() + 20
+            await native.connect()
+            assert native._refresh_token == "offline-refresh"
+            assert native.health_check()["authenticated"]
+            assert native.health_check()["last_auth_failure"] is None
+    assert [path for path, _ in calls] == ["/partner/auth/login", "/partner/auth/refresh", "/partner/auth/refresh"]
+    assert calls[1][1] == calls[2][1] == {"refresh_token": "offline-refresh"}
+
+
 @pytest.mark.parametrize("status,code,state", [
     (401, None, "unauthorized"), (403, None, "access_denied"),
     (451, None, "geolocation_required"), (400, "session_num_exceed", "session_limit"),

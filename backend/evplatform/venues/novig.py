@@ -404,6 +404,12 @@ class NovigClient(NativeTransport):
         self._configured_market_ids = tuple(dict.fromkeys(requested))
         self._excluded_settled_markets.clear()
 
+    async def replace_monitor_markets(self, market_ids: list[str]):
+        """Rotate read-only market scope through the normal reconnect snapshot path."""
+        await self.configure_subscriptions({"market_ids": market_ids})
+        if self._ws is not None:
+            await self._ws.close()
+
     async def _refresh_configured_subscriptions(self):
         if self._configured_market_ids is None:
             return

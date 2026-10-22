@@ -155,9 +155,16 @@ class ProphetXClient(NativeTransport):
         try:
             response = await self._request(request)
             session = response["data"]
+            if not isinstance(session, dict):
+                raise ValueError("Invalid session response")
+            # Production refresh currently returns only a new access token and
+            # expiry. Keep the existing long-lived refresh token unless the
+            # response explicitly rotates it. Login must supply both tokens.
+            refresh_token = session.get("refresh_token", self._refresh_token
+                                        if path == "/auth/refresh" else None)
             expires = float(session["access_expire_time"])
             if (not isinstance(session["access_token"], str) or not session["access_token"]
-                    or not isinstance(session["refresh_token"], str) or not session["refresh_token"]
+                    or not isinstance(refresh_token, str) or not refresh_token
                     or not math.isfinite(expires) or expires <= time.time()):
                 raise ValueError("Invalid session response")
         except VenueHTTPError as exc:
@@ -178,7 +185,7 @@ class ProphetXClient(NativeTransport):
             self.health = "auth_outcome_unknown" if path == "/auth/login" else "auth_refresh_failed"
             self.reason = "Authentication outcome is unknown; retrying login can consume another session slot"
             raise VenueError(self.reason) from None
-        self._access_token, self._refresh_token = session["access_token"], session["refresh_token"]
+        self._access_token, self._refresh_token = session["access_token"], refresh_token
         # Read server expiry: the reference says 10 min while the guide says 20.
         self._access_expires = expires
         self._last_auth_failure = None

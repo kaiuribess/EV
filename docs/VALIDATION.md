@@ -1,5 +1,17 @@
 # Validation - 2026-10-20
 
+October 21, 2026 evening follow-up: **2,088 backend tests passed** in 42.23
+seconds, with one third-party Starlette deprecation warning. The new Novig
+catalog tests cover bounded multi-league selection, conflicting identities,
+read-failure retention, and reconnect-based scope rotation. ProphetX tests
+cover consecutive access-only refreshes without another login. Actual signed
+catalog reads found 52 open production NBA/NFL/MLB/NHL moneylines; both local
+workspaces streamed 10 selected Novig books. An authenticated ProphetX refresh
+response confirmed that production may omit a replacement refresh token. The
+paused production monitor authenticated and streamed after the parser repair;
+its next automatic renewal remains to be observed. No native order, account
+transfer, or live activation was made in this follow-up.
+
 October 21, 2026 follow-up: **2,076 backend tests passed** in 40.41 seconds
 with one third-party Starlette deprecation warning. Focused Parlay/Oddize and
 ProphetX tests passed. PowerShell parsed `start_live_paper.ps1` and

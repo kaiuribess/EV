@@ -13,7 +13,7 @@ It is **not a completed production autonomous trading release**.
 | Paper OMS | Central risk, durable intent, original-limit/fee rechecks, partial fills, cancel, unknown-state freeze, global position-family locks, restart, simulated settlement, burst/open-order caps | Real queue position and coordinated multi-leg policies |
 | Native OMS | Separate exact-decimal native contract, central router and shared risk, durable intent, account binding, original-price revalidation, partial/cumulative cash reconciliation, conservative unknown states, cancellation races, restart and settlement ledger; one Novig Paper play-money IOC fill reconciled | Production lifecycle and paid settlement proof; a Paper fill is not production certification |
 | Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
-| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; authenticated paper subscriptions and production account/book reads verified; protected setup and durable recovery; one play-money Paper IOC order filled and reconciled | Actual production order lifecycle, location preflight at placement, paid settlement and complete launch evidence; unusual/shared-position settlement remains blocked |
+| Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; bounded current-market discovery rotates a multi-league book subscription through fresh snapshots; authenticated paper subscriptions and production account/book reads verified; protected setup and durable recovery; one play-money Paper IOC order filled and reconciled | Actual production order lifecycle, location preflight at placement, paid settlement and complete launch evidence; unusual/shared-position settlement remains blocked |
 | ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, matched-fill/wallet accounting and restricted funded-cash win/loss settlement; production read-only subscriptions and market messages verified | Genuine complete history, funded-cash and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
 | Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; earlier actual signed production read/stream checks passed | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, account-aware live setup, actionable launch blockers and separate native order ledger; final owner enable control bound to current launch scope | Broader browser/device QA; no current production scope passes the gate |
@@ -60,6 +60,21 @@ The live Oddize Developer NBA feed still polls hourly within its 1,500-credit
 monthly allowance. Its prior 30-credit process cap would stop an otherwise
 healthy hourly feed after 30 paid snapshots; the session ceiling is now 1,200
 while provider remaining credits and the monthly pacing rule remain enforced.
+The production Novig catalog returned 52 open NBA/NFL/MLB/NHL moneylines on
+October 21 at 20:46 PDT. The live-input paper monitor now subscribes to a
+bounded 10 of them across all four leagues (3 NBA, 3 NFL, 1 MLB, 3 NHL in the
+sample); its authenticated stream held 10 books and 794 resting orders after a
+restart. The separately paused production workspace also streamed 10 current
+Novig books with 782 resting orders. This is native book coverage only, with no reviewed fair-price mapping
+or order permission. Its truncated discovery health accurately indicates that
+other open markets are not being watched.
+At 20:50 PDT, ProphetX's running production monitor stopped at its scheduled
+token refresh because the live response omitted `refresh_token`; the original
+parser assumed it would be present. A one-time authenticated read-only refresh
+confirmed the actual response fields. The client now retains the existing
+long-lived token when the refresh response supplies only a new access token and
+expiry. After a paused-workspace restart it authenticated and confirmed 7/7
+subscriptions; the subsequent automatic refresh still needs observation.
 Equivalent Parlay schedule timestamp spellings now yield one source signature;
 an actual schedule change still requires renewed mapping review. No existing
 reviewed production mapping needed migration because none is installed.

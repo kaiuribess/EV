@@ -44,14 +44,26 @@ unknown-outcome recovery; the application does not do those actions at startup.
 
 Native streaming uses `/v3/ws`. Book sequences are per market/channel; private sequences are per subaccount/channel. Gaps invalidate state and reconnect with new subscription snapshots. `place` and `cancel` use request nonces and wait for an acknowledgement; private events are still required. The implementation requests uncompressed frames. See [streaming](https://docs.novig.com/api/streaming/connection) and [private updates](https://docs.novig.com/api/streaming/private).
 
-At the latest restart, six of ten saved sandbox market IDs had settled and were
-no longer in the current catalog; including them caused the subscription to be
-rejected. The four remaining open subscriptions were retained and authenticated
-streaming resumed. Startup/reconnect now checks only the requested IDs and omits
-an ID only when authenticated catalog `MARKET_NOT_FOUND` and market-history
-`SETTLED` agree. Other failures block instead of silently changing scope. The
-requested and excluded counts are reported in health. No new market or trading
-permission is selected by this check.
+Static requested IDs are checked on startup and reconnect. An ID is omitted only
+when authenticated catalog `MARKET_NOT_FOUND` and market-history `SETTLED`
+agree. Other failures block instead of silently changing scope. The requested
+and excluded counts are reported in health.
+
+The optional Novig monitor discovery fields (`discovery_leagues`,
+`discovery_market_types`, `max_discovered_markets`, and
+`discovery_interval_seconds`) use signed, read-only open-market catalog calls.
+One bounded page per league lets a dense league schedule leave room for another:
+the monitor chooses the nearest open markets in round-robin order. A `truncated`
+health state reports that other open markets were left outside the configured
+capacity. On a scope change, the monitor closes its socket, invalidates old
+books/private state, and follows the ordinary reconnect/snapshot path. The
+client revalidates every selected ID before subscription. Discovery changes
+only monitored order books; it does not approve mappings, fees, source odds,
+or native orders. The current installation uses a 10-market cap across NBA,
+NFL, MLB, and NHL moneylines because a 52-market subscription did not maintain
+a usable stream in this local test. The exact broad-subscription failure cause
+has not been established. See [Novig catalog](https://docs.novig.com/api-reference/catalog/list-markets)
+and [streaming subscriptions](https://docs.novig.com/api/streaming/connection).
 
 The paper feed was observed using `orderId` and `outcomeId` where the documentation's book examples use `order` and `outcome`. The parser accepts these specific aliases, validates their types, and rejects conflicting values. A live 46-second paper observation processed 30 books and 48 frames with zero invalidations or reconnects; this is transport evidence, not order-execution validation.
 
@@ -63,7 +75,7 @@ The Trading API uses an access-key/secret-key exchange for a Bearer session. The
 
 Talaria connection details are discovered from `/websocket/connection-config`; no hostname is guessed. The client requires `ws_host` and TLS. Legacy Pusher-host fallback is intentionally unsupported. Registration uses `/v4/mm/websocket`, `X-CFTC-Terminology: true`, `event` and `event_subtype` selections, then waits for sign-in before subscribing. It uses each channel's own auth and returned `scope`; dynamic channel limits/rejections are checked. See [Talaria integration](https://docs.prophetx.co/docs/integrate-with-websockets).
 
-The monitor exposes native `event_ids` and `prop_subtypes` settings. Streaming health requires sign-in and all channel acknowledgements; real market traffic is counted separately from system traffic. Refresh uses the existing refresh token, including on quiet sockets, and trusts the returned expiration. An ambiguous login outcome blocks automatic retries because another login consumes a session slot. Separate processes should use separate access-key pairs; revoking a key does not immediately release its session slots. See [session guidance](https://docs.prophetx.co/docs/integration).
+The monitor exposes native `event_ids` and `prop_subtypes` settings. Streaming health requires sign-in and all channel acknowledgements; real market traffic is counted separately from system traffic. Refresh uses the existing refresh token, including on quiet sockets, and trusts the returned expiration. An authenticated production refresh on October 21 at 20:51 PDT returned `data.access_token` and `data.access_expire_time` without a new `refresh_token`. The client now retains its existing refresh token when that field is absent; an explicitly empty replacement still fails. This was verified with an actual read-only refresh response and offline regression tests. A fresh monitor login and streaming subscription succeeded afterward, but its next scheduled automatic refresh had not yet occurred at the time of this note. An ambiguous login outcome blocks automatic retries because another login consumes a session slot. Separate processes should use separate access-key pairs; revoking a key does not immediately release its session slots. See [session guidance](https://docs.prophetx.co/docs/integration) and [refresh endpoint](https://docs.prophetx.co/reference/post_auth-refresh).
 
 On 2026-10-20, an owner-authorized production token returned 374 tournaments and 788 events; a three-event subscription confirmed five channels and delivered `v2.market_selections`. This verifies read access only. The application's native order gate stayed disabled, and no order, cancellation, deposit, or transfer was submitted. Token creation requires the account owner to acknowledge ProphetX's five-year activity-record requirement; the app never accepts that obligation automatically. See [self-service keys](https://docs.prophetx.co/docs/getting-api-keys).
 

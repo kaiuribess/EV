@@ -3,7 +3,7 @@ import asyncio
 import os
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..core.models import Envelope, ProviderFrame, utcnow
 from ..core.plugins import InputPlugin, Manifest, Plugin
@@ -182,6 +182,31 @@ class KalshiMonitorConfig(NativeMonitorConfig):
 class NovigMonitorConfig(NativeMonitorConfig):
     credential_profile: Literal["legacy", "environment"] = Field(default="legacy",
         description="Legacy preserves the existing pair. Environment selects separate paper/production trading credentials.")
+    discovery_leagues: list[str] = Field(default_factory=list, max_length=8,
+        description="Canonical Novig league codes for read-only open-market discovery; empty disables discovery")
+    discovery_market_types: list[str] = Field(default_factory=list, max_length=8,
+        description="Canonical Novig market-type codes, paired with discovery_leagues")
+    discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    max_discovered_markets: int = Field(default=50, ge=1, le=100)
+
+    @field_validator("discovery_leagues", "discovery_market_types")
+    @classmethod
+    def canonical_discovery_codes(cls, values):
+        if len(set(values)) != len(values) or any(
+            not value or len(value) > 24 or not value.isascii()
+            or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for ch in value)
+            for value in values
+        ):
+            raise ValueError("Use distinct uppercase canonical Novig discovery codes")
+        return values
+
+    @model_validator(mode="after")
+    def complete_discovery_scope(self):
+        if bool(self.discovery_leagues) != bool(self.discovery_market_types):
+            raise ValueError("Novig discovery needs both leagues and market types")
+        if len(self.market_ids) + self.max_discovered_markets > 100 and self.discovery_leagues:
+            raise ValueError("Novig explicit and discovered market caps must total at most 100")
+        return self
 
 
 class ProphetXMonitorConfig(BaseModel):
@@ -249,7 +274,9 @@ class NativeMonitor(Plugin):
         self.config_error = ""
         self.discovery_status = "disabled"
         self.discovered_event_ids: list[str] = []
+        self.discovered_market_ids: list[str] = []
         self._subscribed_event_ids: list[str] = []
+        self._subscribed_market_ids: list[str] = []
 
     def credential_names(self, config):
         default_profile = getattr(self.config_model(), "credential_profile", "legacy")
@@ -266,7 +293,9 @@ class NativeMonitor(Plugin):
         self.config_error = ""
         self.discovery_status = "disabled"
         self.discovered_event_ids = []
+        self.discovered_market_ids = []
         self._subscribed_event_ids = []
+        self._subscribed_market_ids = []
         if context.config.get("legacy_market_ids"):
             self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
             return
@@ -304,12 +333,19 @@ class NativeMonitor(Plugin):
             raise
         if self.manifest.name == "prophetx" and context.config.get("discovery_tournament_ids"):
             await self._refresh_discovery()
+        if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
+            await self._refresh_novig_discovery()
         configure = getattr(self.client, "configure_subscriptions", None)
         if configure is not None:
             if self.manifest.name == "prophetx":
                 selected = list(dict.fromkeys([*context.config.get("event_ids", []), *self.discovered_event_ids]))
                 await configure({**context.config, "event_ids": selected})
                 self._subscribed_event_ids = selected
+            elif self.manifest.name == "novig":
+                selected = list(dict.fromkeys([*context.config.get("market_ids", []),
+                                               *self.discovered_market_ids]))
+                await configure({**context.config, "market_ids": selected})
+                self._subscribed_market_ids = selected
             else:
                 await configure(context.config)
         elif context.config.get("market_ids"):
@@ -317,6 +353,52 @@ class NativeMonitor(Plugin):
         self.task = asyncio.create_task(self._run(), name=f"native-monitor:{self.manifest.name}")
         if self.manifest.name == "prophetx" and context.config.get("discovery_tournament_ids"):
             self.discovery_task = asyncio.create_task(self._discover_periodically(), name="prophetx-event-discovery")
+        if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
+            self.discovery_task = asyncio.create_task(self._discover_novig_periodically(), name="novig-market-discovery")
+
+    async def _refresh_novig_discovery(self):
+        from ..integrations.novig_discovery import balanced_open_market_ids
+
+        config = self.context.config
+        try:
+            # Market rows omit league. Query each requested league separately
+            # so a dense schedule in one sport cannot hide every other sport.
+            rows = [await self.client.discover_markets(
+                league=league, marketType=",".join(config["discovery_market_types"]),
+                limit=500) for league in config["discovery_leagues"]]
+            selected, truncated = balanced_open_market_ids(rows, now=utcnow(),
+                max_markets=config.get("max_discovered_markets", 50))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.discovery_status = "read_failed"
+            # An uncertain catalog must not erase the last known subscription.
+            return
+        self.discovered_market_ids = selected
+        self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
+
+    async def _discover_novig_periodically(self):
+        try:
+            while True:
+                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
+                await self._refresh_novig_discovery()
+                if self.discovery_status == "read_failed":
+                    continue
+                selected = list(dict.fromkeys([*self.context.config.get("market_ids", []),
+                                               *self.discovered_market_ids]))
+                if selected == self._subscribed_market_ids:
+                    continue
+                try:
+                    # Closing the existing socket makes the normal stream loop
+                    # invalidate books and private state, then resubscribe with
+                    # a fresh authoritative snapshot. No order is transmitted.
+                    await self.client.replace_monitor_markets(selected)
+                except Exception:
+                    self.discovery_status = "subscription_failed"
+                    continue
+                self._subscribed_market_ids = selected
+        except asyncio.CancelledError:
+            raise
 
     async def _refresh_discovery(self):
         from ..integrations.prophetx_discovery import open_event_ids
@@ -408,7 +490,8 @@ class NativeMonitor(Plugin):
                 "message": state.get("reason") or "Native monitor; normalized venue mapping and live preflight required for orders",
                 "frames": self.frames,
                 "discovery_status": self.discovery_status,
-                "discovered_event_count": len(self.discovered_event_ids)}
+                "discovered_event_count": len(self.discovered_event_ids),
+                "discovered_market_count": len(self.discovered_market_ids)}
 
 
 def register_external(registry, engine):
