@@ -624,3 +624,29 @@ submission, acknowledgment or fill delay; there were zero paper/native orders
 and zero fills in this restart window. Production still had zero launch
 profiles, verified native markets and qualifying real reference markets, so
 automatic native trading remained paused.
+
+### Fresh launch check, October 22 at 17:04 UTC
+
+The production control API still reported `safe_to_arm=false`, with no reviewed
+launch profiles, verified native market mappings, qualifying real reference
+markets or native candidates. Live execution was configured but automatic
+trading remained off and the kill switch remained on. No real order was sent.
+
+A read-only account diagnostic confirmed a current Novig trading identity,
+reconciled inventory and cash-available evidence. Kalshi's balance read worked,
+but its follow-up inventory call returned HTTP 429; ProphetX returned only a
+balance read, and the Polymarket US inventory did not verify trading identity or
+cash availability. These observations do not authorize an order on any venue.
+
+Two authenticated, three-credit Parlay NBA props requests used the documented
+`includeLinks=true` parameter. The `player_points` request returned 103 rows
+from FanDuel and Pinnacle, including 22 two-sided rows. The broader props
+request returned 6,848 rows from DraftKings, FanDuel and Pinnacle across 67
+market types, including 489 two-sided rows. **Neither request returned a recent
+`last_observed`/`collector_observation` pair or a FanDuel row with both native
+side links.** Thus none met the application's quote-level status and freshness
+requirements. These counts are snapshots of a particular time and request scope,
+not a claim that those books never supply valid quotes. The current
+[Parlay WebSocket contract](https://api.parlay-api.com/docs/websocket) also says
+complete board snapshots and book heartbeats do not verify each retained
+outcome; there is no defensible status shortcut from a recent message alone.
