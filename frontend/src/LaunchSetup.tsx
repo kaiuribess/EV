@@ -173,7 +173,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
       {!current && !error && <div className="setup-alert"><TriangleAlert size={18} /><span>This snapshot has expired. Refresh before relying on account or readiness facts.</span></div>}
       <div className="setup-counts" aria-label="Real and synthetic signal counts">
         <div><strong>{report.scope.native_candidates}</strong><span>Real native candidates</span></div><div><strong>{report.scope.synthetic_candidates}</strong><span>Synthetic demo candidates</span></div>
-        <div><strong>{report.scope.verified_native_markets}</strong><span>Verified exchange markets</span></div><div><strong>{report.scope.real_reference_markets}</strong><span>Markets with real references</span></div>
+        <div><strong>{report.scope.verified_native_markets}</strong><span>Verified exchange markets</span></div><div><strong>{report.scope.real_reference_markets}</strong><span>Markets with provider quotes (may be ineligible)</span></div>
       </div>
       <div className="setup-body"><div className="setup-section-title"><h3>Your exchange connections</h3><span>Each wallet is checked independently</span></div>
         <div className="setup-accounts">{report.accounts.map(account => {
