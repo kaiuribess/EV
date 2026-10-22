@@ -327,7 +327,8 @@ def test_manual_native_api_fails_closed_without_launch_profile(tmp_path, monkeyp
         response = client.post("/api/native/manual/preview", headers=HEADERS, json=body)
         assert response.status_code == 409
         assert client.post("/api/native/manual/submit", headers=HEADERS,
-                           json={"review_token": "invented"}).status_code == 409
+                           json={"review_token": "invented", "terms_digest": "0" * 64,
+                                 "approved_max_cost_usd": "1"}).status_code == 409
         assert client.get("/api/native/orders").json()["orders"] == []
 
 
@@ -393,6 +394,24 @@ def test_matching_review_digest_allows_operator_control_in_offline_fixture(tmp_p
         assert response.status_code == 200
         assert not engine.risk.kill_switch and engine.risk.auto_trade
         assert client.get("/api/native/orders").json()["orders"] == []
+
+
+def test_owner_can_release_stop_for_one_manual_order_without_enabling_automation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": True, "profile_digest": "a" * 64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        engine.risk.kill_switch = True
+        assert client.post("/api/control", headers=HEADERS,
+            json={"auto_trade": False, "kill_switch": False}).status_code == 409
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        response = client.post("/api/control", headers=HEADERS,
+            json={"auto_trade": False, "kill_switch": False,
+                  "expected_launch_digest": "a" * 64})
+        assert response.status_code == 200
+        assert not engine.risk.kill_switch and not engine.risk.auto_trade
 
 
 def test_activation_failure_cannot_erase_new_safety_halt(tmp_path, monkeypatch):

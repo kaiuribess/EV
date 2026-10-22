@@ -48,7 +48,9 @@ class KalshiBook:
     """YES/NO bids with executable asks obtained from opposing bids.
 
     The sequence is per subscription (sid), not per ticker. All books on a
-    subscription are invalidated together if a delta is missed.
+    subscription are invalidated together if a delta is missed. WebSocket
+    subscriptions explicitly request unified YES-leg prices. Convert NO-side
+    levels to NO-leg prices before retaining them, so asks() has one meaning.
     """
 
     def __init__(self):
@@ -79,7 +81,7 @@ class KalshiBook:
                     if not Decimal(0) <= p <= Decimal(1) or q < 0:
                         raise ValueError("Invalid Kalshi snapshot level")
                     if q:
-                        levels[p] = q
+                        levels[Decimal(1) - p if side == "no" else p] = q
                 sides[side] = levels
             self.books[ticker] = sides
             self.market_sids[ticker] = sid
@@ -101,6 +103,8 @@ class KalshiBook:
         change = decimal_value(msg["delta_fp"])
         if not Decimal(0) <= price <= Decimal(1):
             raise ValueError("Invalid Kalshi delta price")
+        if side == "no":
+            price = Decimal(1) - price
         new_quantity = self.books[ticker][side].get(price, Decimal(0)) + change
         if new_quantity < 0:
             self.invalid.add(ticker)
@@ -361,7 +365,8 @@ class KalshiClient(NativeTransport):
         if self.tickers:
             self._command_id += 1
             await self._send_ws({"id": self._command_id, "cmd": "subscribe",
-                                 "params": {"channels": ["orderbook_delta"], "market_tickers": self.tickers}})
+                                 "params": {"channels": ["orderbook_delta"], "market_tickers": self.tickers,
+                                            "use_yes_price": True}})
         for channel in sorted(self.private.CHANNELS):
             if channel in self.private.channels or channel in self.private.commands.values():
                 continue

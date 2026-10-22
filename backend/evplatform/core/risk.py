@@ -92,9 +92,18 @@ class RiskEngine:
         if self.config.daily_loss_limit is not None and self.daily_realized <= -self.config.daily_loss_limit:
             raise RiskRejected("Daily realized loss limit reached")
 
-    def check_native_reservation(self, order, *, reserved=False):
+    def check_native_reservation(self, order, *, reserved=False, preview_only=False):
         """Shared limits for an exact-unit order; caller holds the shared OMS lock."""
-        self.check_enabled(order.id if getattr(order, "execution_origin", "automatic") == "manual" else None)
+        if preview_only:
+            # Dry-run inspects every monetary/position limit while disarmed.
+            # The OMS and dispatch guard always call the default armed path.
+            if getattr(order, "execution_origin", "automatic") != "manual":
+                raise RiskRejected("Only a manual order may be previewed while disarmed")
+            self.roll_day()
+            if self.config.daily_loss_limit is not None and self.daily_realized <= -self.config.daily_loss_limit:
+                raise RiskRejected("Daily realized loss limit reached")
+        else:
+            self.check_enabled(order.id if getattr(order, "execution_origin", "automatic") == "manual" else None)
         if (not reserved and self.config.max_native_order_attempts is not None
                 and len(self.native_orders) >= self.config.max_native_order_attempts):
             raise RiskRejected("Native order attempt limit reached")

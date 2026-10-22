@@ -36,13 +36,13 @@ class ManualNativeService:
         self.reviews: dict[str, ManualReview] = {}
         self.lock = asyncio.Lock()
 
-    def _gate(self):
+    def _gate(self, *, for_submit=False):
         engine = self.engine
         if engine.settings.mode not in {"sandbox", "production"}:
             raise RiskRejected("Manual native orders require a sandbox or production workspace")
         if engine.risk.auto_trade:
             raise RiskRejected("Pause automation before reviewing a manual order")
-        if engine.risk.kill_switch:
+        if for_submit and engine.risk.kill_switch:
             raise RiskRejected("Emergency kill switch blocks manual orders")
         report = engine.native.report()
         if not engine.settings.live_enabled or not report.safe_to_arm or not report.profile_digest:
@@ -65,7 +65,11 @@ class ManualNativeService:
             "sensitivity_roi": str(candidate.sensitivity_roi),
             "reference_profile_id": candidate.reference_profile_id,
             "reference_policy_digest": candidate.reference_policy_digest,
-            "reference_books": sorted(str(ref.get("bookmaker")) for ref in candidate.references),
+            # Bind the quote clocks, weights and underlying probabilities, not
+            # just a list of book names that could stay the same as prices move.
+            "references": sorted(candidate.references, key=lambda ref: (str(ref.get("bookmaker")),
+                                                                        str(ref.get("provider")))),
+            "book_revision": candidate.book_revision,
             "settlement_probability_source": candidate.settlement_probability_source,
         })
 
@@ -103,12 +107,11 @@ class ManualNativeService:
             profile_digest = self._gate()
             candidate = await self._fresh_candidate(market_id, venue, outcome, max_cost_usd)
             order = self.engine.native.build_order(candidate, execution_origin="manual")
-            # The preview uses the same preflight, sizing and cross-account risk
-            # checks as placement. Placement repeats all checks under the OMS lock.
-            with self.engine.risk.manual_order(order.id):
-                async with self.engine.oms.lock:
-                    self.engine.native.manager._check(order)
-            expires_at = utcnow() + timedelta(seconds=30)
+            # Preserve the kill switch while checking all non-arming limits.
+            # The submit path repeats the full armed check under the OMS lock.
+            async with self.engine.oms.lock:
+                self.engine.native.preview_check(order)
+            expires_at = utcnow() + timedelta(seconds=90)
             token = secrets.token_urlsafe(32)
             self.reviews = {key: value for key, value in self.reviews.items() if value.expires_at > utcnow()}
             if len(self.reviews) >= 32:
@@ -116,25 +119,47 @@ class ManualNativeService:
             self.reviews[token] = ManualReview(market_id, venue, outcome, max_cost_usd, self._terms(candidate),
                                                profile_digest, expires_at)
             market = self.engine.markets[market_id]
-            return {"review_token": token, "expires_at": expires_at.isoformat(),
+            book = self.engine.native.books[(market_id, venue, outcome)]
+            return {"review_token": token, "terms_digest": self._terms(candidate),
+                    "created_at": utcnow().isoformat(), "expires_at": expires_at.isoformat(),
                     "environment": self.engine.settings.mode,
                     "market": {"id": market.id, "event_name": market.event_name,
-                               "market_type": market.market_type, "player": market.player},
+                               "market_type": market.market_type, "player": market.player,
+                               "outcome": outcome, "settlement": market.settlement.model_dump(mode="json"),
+                               "original_ids": market.original_ids},
+                    "account_fingerprint_suffix": order.account_fingerprint[-8:],
+                    "build_id": getattr(self.engine.native, "build_id", None),
+                    "profile_digest": profile_digest,
+                    "max_cost_usd": str(max_cost_usd),
+                    "executable_depth": [level.model_dump(mode="json") for level in book.asks],
+                    "book_source_time": book.source_time.isoformat() if book.source_time else None,
+                    "risk_decisions": {"non_arming_checks_passed": True,
+                                       "automatic_orders_off": True,
+                                       "kill_switch_on": self.engine.risk.kill_switch,
+                                       "submit_requires_kill_switch_off": True},
+                    "unsigned": True,
                     "candidate": candidate.model_dump(mode="json"),
                     "note": "Review only. No order sent. A changed price, fair value, size or scope requires a new review."}
 
-    async def submit(self, token: str):
+    async def submit(self, token: str, terms_digest: str, approved_max_cost_usd: Decimal):
         async with self.lock:
             review = self.reviews.pop(token, None)  # Consume before any await; never replay a click.
             if review is None or utcnow() >= review.expires_at:
                 raise RiskRejected("Manual review expired or was already used; review the trade again")
-            profile_digest = self._gate()
-            if profile_digest != review.profile_digest:
-                raise RiskRejected("Native launch scope changed; review the trade again")
-            candidate = await self._fresh_candidate(review.market_id, review.venue, review.outcome, review.max_cost_usd)
-            if self._terms(candidate) != review.terms_digest:
-                raise RiskRejected("Trade size, price, model or edge changed; review the trade again")
-            with self.engine.risk.manual_order(candidate.intent.id):
-                order = await self.engine.native.execute(candidate, execution_origin="manual")
-            return {"order": order.model_dump(mode="json"), "automation_enabled": self.engine.risk.auto_trade,
-                    "note": "Order acknowledgement is not a fill. Check the native ledger and reconciliation."}
+            try:
+                if (terms_digest != review.terms_digest or approved_max_cost_usd != review.max_cost_usd):
+                    raise RiskRejected("Explicit confirmation does not match the reviewed trade")
+                profile_digest = self._gate(for_submit=True)
+                if profile_digest != review.profile_digest:
+                    raise RiskRejected("Native launch scope changed; review the trade again")
+                candidate = await self._fresh_candidate(review.market_id, review.venue, review.outcome, review.max_cost_usd)
+                if self._terms(candidate) != review.terms_digest:
+                    raise RiskRejected("Trade size, price, model or edge changed; review the trade again")
+                with self.engine.risk.manual_order(candidate.intent.id):
+                    order = await self.engine.native.execute(candidate, execution_origin="manual")
+                return {"order": order.model_dump(mode="json"), "automation_enabled": self.engine.risk.auto_trade,
+                        "note": "Order acknowledgement is not a fill. Check the native ledger and reconciliation."}
+            finally:
+                # Consuming the owner confirmation always returns this local
+                # workspace to a disarmed state, including unknown outcomes.
+                self.engine.risk.halt("Single-use manual review consumed; reconcile before another attempt")

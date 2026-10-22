@@ -38,7 +38,7 @@ def mapping(market, venue="kalshi", **kwargs):
 def kalshi_snapshot(ts):
     return {"type": "orderbook_snapshot", "sid": 4, "seq": 2, "sending_ts_ms": ts,
             "msg": {"market_ticker": "TICKER", "yes_dollars_fp": [["0.40", "2.25"]],
-                    "no_dollars_fp": [["0.50", "3.50"], ["0.45", "2.00"]]}}
+                    "no_dollars_fp": [["0.50", "3.50"], ["0.55", "2.00"]]}}
 
 
 def test_kalshi_preserves_fractional_depth_and_oldest_untouched_clock(market):
@@ -60,7 +60,7 @@ def test_kalshi_preserves_fractional_depth_and_oldest_untouched_clock(market):
     assert second.provider_time > first.provider_time
     assert mapper.process("kalshi", client, delta) == []
     # Remove the untouched old rung; now the remaining source clock advances.
-    delta = {**delta, "seq": 4, "msg": {**delta["msg"], "price_dollars": "0.45", "delta_fp": "-2.00"}}
+    delta = {**delta, "seq": 4, "msg": {**delta["msg"], "price_dollars": "0.55", "delta_fp": "-2.00"}}
     client.book.apply(delta)
     assert mapper.process("kalshi", client, delta)[0][1].source_time > first.source_time
 

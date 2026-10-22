@@ -227,12 +227,15 @@ class NativeRuntime:
                                      and not order.venue_order_id and order.filled_quantity == 0))),
                 frozenset(risk.settled), frozenset(self.manager.invalidated_settlements))
 
-    def require_preflight(self, order):
+    def require_preflight(self, order, *, preview_only=False):
         report = self.report()
         manual = order.execution_origin == "manual" and self.engine.risk.manual_order_active(order.id)
-        if not ((report.live_trading_ready or report.sandbox_trading_ready) or
+        dry_run = (preview_only and order.execution_origin == "manual"
+                   and report.safe_to_arm and self.engine.settings.live_enabled)
+        if not (dry_run or (not preview_only and (
+                report.live_trading_ready or report.sandbox_trading_ready or
                 (manual and report.safe_to_arm and self.engine.settings.live_enabled
-                 and not self.engine.risk.kill_switch)):
+                 and not self.engine.risk.kill_switch)))):
             raise RiskRejected("Native release gate has unresolved checks")
         p = self.profile_for(order.venue)
         if (p is None or order.venue != p.venue or order.mode != p.environment or
@@ -259,10 +262,21 @@ class NativeRuntime:
         if snapshot is None or snapshot.balance_usd is None or snapshot.balance_usd < required:
             raise RiskRejected("Authenticated native cash balance cannot cover reserved exposure")
         from ..venues.bridge import NativePreflight
-        adapter = self.manager.adapters[order.venue]
-        adapter.preflight = NativePreflight(environment=p.environment, account_authorized=True,
-            geographic_eligibility_verified=p.environment == "production", native_trading_enabled=True,
-            evidence=p.digest(), valid_until=min(time.time()+5, *(e.expires_at.timestamp() for e in p.evidence)))
+        if not preview_only:
+            adapter = self.manager.adapters[order.venue]
+            adapter.preflight = NativePreflight(environment=p.environment, account_authorized=True,
+                geographic_eligibility_verified=p.environment == "production", native_trading_enabled=True,
+                evidence=p.digest(), valid_until=min(time.time()+5, *(e.expires_at.timestamp() for e in p.evidence)))
+
+    def preview_check(self, order):
+        """Run the placement economics and risk checks without issuing authority."""
+        if not self.manager.recovered or order.venue not in self.manager.adapters:
+            raise RiskRejected("Native recovery or execution adapter is unavailable")
+        if not self.owns_execution_lease():
+            raise RiskRejected("Native execution lease is unavailable")
+        self.require_preflight(order, preview_only=True)
+        self.revalidate_order(order)
+        self.engine.risk.check_native_reservation(order, preview_only=True)
 
     def revalidate_order(self, order):
         from .native_pricing import native_revalidate_intent
