@@ -120,6 +120,43 @@ async def test_parlay_props_requests_documented_native_status_link_evidence():
         await provider.fetch_props("basketball_nba")
 
 
+async def test_parlay_coverage_uses_documented_free_diagnostics():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        assert request.headers["X-API-Key"] == "fixture-secret"
+        assert request.url.params["bookmakers"] == "pinnacle,fanduel"
+        return httpx.Response(200, json={"sources": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ParlayRest({"enabled": True, "session_request_budget": 1},
+                              client=client, credential="fixture-secret")
+        await provider.discover_props_coverage("basketball_nba", bookmakers="pinnacle,fanduel")
+        await provider.discover_odds_coverage("basketball_nba", bookmakers="pinnacle,fanduel")
+        assert paths == ["/v1/sports/basketball_nba/props/coverage",
+                         "/v1/sports/basketball_nba/odds/coverage"]
+        assert provider.quota.billable_requests == 0
+
+
+async def test_parlay_stale_board_header_is_preserved_for_normalization():
+    def handle(request):
+        return httpx.Response(200, json=[], headers={
+            "X-Parlay-Stale": "props_scan_busy",
+            "X-Parlay-Stale-Built-At": "2026-10-20T19:00:00Z",
+            "X-Parlay-Stale-Age-Seconds": "9",
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = ParlayRest({"enabled": True}, client=client, credential="fixture-secret")
+        frame = await provider.fetch_props("basketball_nba")
+        assert frame.metadata["headers"] == {
+            "x-parlay-stale": "props_scan_busy",
+            "x-parlay-stale-built-at": "2026-10-20T19:00:00Z",
+            "x-parlay-stale-age-seconds": "9",
+        }
+
+
 async def test_owls_bearer_uses_publication_not_quote_time():
     def handle(request):
         assert request.headers["Authorization"] == "Bearer fixture-secret"

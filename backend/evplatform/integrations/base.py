@@ -338,6 +338,7 @@ class RestProvider:
                 if key.startswith(("x-result-", "x-markets-")) or key in {
                     "x-next-offset", "x-provider-state", "x-requests-remaining",
                     "x-requests-used", "x-requests-last",
+                    "x-parlay-stale", "x-parlay-stale-built-at", "x-parlay-stale-age-seconds",
                 }
             }
             return ProviderEnvelope(self.provider_id, "snapshot", body, received, received_ns,

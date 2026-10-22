@@ -116,6 +116,8 @@ def test_transport_completeness_flags_do_not_get_discarded(body, reason):
     ({"x-result-truncated": "true"}, "truncated_response"),
     ({"x-result-has-more": "true", "x-next-offset": "500"}, "paginated_response_not_atomic"),
     ({"x-result-degraded": "fanduel,draftkings"}, "degraded_source"),
+    ({"x-parlay-stale": "props_scan_busy", "x-parlay-stale-age-seconds": "10"},
+     "stale_cached_board"),
 ])
 def test_rest_headers_survive_into_quote_completeness(headers, reason):
     raw = ProviderEnvelope("parlay_rest", "props_snapshot", [parlay_row()], NOW, 1,

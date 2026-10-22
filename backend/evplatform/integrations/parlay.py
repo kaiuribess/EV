@@ -73,6 +73,16 @@ class ParlayRest(RestProvider):
     async def discover_bookmakers(self) -> ProviderEnvelope:
         return await self.request("/v1/bookmakers")
 
+    async def discover_props_coverage(self, sport: str, **filters: Any) -> ProviderEnvelope:
+        """Free diagnostic using the same filters as the documented props feed."""
+        return await self.request(f"/v1/sports/{safe_component(sport)}/props/coverage",
+                                  params=filters, cost=0)
+
+    async def discover_odds_coverage(self, sport: str, **filters: Any) -> ProviderEnvelope:
+        """Free diagnostic for the current game-line board and source coverage."""
+        return await self.request(f"/v1/sports/{safe_component(sport)}/odds/coverage",
+                                  params=filters, cost=0)
+
     async def fetch_snapshot(self, sport: str, **filters: Any) -> ProviderEnvelope:
         params: dict[str, Any] = {
             "markets": ",".join(self.config.markets),

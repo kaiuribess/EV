@@ -1,5 +1,31 @@
 # Live readiness audit — October 21, 2026
 
+## Existing-key follow-up (02:42 UTC October 22)
+
+Only the already configured ParlayAPI and Oddize credentials were used. Parlay's
+documented credit-free `/props/coverage` and `/odds/coverage` checks now have
+adapter methods and a local `scripts/check_parlay_coverage.py` diagnostic. The
+NBA check reported five pregame games on the requested main-line board:
+FanDuel at five, Pinnacle at three, Caesars and DraftKings at one each. Its
+60-minute `player_points` coverage view listed 148 API-visible FanDuel rows,
+five DraftKings rows and two Pinnacle rows. These are coverage counts, **not**
+fresh active quote sets; `latest_update` is a price-change clock. A separate
+metered two-minute-age props request immediately afterward returned zero rows.
+Neither result supplied the three independent, complete, exact-market,
+active-status-verified references needed by the proposed NBA prop profile.
+The coverage script reserved zero credits. Coverage will change with the game
+schedule; rerun the script for a current diagnostic. The full backend suite
+passed **2,060 tests** after these changes.
+
+Parlay's current contract can return a previously built props board with
+`X-Parlay-Stale: props_scan_busy`. The HTTP transport now retains that header,
+and normalization marks the resulting offer `stale_cached_board`, refusing to
+mark its paired outcomes complete. This avoids treating a new HTTP receipt as
+proof that a cached board is a current sportsbook offer. Focused offline tests
+cover the header and the zero-credit discovery endpoints. The production
+workspace still has no reviewed launch profile or eligible native candidate;
+automatic real orders remain disabled.
+
 ## October 21 evening follow-up (01:23 UTC October 22)
 
 The paused production workspace now uses ProphetX's authenticated tournament

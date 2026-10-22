@@ -195,6 +195,11 @@ def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | Non
         if scope.get("snapshot_complete") is False:
             return "incomplete_snapshot"
     headers = envelope.metadata.get("headers", {})
+    # Parlay can return a previously built props board when its scan is busy.
+    # A fresh HTTP receipt and a row's old collector clock do not establish
+    # that the cached board still represents currently offered outcomes.
+    if headers.get("x-parlay-stale"):
+        return "stale_cached_board"
     if str(headers.get("x-result-truncated", "")).lower() == "true":
         return "truncated_response"
     if str(headers.get("x-result-has-more", "")).lower() == "true" or headers.get("x-next-offset"):

@@ -396,3 +396,12 @@ extension points for arbitrage, middles, steam, external models and unusual
 contracts; those strategies and payout models are not falsely presented as
 implemented.
 
+To check which books currently appear in Parlay's NBA game and prop coverage
+without spending odds credits, run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\check_parlay_coverage.py
+```
+
+Coverage counts do not establish that an individual quote is active or eligible
+for live execution.
