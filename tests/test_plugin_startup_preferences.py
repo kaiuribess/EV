@@ -207,6 +207,20 @@ async def test_stored_unknown_and_execution_flags_cannot_change_core_mode_defaul
         assert saved_preferences(client) == {"offline_feed": True}
 
 
+def test_explicit_native_workspace_starts_signal_strategy_without_arming(tmp_path, offline_plugins):
+    settings = Settings(_env_file=None, database_path=str(tmp_path / "native-signals.db"),
+                        data_dir=str(tmp_path), mode="production", live_enabled=True,
+                        auto_trade=True, sample_feed_enabled=False)
+    with TestClient(create_app(settings)) as client:
+        engine = client.app.state.engine
+        assert engine.registry.records["native_positive_ev"].enabled
+        assert not engine.risk.auto_trade
+        engine.risk.halt("Offline emergency stop")
+        assert engine.registry.records["native_positive_ev"].enabled
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        assert not engine.risk.native_orders
+
+
 @pytest.mark.parametrize("dependencies", [("missing",), ("offline_feed",)])
 async def test_restored_flags_do_not_revive_missing_or_cyclic_dependencies(tmp_path, offline_plugins, dependencies):
     starts, inputs = offline_plugins

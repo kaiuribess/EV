@@ -86,7 +86,11 @@ class Engine:
         self.registry.register(DemoInput(), enabled=(self.settings.mode in {"demo", "paper"}
                                                   and self.settings.sample_feed_enabled))
         self.registry.register(PositiveEV(), enabled=True)
-        self.registry.register(NativePositiveEV(), enabled=False)
+        # The native pricing strategy only emits signals. Starting an explicitly
+        # requested native workspace must not leave its reviewed strategy absent
+        # from readiness; the separate risk controls still veto all orders.
+        self.registry.register(NativePositiveEV(), enabled=(self.settings.mode in {"sandbox", "production"}
+            and self.settings.live_enabled))
         self.registry.register(ParlayPaperEV(), enabled=(self.settings.mode == "paper"
             and not self.settings.sample_feed_enabled))
         self.registry.register(ParlayPaperInput(self), enabled=False)
