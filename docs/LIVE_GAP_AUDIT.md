@@ -650,3 +650,20 @@ not a claim that those books never supply valid quotes. The current
 [Parlay WebSocket contract](https://api.parlay-api.com/docs/websocket) also says
 complete board snapshots and book heartbeats do not verify each retained
 outcome; there is no defensible status shortcut from a recent message alone.
+
+### Kalshi account diagnostic repair, October 22
+
+The first read-only Kalshi account check above hit HTTP 429 at its second
+`/portfolio/balance` read. The diagnostic had fetched a balance independently
+and then called the complete inventory probe, which fetched it again. Kalshi's
+[current rate-limit contract](https://docs.kalshi.com/getting_started/rate_limits)
+puts this endpoint in a separate no-burst bucket with a one-per-second Basic
+limit. The diagnostic now derives its balance display from the inventory probe's
+single authenticated balance read, retaining an allowlisted route label on an
+HTTP error. It never retries a write.
+
+After this change, an authenticated production read-only check completed with
+verified Kalshi key/account identity, trading permission, available cash and
+reconciled empty inventory. The diagnostic explicitly remains **not** a launch
+certificate. There are still no approved real market mappings, qualifying
+reference quotes or reviewed launch profiles, so automatic orders remain off.

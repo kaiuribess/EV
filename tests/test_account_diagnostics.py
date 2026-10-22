@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from evplatform.core.models import utcnow
 from evplatform.venues.account_probe import NativeAccountSnapshot
 from evplatform.venues.common import VenueHTTPError
+from evplatform.venues.kalshi import KalshiClient
 from evplatform.venues.novig import NovigClient
 
 
@@ -41,6 +42,52 @@ async def test_kalshi_demo_diagnostic_selects_only_demo_pair(monkeypatch):
             "KALSHI_API_KEY_ID": "production", "KALSHI_PRIVATE_KEY_PATH": "production-path",
             "KALSHI_SANDBOX_API_KEY_ID": "demo", "KALSHI_SANDBOX_PRIVATE_KEY_PATH": "demo-path"})
     assert selected == [("kalshi", "sandbox", ["demo", "demo-path"])]
+
+
+@pytest.mark.asyncio
+async def test_kalshi_rate_limit_reports_only_allowlisted_read_route(monkeypatch):
+    monkeypatch.setattr(KalshiClient, "headers", lambda *args, **kwargs: {})
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("/portfolio/balance"):
+            return httpx.Response(200, json={"balance_dollars": "50.00"})
+        return httpx.Response(429, json={"error": "too many requests", "secret": "never-echo"})
+    result = await diagnostic.check_account("kalshi", "production", environ={
+        "KALSHI_API_KEY_ID": KEY, "KALSHI_PRIVATE_KEY_PATH": "private-secret-path"},
+        transport=httpx.MockTransport(handler))
+    failure = result["checks"]["account_inventory"]
+    assert failure["http_status"] == 429 and failure["read_route"] == "api_keys"
+    assert [r.method for r in requests] == ["GET"]
+    assert all(secret not in json.dumps(result) for secret in (KEY, "private-secret-path", "never-echo"))
+
+
+@pytest.mark.asyncio
+async def test_kalshi_diagnostic_reads_balance_once_with_inventory(monkeypatch):
+    monkeypatch.setattr(KalshiClient, "headers", lambda *args, **kwargs: {})
+    routes = []
+    def handler(request):
+        path = request.url.path
+        routes.append(path)
+        if path.endswith("/api_keys"):
+            return httpx.Response(200, json={"api_keys": [{"api_key_id": KEY,
+                "scopes": ["read", "write::trade"], "subaccount": 0}]})
+        if path.endswith("/portfolio/balance"):
+            return httpx.Response(200, json={"balance_dollars": "50.00"})
+        if path.endswith("/portfolio/orders"):
+            return httpx.Response(200, json={"orders": [], "cursor": ""})
+        if path.endswith("/portfolio/positions"):
+            return httpx.Response(200, json={"market_positions": [], "cursor": ""})
+        pytest.fail("Unexpected Kalshi diagnostic route")
+    result = await diagnostic.check_account("kalshi", "production", environ={
+        "KALSHI_API_KEY_ID": KEY, "KALSHI_PRIVATE_KEY_PATH": "private-secret-path"},
+        transport=httpx.MockTransport(handler))
+    assert routes.count("/trade-api/v2/portfolio/balance") == 1
+    assert result["checks"]["balance_read"] == {
+        "ok": True, "reported_balance_usd": "50.00", "source": "account_inventory"}
+    inventory = result["checks"]["account_inventory"]
+    assert inventory["identity_verified"] and inventory["reconciled"]
+    assert not inventory["live_readiness_verified"]
 
 
 async def test_scoped_production_diagnostic_never_falls_back_to_legacy_pair(monkeypatch):

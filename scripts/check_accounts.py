@@ -114,7 +114,16 @@ def balance_summary(venue, raw):
             **clock_summary(row.get("lastUpdated"))}
 
 
-def read_guard(venue, environment):
+_KALSHI_READ_ROUTES = {
+    "/trade-api/v2/api_keys": "api_keys",
+    "/trade-api/v2/portfolio/balance": "balance",
+    "/trade-api/v2/portfolio/orders": "orders",
+    "/trade-api/v2/portfolio/positions": "positions",
+    "/trade-api/v2/exchange/user_data_timestamp": "user_data_timestamp",
+}
+
+
+def read_guard(venue, environment, route_trace=None):
     hosts = {
         "kalshi": {httpx.URL(KalshiClient.HOSTS[environment]).host},
         "novig": {httpx.URL(NovigClient.HOSTS[environment]).host},
@@ -128,6 +137,10 @@ def read_guard(venue, environment):
         if (request.url.scheme != "https" or request.url.host not in hosts[venue]
                 or (request.method != "GET" and not permitted_login)):
             raise RuntimeError("Account diagnostic cannot transmit account mutations")
+        if route_trace is not None:
+            # This is an allowlisted route label, never a URL or query value.
+            route_trace["route"] = (_KALSHI_READ_ROUTES.get(request.url.path, "other")
+                                    if venue == "kalshi" else "other")
     return guard
 
 
@@ -169,8 +182,9 @@ async def check_account(venue, environment="production", *, environ=None, transp
     if venue == "polymarket_us" and environment != "production":
         result["blocker"] = "No documented personal US sandbox configured"
         return result
+    route_trace = {}
     async with httpx.AsyncClient(timeout=10, transport=transport,
-                                 event_hooks={"request": [read_guard(venue, environment)]}) as http:
+                                 event_hooks={"request": [read_guard(venue, environment, route_trace)]}) as http:
         client = build_client(venue, environment, values, http)
         management_client = None
         if venue == "novig" and all(management_values):
@@ -182,10 +196,24 @@ async def check_account(venue, environment="production", *, environ=None, transp
                 pass
         try:
             async with asyncio.timeout(35):
+                if venue == "kalshi":
+                    # The account inventory already reads balance_dollars. A
+                    # second balance GET immediately beforehand exceeds the
+                    # endpoint's independent no-burst bucket on Basic tier.
+                    try:
+                        snapshot = await probe_native_account(client)
+                        result["checks"]["account_inventory"] = {"ok": True, **snapshot_summary(snapshot)}
+                        if snapshot.balance_usd is not None:
+                            result["checks"]["balance_read"] = {
+                                "ok": True, "reported_balance_usd": money(snapshot.balance_usd),
+                                "source": "account_inventory"}
+                    except Exception as exc:
+                        result["checks"]["account_inventory"] = error_summary(exc)
+                        if isinstance(exc, VenueHTTPError):
+                            result["checks"]["account_inventory"]["read_route"] = route_trace.get("route", "other")
+                    return result
                 try:
-                    if venue == "kalshi":
-                        raw = await client.request("GET", "/portfolio/balance", params={"subaccount": 0})
-                    elif venue == "novig":
+                    if venue == "novig":
                         from urllib.parse import quote
                         raw = await client.request("GET", f"/v3/account/subaccounts/{quote(values[0], safe='')}/balance")
                     elif venue == "prophetx":
