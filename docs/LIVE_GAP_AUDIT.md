@@ -98,6 +98,17 @@ active-status field. The configured Oddize key reported 1,407 of 1,500 monthly
 credits before that probe; automatic all-event, high-frequency prop polling
 would exhaust that allowance. No sampled row was promoted to a live reference.
 
+At **02:00:27 UTC October 22**, a fresh bounded `player_points` Parlay REST
+request with `includeLinks=true` returned 123 FanDuel rows and no Pinnacle,
+DraftKings or Caesars rows in that request. None had both priced sides, a
+recent documented collector-observation pair, or bilateral native links.
+This is a time- and filter-specific observation, not a general coverage claim.
+The diagnostic `python scripts/probe_parlay_prop_status.py` prints counts only
+and consumes the documented three credits. The new Oddize event-context probe
+above found actual bilateral NBA props, but did not supply the missing active
+status; combining the feeds does not turn either source into an eligible live
+reference.
+
 The paused production Kalshi monitor completed a fresh read-only inventory:
 identity, $50.00 available cash, zero open orders/positions, trading permission
 and the current location attestation were reported verified. The local pilot
