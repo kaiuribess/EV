@@ -1,6 +1,6 @@
 # NBA moneyline path audit — 2026-10-22
 
-All times below are UTC. This is an inspection of the current `f78bb41` checkout plus the changes in this working tree, not a claim of live execution. No production placement request was sent.
+All times below are UTC. The inspected baseline was `f78bb41`; the repaired review branch is `41bdd37`. The mapper, launch setup and pricing files named in the root cause are unchanged from the baseline. This is not a claim of live execution. No production placement request was sent.
 
 ## A. Root cause
 
