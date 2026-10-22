@@ -691,3 +691,25 @@ there is still no approved exact market/settlement mapping, current active
 reference quote or profitable executable offer for a pilot order.
 The local read-only artifact is `data/kalshi-nba-crosswalk-20261022-v4.json`;
 its 40 candidates are not executable mappings.
+
+### Live Parlay NBA game-line status probe, October 22 at 17:18 UTC
+
+A bounded, authenticated REST probe requested NBA full-game moneylines from
+Pinnacle, FanDuel and DraftKings, using `includeLinks=true` and the production
+normalizer's existing evidence rules. It returned 30 two-sided offers: 14
+FanDuel, 14 Pinnacle and 2 DraftKings. All 14 FanDuel offers had the documented
+per-side native links that indicate an OPEN market and ACTIVE runners at the
+stored observation. **Zero** offers carried a quote-bound collector observation
+inside the 120-second limit, so **zero** had both active-status and current
+observation evidence. The diagnostic spent at most one requested REST credit
+and printed no odds, event IDs, links or credentials. Repeat with
+`python scripts/probe_parlay_game_status.py --sport basketball_nba --books pinnacle,fanduel,draftkings --markets h2h`.
+
+The [Parlay game-line documentation](https://api.parlay-api.com/docs) describes
+`verified_at` as a book/fixture poll heartbeat rather than a market or outcome
+verification. It also says a complete REST/stream baseline and recent frame do
+not prove that unchanged or withdrawn offers remain active. The FanDuel links
+therefore close only the status half of the evidence check, not the independent
+quote-clock half. Production still reports zero approved native markets, zero
+qualifying real reference markets and no launch profile; automatic real orders
+remain off with the kill switch on.
