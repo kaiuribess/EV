@@ -44,10 +44,42 @@ def summarize_markets(payload: dict, *, limit: int) -> dict:
         # Only explicit fields relevant to a review. Do not turn the catalog
         # representation into an executable order book or infer settlement.
         selection_count = len(selections) if isinstance(selections, list) else None
+        # The catalog may group opposing selections in nested lists. Expose
+        # only bounded public strike identifiers and labels for manual review;
+        # no executable price, stake, wallet, or raw provider object leaves
+        # this endpoint. Unknown shapes stay unknown rather than being parsed
+        # into a purportedly complete two-sided market.
+        selection_review = []
+        selection_review_truncated = False
+        if isinstance(selections, list):
+            groups = selections if selections and all(isinstance(group, list) for group in selections) else [selections]
+            selection_review_truncated = len(groups) > 20 or any(
+                isinstance(group, list) and len(group) > 20 for group in groups[:20])
+            for group_index, group in enumerate(groups[:20]):
+                if not isinstance(group, list):
+                    continue
+                for selection in group[:20]:
+                    if not isinstance(selection, dict):
+                        continue
+                    selection_review.append({
+                        "group": group_index,
+                        "strike_id": _label(selection.get("strike_id"), 64),
+                        "outcome_id": _label(selection.get("outcome_id"), 64),
+                        "name": _label(selection.get("name"), 120),
+                        "line": _label(selection.get("line"), 40),
+                        "status": _label(selection.get("status"), 40),
+                        "updated_at": _label(selection.get("updated_at"), 40),
+                    })
+                    if len(selection_review) >= 50:
+                        break
+                if len(selection_review) >= 50:
+                    break
         markets.append({"id": _label(row.get("id"), 40), "name": _label(row.get("name")),
                         "type": _label(row.get("type"), 50), "sub_type": _label(row.get("sub_type"), 100),
                         "status": _label(row.get("status"), 40), "period": _label(row.get("period"), 40),
                         "selection_count": selection_count,
+                        "selection_review": selection_review,
+                        "selection_review_truncated": selection_review_truncated or len(selection_review) >= 50,
                         "selection_shape": ("nested" if isinstance(selections, list) and selections and isinstance(selections[0], list)
                                             else "flat" if isinstance(selections, list) and selections and isinstance(selections[0], dict)
                                             else "empty" if selections == [] else "unknown")})

@@ -27,7 +27,28 @@ def test_catalog_summaries_are_bounded_allowlists():
     ]}}, limit=1)
     assert markets["markets"][0]["selection_shape"] == "nested"
     assert markets["markets"][0]["selection_count"] == 1
+    assert markets["markets"][0]["selection_review"][0]["strike_id"] == "test"
+    assert markets["markets"][0]["selection_review_truncated"] is False
     assert markets["mapping_verified"] is False and "private" not in str(markets)
+
+
+def test_market_review_exposes_bounded_public_strike_fields_without_prices_or_private_metadata():
+    payload = {"data": {"markets": [{"id": 9, "name": "Moneyline", "selections": [
+        [{"strike_id": "home", "outcome_id": 1, "name": "Home", "line": "1.5",
+          "status": "active", "updated_at": 1800000000, "price": -120,
+          "value": "999", "private_token": "never-expose"}],
+        [{"strike_id": "away", "outcome_id": 2, "name": "Away", "price": 110}],
+    ]}]}}
+    summary = summarize_markets(payload, limit=1)
+    reviewed = summary["markets"][0]["selection_review"]
+    assert [(row["group"], row["strike_id"], row["outcome_id"]) for row in reviewed] == [
+        (0, "home", "1"), (1, "away", "2")]
+    assert reviewed[0]["updated_at"] == "1800000000"
+    assert "never-expose" not in str(summary) and "999" not in str(summary)
+    assert "price" not in str(summary) and summary["mapping_verified"] is False
+    many = {"data": {"markets": [{"id": 1, "selections": [{"strike_id": str(i)} for i in range(60)]}]}}
+    bounded = summarize_markets(many, limit=1)["markets"][0]
+    assert len(bounded["selection_review"]) == 20 and bounded["selection_review_truncated"] is True
 
 
 @pytest.mark.parametrize("payload", [{}, {"data": {}}, {"data": {"markets": None}}])

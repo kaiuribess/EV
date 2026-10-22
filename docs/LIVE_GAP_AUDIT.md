@@ -43,6 +43,35 @@ Polymarket US all reported authenticated streaming again; automatic orders
 remained off and the native order ledger remained empty. The full backend
 suite then passed **2,034 tests**.
 
+One authenticated, metered `GET /v1/sports/basketball_nba/live` with
+`include=normalized,verification` returned eight in-play events. In the
+sampled response, the `is_current`/`verified_at` fields were on a bookmaker
+block; the market had only `key`, `last_update`, and `outcomes`, and an outcome
+had only `name` and `price`. No active/suspended field bound to an individual
+outcome appeared. This matches Parlay's [specific verification caveat](https://parlay-api.com/docs):
+the bookmaker heartbeat does not prove each retained outcome is available.
+An in-play event filter therefore still cannot be promoted to a current quote
+or live execution permission.
+
+The read-only ProphetX market catalog review now exposes bounded public
+selection labels and strike IDs, without executable prices or account data.
+For the October 21 Lakers–Warriors listing, its full-game moneyline contained
+two distinct named strikes. An exact-label candidate crosswalk found **12**
+source-book rows in the retained review window: seven Oddize and five Parlay
+REST. None supplied verified active quote status. The source quarantine was
+capped and the 50-market native catalog response was truncated, so 12 is not
+an exhaustive feed count. Selection `updated_at` values in this bounded live
+sample were 19-digit numbers consistent with nanosecond Unix times, but the
+published contract still does not specify a unit; the engine does not promote
+that empirical observation into a verified execution clock. The report preserves
+`market_mapping_verified=false`, `settlement_equivalence_verified=false`, and
+`execution_authorized=false`. Re-run the current read-only review with:
+
+```powershell
+$env:PYTHONPATH = 'backend'
+.\.venv\Scripts\python.exe scripts\review_event_crosswalk.py --url http://127.0.0.1:8002 --tournament-id 132 --event-id 1700099993
+```
+
 **Result: blocked.** Rechecked the local application, authenticated account
 history, quarantined real prices, and current official API documentation. No
 orders, cancellations, transfers, or live activation were performed.

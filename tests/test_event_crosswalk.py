@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from evplatform.integrations.event_crosswalk import event_candidates
+from evplatform.integrations.event_crosswalk import event_candidates, moneyline_candidates
 
 
 NATIVE = {"events": [{"event_id": "1700099993", "name": "Golden State Warriors at Los Angeles Lakers",
@@ -53,3 +53,61 @@ def test_duplicate_native_fixture_is_ambiguous_not_assumed_equivalent():
     assert result["matches"] == [] and result["ambiguous_source_events"] == 2
     with pytest.raises(ValueError):
         event_candidates(NATIVE, SOURCE, max_start_delta_seconds=901)
+
+
+def _market_review():
+    return {"truncated": False, "markets": [{"id": "219", "name": "Moneyline",
+        "type": "moneyline", "sub_type": "moneyline", "status": "active", "period": None,
+        "selection_shape": "nested", "selection_review_truncated": False,
+        "selection_review": [
+            {"group": 0, "name": "Los Angeles Lakers", "strike_id": "lakers", "outcome_id": "4"},
+            {"group": 0, "name": "Los Angeles Lakers", "strike_id": "lakers", "outcome_id": "4"},
+            {"group": 1, "name": "Golden State Warriors", "strike_id": "warriors", "outcome_id": "5"},
+        ]}]}
+
+
+def _source_moneylines():
+    source = deepcopy(SOURCE)
+    source["items"][0].update(signature="a" * 64, observation={
+        "decimal_odds": {"home": "1.5", "away": "2.7"},
+        "source_observed_at": None, "observation_verified": False,
+        "market_status_verified": False})
+    source["items"][0]["identity"].update(market_key="h2h", player_key=None,
+        line=None, period=None, outcome_points={"home": None, "away": None})
+    source["items"][1].update(signature="b" * 64, observation={
+        "decimal_odds": {"LAL": "1.6", "GSW": "2.5"},
+        "source_observed_at": "2026-10-22T01:00:00Z", "observation_verified": True,
+        "market_status_verified": False})
+    source["items"][1]["identity"].update(market_key="ml", player_key=None,
+        line=None, period=None, outcome_points={"LAL": None, "GSW": None})
+    return source
+
+
+def test_moneyline_review_preserves_exact_strikes_and_source_gaps_without_mapping():
+    source = _source_moneylines()
+    result = moneyline_candidates(event_candidates(NATIVE, source), source, _market_review(),
+                                  native_event_id="1700099993")
+    assert result["candidate_count"] == 2
+    assert {row["bookmaker"] for row in result["candidates"]} == {"pinnacle", "circa"}
+    assert result["candidates"][0]["native_outcomes"]["Los Angeles Lakers"]["strike_id"] == "lakers"
+    assert result["candidates"][0]["source_market_status_verified"] is False
+    assert result["market_mapping_verified"] is False
+    assert result["settlement_equivalence_verified"] is False
+    assert result["execution_authorized"] is False
+
+
+@pytest.mark.parametrize("change", [
+    lambda s, m: s["items"][0]["identity"].update(line="1.5"),
+    lambda s, m: s["items"][0]["identity"].update(period="first_half"),
+    lambda s, m: s["items"][0]["identity"].update(outcome_points={"home": "1.5", "away": None}),
+    lambda s, m: s["items"][0]["observation"].update(decimal_odds={"home": "1.5"}),
+    lambda s, m: m["markets"][0].update(status="suspended"),
+    lambda s, m: m["markets"][0].update(selection_review_truncated=True),
+    lambda s, m: m["markets"][0]["selection_review"][0].update(strike_id="other"),
+])
+def test_moneyline_review_rejects_changed_or_ambiguous_shape(change):
+    source, market = _source_moneylines(), _market_review()
+    change(source, market)
+    result = moneyline_candidates(event_candidates(NATIVE, source), source, market,
+                                  native_event_id="1700099993")
+    assert not any(row["provider"] == "parlay_rest" for row in result["candidates"])
