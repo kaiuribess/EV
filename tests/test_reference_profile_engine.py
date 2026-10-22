@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from evplatform.core.config import Settings
-from evplatform.core.models import Envelope, utcnow
+from evplatform.core.models import Candidate, Envelope, utcnow
 from evplatform.core.launch_setup import launch_setup
 from evplatform.core.profile_import import compile_priors
 from evplatform.core.risk import RiskRejected
@@ -18,6 +18,52 @@ from evplatform.plugins.demo import demo_frame
 
 def research_config():
     return compile_priors(json.loads((Path(__file__).parents[1] / "config/book_weight_priors_2026-10-20.json").read_text()))
+
+
+async def test_repeated_no_candidate_evaluations_do_not_flood_durable_audit(tmp_path):
+    engine = Engine(Settings(_env_file=None, database_path=str(tmp_path / "bounded-audit.db"),
+        mode="paper", sample_feed_enabled=False))
+    market = next(payload for schema, payload in demo_frame(0, origin=utcnow())
+                  if schema == "sports.market")
+    await engine.start()
+    try:
+        for index in range(100):
+            await engine._record_signal(market, "NO SIGNAL", f"Still no complete reference {index}")
+        await engine.signal_queue.join()
+        await engine.audit_queue.join()
+        await engine.storage.queue.join()
+        count = (await (await engine.storage.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE schema_name='signal.observation'")).fetchone())[0]
+        assert count == 1
+        assert engine.metrics.counters["coalesced_no_signal_evaluations"] == 99
+        identity, status, previous, quote_count = engine._signal_audit_state[market.id]
+        engine._signal_audit_state[market.id] = identity, status, previous - 61, quote_count
+        await engine._record_signal(market, "NO SIGNAL", "Periodic unchanged-state evidence")
+        await engine.signal_queue.join()
+        await engine.audit_queue.join()
+        await engine.storage.queue.join()
+        count = (await (await engine.storage.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE schema_name='signal.observation'")).fetchone())[0]
+        assert count == 2
+        candidate = Candidate(strategy="positive_ev", market_id=market.id, venue="paper:test",
+            outcome=market.outcomes[0], price=Decimal(".45"), fair_probability=Decimal(".60"),
+            ev_per_contract=Decimal(".15"), roi=Decimal(".333"), max_quantity=1,
+            book_sequence=1, references=(), calculated_at=utcnow() - timedelta(seconds=1),
+            quote_age_ms=100, synthetic=True)
+        await engine._record_signal(market, "POSITIVE EV", "A new candidate", (candidate,))
+        await engine._record_signal(market, "NO SIGNAL", "Target was withdrawn")
+        await engine._record_signal(market, "NO SIGNAL", "Repeated withdrawn state")
+        await engine.signal_queue.join()
+        await engine.audit_queue.join()
+        await engine.storage.queue.join()
+        count = (await (await engine.storage.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE schema_name='signal.observation'")).fetchone())[0]
+        assert count == 4
+        episode = await (await engine.storage.connection.execute(
+            "SELECT ended_at FROM signal_episodes WHERE market_id=?", (market.id,))).fetchone()
+        assert episode and episode[0] is not None
+    finally:
+        await engine.stop()
 
 
 async def test_research_priors_record_rejections_and_both_methods_without_routing(tmp_path):

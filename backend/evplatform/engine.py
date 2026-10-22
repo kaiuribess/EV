@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime
 from decimal import Decimal
 
@@ -69,6 +69,11 @@ class Engine:
         self.books: dict[str, dict[tuple[str, str], OrderBook]] = {}
         self.opportunities = {}
         self.signals = {}
+        # Full raw inputs stay in the audit log. Repeating an unchanged
+        # no-candidate evaluation for the same market every feed tick otherwise
+        # writes the entire pricing policy and quote universe thousands of
+        # times without creating a new signal episode.
+        self._signal_audit_state = OrderedDict()
         self.history = {}
         self.latest_typed = {}
         self.expirations = []
@@ -285,6 +290,20 @@ class Engine:
                 self.signal_queue.task_done()
 
     async def _record_signal(self, market, status, reason, candidates=()):
+        identity = market.identity()
+        now_monotonic = time.monotonic()
+        quote_count = len(self.quotes.get(market.id, {}))
+        previous = self._signal_audit_state.get(market.id)
+        if (status == "NO SIGNAL" and previous is not None
+                and previous[0] == identity and previous[1] == "NO SIGNAL"
+                and now_monotonic - previous[2] < 60
+                and (previous[3] > 0) == (quote_count > 0)):
+            self.metrics.counters["coalesced_no_signal_evaluations"] += 1
+            return
+        self._signal_audit_state[market.id] = (identity, status, now_monotonic, quote_count)
+        self._signal_audit_state.move_to_end(market.id)
+        while len(self._signal_audit_state) > 10000:
+            self._signal_audit_state.popitem(last=False)
         config = market_config(self.settings.pricing, market)
         eligible = tuple(c.id for c in candidates
                          if c.execution_eligible and c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi)

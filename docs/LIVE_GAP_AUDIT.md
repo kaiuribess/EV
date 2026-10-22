@@ -117,6 +117,23 @@ not a quote-validity or provider-specific TTL result. No source/native mapping
 or launch profile was approved. The local report is
 `data/readiness-review-20261021-evening.json` (ignored by Git).
 
+### Paper audit write-rate repair
+
+The live-paper SQLite file had reached about **7.3 GB**. A read-only count
+found 2,559,544 raw audit events; 1,314,208 were `signal.observation` records
+whose stored payloads occupied about 4.4 GB. A sampled no-candidate record
+repeated roughly 12 KB of pricing policy plus the current reference universe.
+This was repeated evaluation, not 1.3 million independent trading signals.
+The engine now records the initial `NO SIGNAL`, the first arrival or loss of
+reference quotes, and a periodic no-candidate state at most once per market
+per minute. A candidate episode and its subsequent withdrawal are always
+recorded immediately. Every underlying quote/order-book input remains in the
+audit log for replay. The coalesced evaluation count is exposed in metrics.
+An integration test verifies 100 repeated no-candidate evaluations create one
+durable signal observation and that a later candidate withdrawal closes its
+episode. This change bounds future write rate; it does not delete or rewrite
+historical audit data, so the existing database size remains large.
+
 The paused production Kalshi monitor completed a fresh read-only inventory:
 identity, $50.00 available cash, zero open orders/positions, trading permission
 and the current location attestation were reported verified. The local pilot
