@@ -46,9 +46,10 @@ class ProviderBridge(InputPlugin):
     async def start(self, context):
         await self.stop()
         await super().start(context)
-        from ..integrations.normalization import VerifiedProviderMapper
+        from ..integrations.normalization import TrustedSourceProjector, VerifiedProviderMapper
         self.mapper = await asyncio.to_thread(VerifiedProviderMapper.from_file,
             runtime_data_file("verified_mappings.json", self.engine.settings.data_dir))
+        self.mapper.research_projector = TrustedSourceProjector(lambda: self.engine.settings.pricing)
         self.client = self.factory({**context.config, "enabled": True})
         if await self.client.connect():
             self.task = asyncio.create_task(self._run(), name=f"input:{self.manifest.name}")
@@ -109,7 +110,8 @@ class ProviderBridge(InputPlugin):
                     )
                 ):
                     await self._invalidate()
-                for market, quote in self.mapper(raw):
+                mapped = self.mapper(raw)
+                for market, quote in [*mapped, *getattr(self.mapper, "research_updates", ())]:
                     await self.context.bus.publish(Envelope(schema_name="sports.market", source=self.manifest.name, payload=market))
                     await self.context.bus.publish(Envelope(schema_name="odds.quote", source=self.manifest.name, payload=quote))
                 self.engine.metrics.counters[f"provider_messages:{self.manifest.name}"] += 1

@@ -227,6 +227,66 @@ def _validate_market(market: Market, fair: FairValue, book: NativeBook,
     return _settlement_bounds(market, winner_only=config.normal_outcome_policy == "winner_only_binary")
 
 
+def research_native_estimate(market: Market, fair: FairValue, book: NativeBook,
+                             config: PricingConfig, *, now: datetime | None = None) -> dict[str, Any]:
+    """Read-only minimum-lot comparison; never creates an order candidate.
+
+    This keeps a provider-trusted fair estimate visible beside a reviewed
+    native offer while leaving every execution and account gate untouched.
+    """
+    now = now or utcnow()
+    config = market_config(config, market)
+    instrument = book.instrument
+    if config.normal_outcome_policy != "winner_only_binary":
+        raise NoSignal("Research comparison requires winner-only binary pricing")
+    if (not instrument.verified or instrument.canonical_market_id != market.id
+            or book.market_fingerprint != market.identity()
+            or instrument.settlement_rules_fingerprint != settlement_fingerprint(market)
+            or instrument.outcome not in fair.probabilities):
+        raise NoSignal("Reviewed native market/outcome identity is unavailable")
+    if (market.status in {"closed", "suspended"} or book.status != "active"
+            or not book.synchronized or not book.asks or book.synthetic or fair.synthetic):
+        raise NoSignal("Current real native offer is unavailable")
+    age = book.age_ms(now)
+    if (age is None or not 0 <= age <= config.max_book_age_ms or book.received_at > now
+            or book.provider_time is not None and book.provider_time > now):
+        raise NoSignal("Native executable offer is stale or future-dated")
+    if not instrument.order_minimum_verified or instrument.minimum_order_cost_usd is None:
+        raise NoSignal("Native minimum order cost is unverified")
+    if any(reference["bookmaker"] == instrument.venue for reference in fair.references):
+        raise NoSignal("Target venue cannot supply its own fair reference")
+    validate_fair_references(market, fair, config, now)
+    _settlement_bounds(market, winner_only=True)
+    level = book.asks[0]
+    quantity = instrument.minimum_quantity
+    if level.quantity < quantity:
+        raise NoSignal("Insufficient depth at the best executable price for one minimum lot")
+    cost = instrument.cost_for(quantity, level.price)
+    fee_cap = book.fee_bound.maximum_fee(instrument, quantity, now)
+    debit = cost + fee_cap
+    if cost < instrument.minimum_order_cost_usd:
+        raise NoSignal("Minimum lot is below the venue's verified minimum cash order")
+    payout = instrument.minimum_split_payout(quantity, level.price)
+    if payout <= 0 or debit <= 0:
+        raise NoSignal("Native cash units do not support a minimum-lot comparison")
+    outcome = instrument.outcome
+    expected_profit = fair.probabilities[outcome] * payout - debit
+    sensitivity_profit = (fair.sensitivity_probabilities[outcome] * payout - debit
+                          if fair.sensitivity_probabilities else None)
+    return {"market_id": market.id, "venue": instrument.venue,
+            "native_market_id": instrument.instrument_id, "outcome": outcome,
+            "price": str(level.price), "minimum_quantity": str(quantity),
+            "available_at_best_price": str(level.quantity),
+            "cash_cost_usd": str(cost), "conservative_fee_usd": str(fee_cap),
+            "maximum_debit_usd": str(debit), "normal_winning_payout_usd": str(payout),
+            "expected_profit_usd": str(expected_profit), "roi": str(expected_profit / debit),
+            "sensitivity_expected_profit_usd": str(sensitivity_profit) if sensitivity_profit is not None else None,
+            "positive_estimate": expected_profit > 0 and (sensitivity_profit is None or sensitivity_profit > 0),
+            "quality_mode": config.reference_quality_mode,
+            "execution_eligible": False, "reason": "Read-only research comparison; cash, sizing, risk and authorization not checked",
+            "calculated_at": now.isoformat()}
+
+
 def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: PricingConfig,
                     intent: NativeOrderIntent, bounds: NativeSettlementProbabilities | WinnerOnlyNormalOutcome,
                     now: datetime, *, durable_intent: NativeOrderIntent | None = None) -> NativeCandidate:

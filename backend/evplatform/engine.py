@@ -21,7 +21,7 @@ from .core.native_pricing import NativeBook, NativeCandidate
 from .core.native_runtime import NativeRuntime, NativeSignalObservation
 from .core.plugins import ExecutionVenue, InputPlugin, PluginContext, PluginRegistry, StrategyPlugin
 from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, resolved_reference_policy, worst_fee
-from .core.reference_profiles import freshness_rule, quote_eligibility
+from .core.reference_profiles import freshness_rule, quote_eligibility, trusted_quote_research_eligibility
 from .core.risk import RiskEngine, RiskRejected
 from .core.signals import ResultProvenance, SignalLedger, SignalObservation, SignalResultImport
 from .core.storage import Storage
@@ -70,12 +70,14 @@ class Engine:
         self.quote_verification_latches = {}
         self.books: dict[str, dict[tuple[str, str], OrderBook]] = {}
         self.opportunities = {}
+        self.reference_estimates = {}
         self.signals = {}
         # Full raw inputs stay in the audit log. Repeating an unchanged
         # no-candidate evaluation for the same market every feed tick otherwise
         # writes the entire pricing policy and quote universe thousands of
         # times without creating a new signal episode.
         self._signal_audit_state = OrderedDict()
+        self._signal_audit_estimate_fingerprints = {}
         self.history = {}
         self.latest_typed = {}
         self.expirations = []
@@ -300,19 +302,24 @@ class Engine:
         identity = market.identity()
         now_monotonic = time.monotonic()
         input_presence = (bool(self.quotes.get(market.id)), bool(self.books.get(market.id)))
+        estimate = self.reference_estimates.get(market.id)
+        estimate_fingerprint = (tuple(sorted(estimate["probabilities"].items())) if estimate else None)
         previous = self._signal_audit_state.get(market.id)
-        if (status == "NO SIGNAL" and previous is not None
-                and previous[0] == identity and previous[1] == "NO SIGNAL"
+        if (status in {"NO SIGNAL", "RESEARCH ONLY"} and previous is not None
+                and previous[0] == identity and previous[1] == status
                 and now_monotonic - previous[2] < 60
                 and previous[3] == input_presence
-                and previous[4] is self.settings.pricing):
+                and previous[4] is self.settings.pricing
+                and self._signal_audit_estimate_fingerprints.get(market.id) == estimate_fingerprint):
             self.metrics.counters["coalesced_no_signal_evaluations"] += 1
             return
         self._signal_audit_state[market.id] = (identity, status, now_monotonic, input_presence,
                                                self.settings.pricing)
+        self._signal_audit_estimate_fingerprints[market.id] = estimate_fingerprint
         self._signal_audit_state.move_to_end(market.id)
         while len(self._signal_audit_state) > 10000:
-            self._signal_audit_state.popitem(last=False)
+            old_market_id, _ = self._signal_audit_state.popitem(last=False)
+            self._signal_audit_estimate_fingerprints.pop(old_market_id, None)
         config = market_config(self.settings.pricing, market)
         eligible = tuple(c.id for c in candidates
                          if c.execution_eligible and c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi)
@@ -479,6 +486,41 @@ class Engine:
             del self.opportunities[key]
         quotes = list(self.quotes.get(market_id, {}).values())
         books = list(self.books.get(market_id, {}).values())
+        if not market.extensions.get("paper_only"):
+            try:
+                fair = fair_value(market, quotes, self.settings.pricing)
+                from .core.native_pricing import research_native_estimate
+                native_research, native_rejections = [], []
+                matching_native = [book for key, book in self.native.books.items() if key[0] == market_id]
+                for native_book in matching_native:
+                    try:
+                        native_research.append(research_native_estimate(
+                            market, fair, native_book, self.settings.pricing))
+                    except NoSignal as exc:
+                        native_rejections.append(str(exc))
+                self.reference_estimates[market_id] = {
+                    "market_id": market_id, "event_name": market.event_name,
+                    "sport": market.sport, "league": market.league,
+                    "market_type": market.market_type, "player": market.player,
+                    "statistic": market.statistic,
+                    "line": str(market.line) if market.line is not None else None,
+                    "start_time": market.start_time.isoformat(),
+                    "probabilities": {k: str(v) for k, v in fair.probabilities.items()},
+                    "references": list(fair.references),
+                    "model": fair.model, "reference_profile_id": fair.reference_profile_id,
+                    "quality_mode": market_config(self.settings.pricing, market).reference_quality_mode,
+                    "execution_eligible": fair.execution_eligible and not market.extensions.get("research_only"),
+                    "native_market_matched": not market.extensions.get("research_only") and bool(matching_native),
+                    "native_research_estimates": native_research,
+                    "limitations": list(fair.ineligibility_reasons) + ([
+                        "Source identity only; no reviewed native market mapping"] if market.extensions.get("research_only") else [])
+                        + list(dict.fromkeys(native_rejections)),
+                    "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
+                    "status": ("PROVISIONAL POSITIVE EV" if any(
+                        estimate["positive_estimate"] for estimate in native_research)
+                        else "REFERENCE ESTIMATE")}
+            except NoSignal:
+                self.reference_estimates.pop(market_id, None)
         if not any(r.enabled and isinstance(r.plugin, StrategyPlugin) for r in self.registry.records.values()):
             self.signals[market_id] = {"status": "NO SIGNAL", "reason": "Strategy disabled"}
             await self._record_signal(market, **self.signals[market_id])
@@ -517,7 +559,10 @@ class Engine:
                     strategy.health = {"status": "error", "message": f"Strategy stopped: {type(exc).__name__}"}
                     self.risk.halt("Strategy failure")
         if not generated:
-            self.signals[market_id] = {"status": "NO SIGNAL", "reason": "; ".join(reasons) if reasons else "No executable synchronized book"}
+            reference_only = market_id in self.reference_estimates
+            self.signals[market_id] = {"status": "RESEARCH ONLY" if reference_only else "NO SIGNAL",
+                                       "reason": ("Fair sportsbook probability available; no matched executable native offer"
+                                                  if reference_only else "; ".join(reasons) if reasons else "No executable synchronized book")}
             await self._record_signal(market, **self.signals[market_id])
             return
         config = market_config(self.settings.pricing, market)
@@ -549,7 +594,15 @@ class Engine:
                  for q in self.quotes.get(market_id, {}).values() if q.source_time and q.status == "active"]
         if config.reference_profile_mode == "strict":
             market = self.markets[market_id]
-            times = [q.source_observed_at.timestamp() + float(rule.ttl_seconds)
+            if config.reference_quality_mode == "trusted_provider":
+                times = [q.received_at.timestamp() + config.trusted_max_delivery_age_ms / 1000
+                         for q in self.quotes.get(market_id, {}).values()
+                         if q.status in {"active", "unknown"}]
+                times += [q.source_scope_poll_at.timestamp() + config.trusted_max_indicator_age_ms / 1000
+                          for q in self.quotes.get(market_id, {}).values()
+                          if q.source_scope_poll_at and q.status in {"active", "unknown"}]
+            else:
+                times = [q.source_observed_at.timestamp() + float(rule.ttl_seconds)
                      for q in self.quotes.get(market_id, {}).values()
                      if q.source_observed_at and q.observation_verified and q.status == "active"
                      and (rule := freshness_rule(config, market, q.provider, q.bookmaker)) is not None]
@@ -808,18 +861,28 @@ class Engine:
 
     def quote_public(self, quote):
         market = self.markets.get(quote.market_id)
-        strict = self.settings.pricing.reference_profile_mode == "strict"
-        eligible, reasons, age = quote_eligibility(self.settings.pricing, market, quote, utcnow()) if market else (False, ("Unknown market",), None)
+        config = market_config(self.settings.pricing, market) if market else self.settings.pricing
+        strict = config.reference_profile_mode == "strict"
+        trusted = strict and config.reference_quality_mode == "trusted_provider"
+        eligible, reasons, age = ((trusted_quote_research_eligibility(config, market, quote, utcnow()) if trusted
+                                  else quote_eligibility(config, market, quote, utcnow()))
+                                  if market else (False, ("Unknown market",), None))
         paper_age = quote.age_ms()
         paper_usable = (bool(market and market.extensions.get("paper_only"))
             and quote.provider in {"parlay_paper_input", "oddize_paper_input"}
             and (quote.status == "active" or quote.provider == "oddize_paper_input"
                  and quote.status == "unknown") and quote.quality == 1.0
             and paper_age is not None and 0 <= paper_age <= 600000)
-        return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": age,
+        observation_age = ((utcnow() - quote.source_observed_at).total_seconds() * 1000
+                           if quote.observation_verified and quote.source_observed_at else None)
+        poll_age = ((utcnow() - quote.source_scope_poll_at).total_seconds() * 1000
+                    if quote.source_scope_poll_at else None)
+        return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": observation_age,
+                "scope_poll_age_ms": poll_age, "delivery_age_ms": (utcnow() - quote.received_at).total_seconds() * 1000,
+                "trusted_research_usable": trusted and eligible,
                 "execution_freshness_reasons": reasons if strict else (),
                 "paper_comparison_usable": paper_usable,
-                "fresh": quote.status == "active" and (eligible if strict else quote.fresh(self.settings.pricing.max_quote_age_ms))}
+                "fresh": quote.status == "active" and (eligible and not trusted if strict else quote.fresh(config.max_quote_age_ms))}
 
     def market_detail(self, market_id):
         market = self.markets[market_id]
@@ -868,6 +931,7 @@ class Engine:
             "markets": [m.model_dump(mode="json") for m in self.markets.values()],
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
             "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
+            "reference_estimates": list(self.reference_estimates.values()),
             "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
             "native_orders": [o.model_dump(mode="json") for o in list(self.risk.native_orders.values())[-200:]],
             "native_signals": [o.model_dump(mode="json") for o in self.native.signals.values()],

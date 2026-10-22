@@ -5,7 +5,8 @@ from math import isfinite
 
 from .config import PricingConfig
 from .models import Candidate, FairValue, FeeSchedule, Market, OrderBook, Quote, utcnow
-from .reference_profiles import freshness_rule, policy_digest, profile_for_market, quote_eligibility
+from .reference_profiles import (freshness_rule, policy_digest, profile_for_market,
+                                 quote_eligibility, trusted_quote_research_eligibility)
 
 D = Decimal
 
@@ -95,6 +96,7 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
                now: datetime | None = None) -> FairValue:
     now = now or utcnow()
     config, profile_id, profile, digest = resolved_reference_policy(config, market, now)
+    trusted = profile is not None and config.reference_quality_mode == "trusted_provider"
     if market.status in {"suspended", "closed"}:
         raise NoSignal("Market suspended or closed")
     # Select once per bookmaker; multiple API vendors are not independent evidence.
@@ -106,7 +108,8 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
         paper_unknown = (market.extensions.get("paper_only") is True
                          and quote.provider == "oddize_paper_input"
                          and quote.status == "unknown")
-        if quote.market_id != market.id or (quote.status != "active" and not paper_unknown):
+        if quote.market_id != market.id or (quote.status != "active" and not paper_unknown
+                                           and not (trusted and quote.status == "unknown")):
             continue
         if config.normal_outcome_policy == "winner_only_binary" and quote.market_fingerprint != market.identity():
             continue
@@ -124,8 +127,10 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
         if quote.received_at > now or quote.provider_time is not None and quote.provider_time > now:
             continue
         if profile:
-            eligibility = quote_eligibility(config, market, quote, now)
-            clock = quote.source_observed_at if quote.observation_verified else quote.source_time
+            eligibility = (trusted_quote_research_eligibility(config, market, quote, now) if trusted
+                           else quote_eligibility(config, market, quote, now))
+            clock = (quote.received_at if trusted else
+                     quote.source_observed_at if quote.observation_verified else quote.source_time)
             if clock is not None and clock > now:
                 continue
         else:
@@ -134,9 +139,18 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
         def ranking(q):
             if profile is None:
                 return q.source_time, q.quality, config.provider_priority.get(q.provider, 0)
-            valid = quote_eligibility(config, market, q, now)[0]
-            clock = q.source_observed_at if q.observation_verified else q.source_time
-            return valid, clock or datetime.min.replace(tzinfo=timezone.utc)
+            valid = (trusted_quote_research_eligibility(config, market, q, now)[0] if trusted
+                     else quote_eligibility(config, market, q, now)[0])
+            if trusted:
+                indicator = (q.source_observed_at if q.observation_verified else
+                             q.source_scope_poll_at if q.source_scope_is_current is True else None)
+                return (valid, bool(q.observation_verified and q.observation_complete),
+                        q.market_status_verified, q.source_scope_is_current is True,
+                        indicator or datetime.min.replace(tzinfo=timezone.utc),
+                        q.received_at, q.quality, config.provider_priority.get(q.provider, 0))
+            clock = (q.received_at if trusted else
+                     q.source_observed_at if q.observation_verified else q.source_time)
+            return valid, clock or datetime.min.replace(tzinfo=timezone.utc), config.provider_priority.get(q.provider, 0)
         if (profile and current is not None and ranking(quote) == ranking(current)
                 and quote.decimal_odds != current.decimal_odds):
             conflicts.add(quote.bookmaker)
@@ -146,7 +160,7 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
             conflicts.discard(quote.bookmaker)
     if profile:
         usable = {book: quote for book, quote in by_book.items() if diagnostics[book][0] and book not in conflicts}
-        if not conflicts and len(usable) >= config.min_references and set(profile.required_any_anchor) & set(usable) and not (set(config.required_books) - set(usable)):
+        if trusted or (not conflicts and len(usable) >= config.min_references and set(profile.required_any_anchor) & set(usable) and not (set(config.required_books) - set(usable))):
             by_book = usable
     if len(by_book) < config.min_references:
         raise NoSignal("Insufficient fresh independent references")
@@ -180,23 +194,31 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
             reasons.append("Sensitivity-model reference disagreement exceeds configured limit")
     references = []
     for book, quote in sorted(by_book.items()):
-        observed = quote.source_observed_at if profile and quote.observation_verified else quote.source_time
+        observed = (quote.source_observed_at if quote.observation_verified else None) if trusted else (
+            quote.source_observed_at if profile and quote.observation_verified else quote.source_time)
         evidence = {"bookmaker": book, "provider": quote.provider,
             "market_fingerprint": quote.market_fingerprint,
             "age_ms": (now - observed).total_seconds() * 1000 if observed else None,
             "source_time": observed.isoformat() if observed else None, "weight": str(weights[book]),
+            "effective_weight_percent": str(weights[book] / total * 100),
             "probabilities": {k: str(v) for k, v in probabilities[book].items()}}
         if profile:
             rule = freshness_rule(config, market, quote.provider, quote.bookmaker)
             eligible = diagnostics[book][0] and book not in conflicts
             evidence.update({"source_observed_at": quote.source_observed_at.isoformat() if quote.source_observed_at else None,
                 "source_price_changed_at": quote.source_price_changed_at.isoformat() if quote.source_price_changed_at else None,
+                "source_scope_poll_at": quote.source_scope_poll_at.isoformat() if quote.source_scope_poll_at else None,
+                "source_scope_is_current": quote.source_scope_is_current,
+                "provider_delivery_at": quote.provider_time.isoformat() if quote.provider_time else None,
+                "local_receipt_at": quote.received_at.isoformat(),
+                "delivery_age_ms": (now - quote.received_at).total_seconds() * 1000,
+                "status": quote.status, "verification_reason": quote.verification_reason,
                 "observation_verified": quote.observation_verified, "observation_complete": quote.observation_complete,
                 "market_status_verified": quote.market_status_verified,
                 "settlement_equivalence_verified": quote.settlement_equivalence_verified,
                 "normal_outcome_verified": quote.normal_outcome_verified,
                 "normal_outcome_evidence": quote.normal_outcome_evidence,
-                "execution_eligible": eligible,
+                "execution_eligible": eligible and not trusted,
                 "freshness_factor": "1" if eligible else "0", "ttl_seconds": str(rule.ttl_seconds) if rule else None,
                 "sensitivity_probabilities": {k: str(v) for k, v in sensitivity[book].items()}})
         references.append(evidence)
@@ -209,8 +231,9 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
                      # Legacy blends support paper/research. Production needs
                      # an explicitly approved strict profile and its separate
                      # observation/status/TTL and sensitivity requirements.
-                     live_execution_allowed=profile.live_execution_allowed if profile else False,
-                     execution_eligible=not reasons, ineligibility_reasons=tuple(dict.fromkeys(reasons)),
+                     live_execution_allowed=profile.live_execution_allowed if profile and not trusted else False,
+                     execution_eligible=not reasons and not trusted,
+                     ineligibility_reasons=tuple(dict.fromkeys(reasons)),
                      sensitivity_model=profile.sensitivity_devig if profile else None,
                      sensitivity_probabilities=sensitivity_result)
 
@@ -223,9 +246,10 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
     devig/weight/eligibility policy requires a newly calculated fair value.
     """
     config, profile_id, profile, digest = resolved_reference_policy(config, market, now)
+    trusted = profile is not None and config.reference_quality_mode == "trusted_provider"
     if fair.reference_profile_id != profile_id or fair.reference_policy_digest != digest:
         raise NoSignal("Reference profile policy changed; recalculation required")
-    if (fair.live_execution_allowed != (profile.live_execution_allowed if profile else False)
+    if (fair.live_execution_allowed != (profile.live_execution_allowed if profile and not trusted else False)
             or fair.reference_profile_status != (profile.status if profile else None)):
         raise NoSignal("Reference profile permission or status changed")
     if fair.market_id != market.id or set(fair.probabilities) != set(market.outcomes):
@@ -237,7 +261,7 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
     if fair.calculated_at.tzinfo is None:
         raise NoSignal("Fair-value calculation clock is unavailable")
     fair_age = (now - fair.calculated_at).total_seconds() * 1000
-    if not 0 <= fair_age <= config.max_quote_age_ms:
+    if not 0 <= fair_age <= (config.trusted_max_delivery_age_ms if trusted else config.max_quote_age_ms):
         raise NoSignal("Fair-value calculation is stale or future-dated")
     if fair.model != config.devig_method:
         raise NoSignal("Fair-value method changed; recalculation required")
@@ -267,7 +291,23 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
                 raise ValueError("Invalid weight")
         except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
             raise NoSignal("Reference source clock/book identity/weight is unavailable") from exc
-        if profile:
+        if trusted:
+            try:
+                receipt = datetime.fromisoformat(reference["local_receipt_at"])
+                poll = (datetime.fromisoformat(reference["source_scope_poll_at"])
+                        if reference.get("source_scope_poll_at") else None)
+            except (TypeError, ValueError, KeyError) as exc:
+                raise NoSignal("Trusted provider delivery evidence is unavailable") from exc
+            delivery_age = (now - receipt).total_seconds() * 1000
+            if not 0 <= delivery_age <= config.trusted_max_delivery_age_ms:
+                raise NoSignal("Trusted provider delivery evidence expired")
+            if poll is not None and not 0 <= (now - poll).total_seconds() * 1000 <= config.trusted_max_indicator_age_ms:
+                raise NoSignal("Trusted provider poll indicator expired")
+            if reference.get("status") in {"suspended", "withdrawn"}:
+                raise NoSignal("Trusted provider selection became unavailable")
+            if fair.execution_eligible or fair.live_execution_allowed:
+                raise NoSignal("Trusted-provider research evidence cannot authorize execution")
+        elif profile:
             rule = freshness_rule(config, market, reference.get("provider"), bookmaker)
             if fair.execution_eligible and (rule is None or source_time is None
                     or (config.normal_outcome_policy == "winner_only_binary"

@@ -1,0 +1,24 @@
+# Provider-trusted sportsbook research
+
+`reference_quality_mode=trusted_provider` is an explicit research choice for the existing weighted reference profiles. It prices the latest complete, matching ParlayAPI sportsbook pairs without claiming each selection was re-observed within five seconds. `strict_verified` remains the default and retains its five-second exact-source rules.
+
+The two clock limits in trusted mode are **30 seconds by default**: `trusted_max_delivery_age_ms` bounds how long the local calculation may reuse a delivered pair, and `trusted_max_indicator_age_ms` bounds a reported bookmaker/fixture poll or valid quote observation when present. Neither turns a receipt, price-change clock, or polling heartbeat into a selection observation. An unknown quote observation remains unknown. Explicit suspension, withdrawal, incomplete/cached/degraded evidence, future clocks, and expired available indicators reject the pair. Unknown active status may contribute to a labeled research estimate, never to production execution.
+
+The research projector uses Parlay's source event ID, exact teams, scheduled start, period, player, statistic, line and both opposing prices. It keeps source-only markets under `research:parlay:*`, separate from reviewed canonical/native identities. For supported pregame profiles it rejects three-way moneylines, quarter/half rows presented as full game, integer push-capable lines, one-sided scoring props, and conflicting or malformed pairs. Opposite signed spread orientations receive different outcome identities. Books are deduplicated across REST and WebSocket transports before weighting. Missing books are renormalized only after the profile's distinct-book and anchor requirements pass.
+
+Currently enabled research profiles cover NBA core props, NFL volume props, MLB pitcher strikeouts and hitter volume, plus NBA/NFL, MLB and NHL main markets. Coverage is conditional on Parlay actually returning complete compatible prices. Other leagues and prop types require an exact profile and source mapping; the shared pricing engine does not invent missing feeds or opposing odds. The winner-only estimate excludes exceptional settlement states. It is not an estimate of realized unconditional profit.
+
+`trusted_pilot_policy` is a disabled-by-default owner-review schema with an exact market, provider/book list, explicit uncertainty acceptance, indicator cap, cross-check, edge allowance and at most $1 debit/loss ceilings. **Saving that schema does not enable native execution.** The current native execution gate still rejects trusted research references. A future scoped pilot must connect reviewed source/native identities, account and fee evidence, an approved policy and the existing single-attempt authorization before any order can be proposed. The kill switch and `auto_trade=false` remain independent vetoes. This implementation deliberately does not claim that an owner-editable settings field alone authorizes a real-money order.
+
+The dashboard's **Reference prices** view displays fair probabilities and effective weights even without a native contract. A fair probability is not a positive-EV signal. If an independently reviewed native book maps to that exact canonical market, the same view can also show a read-only, conservative-fee minimum-lot EV comparison. That comparison creates no order intent and checks neither available cash nor quarter-Kelly, risk, and owner authorization. Native matching, executable depth, verified fees, account cash, risk and owner authorization are separate stages. Values disappear when their bounded delivery evidence expires. Historical captures and test fixtures never become current prices.
+
+The bounded read-only validation command reads the port-8002 database path from `data/runtime-8002.json`, then makes one NBA odds and one NBA player-points request with existing credentials:
+
+```powershell
+cd 'C:\Users\SHU Esports\EV'
+.\.venv\Scripts\python.exe scripts\validate_trusted_parlay.py
+```
+
+The command performs no native venue write, configuration change or order placement. It consumes the provider's documented request credits. Do not run it repeatedly just to refresh a screenshot.
+
+Parlay's [speed page](https://parlay-api.com/speed) describes `verified_at`/`is_current` at bookmaker polling scope. Its [detailed documentation](https://parlay-api.com/docs) also warns that fixture/bookmaker checks and retained board rows need not establish that every displayed selection was just observed. A [WebSocket](https://parlay-api.com/docs/websocket) push interval describes delivery/coalescing, not upstream quote age. The existing Business feed's game-line and prop responses must be interpreted under those scopes. For native pricing and settlement, use the applicable [Kalshi API](https://docs.kalshi.com/llms.txt) or [Novig API](https://docs.novig.com/llms.txt) contract rather than sportsbook prices as executable offers.

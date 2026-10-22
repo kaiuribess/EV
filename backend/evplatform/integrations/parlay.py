@@ -375,6 +375,12 @@ class ParlayGameBoardWebSocket(ParlayWebSocket):
     provider_id = "parlay_game_ws"
     config_class = ParlayGameBoardConfig
 
+    def stream_url(self, sport: str) -> str:
+        # The documented current_game_board replacement baseline requires
+        # snapshot=complete in addition to the exact game/book filters.
+        # Completeness does not certify any individual unchanged price.
+        return super().stream_url(sport) + "&snapshot=complete"
+
 
 ParlayRest.manifest = provider_manifest(
     "parlay_rest", "ParlayAPI REST", transports=["rest"], env="PARLAY_API_KEY",

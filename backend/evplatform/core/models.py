@@ -168,8 +168,12 @@ class Quote(TimedData):
     normal_outcome_evidence: str | None = None
     source_price_changed_at: datetime | None = None
     verification_reason: str | None = None
+    # Book/fixture poll evidence is not a selection observation. It is shown
+    # separately and cannot make a quote strictly eligible.
+    source_scope_poll_at: datetime | None = None
+    source_scope_is_current: bool | None = None
 
-    @field_validator("source_observed_at", "source_price_changed_at")
+    @field_validator("source_observed_at", "source_price_changed_at", "source_scope_poll_at")
     @classmethod
     def aware_observation_clock(cls, value):
         if value is not None and value.tzinfo is None:

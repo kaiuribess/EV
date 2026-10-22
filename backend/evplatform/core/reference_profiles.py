@@ -148,3 +148,45 @@ def quote_eligibility(config, market: Market, quote: Quote, now: datetime) -> tu
     if age is not None and (age < 0 or rule is not None and Decimal(str(age)) > rule.ttl_seconds * 1000):
         reasons.append("Validated observation is expired or future-dated")
     return not reasons, tuple(reasons), age
+
+
+def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
+                                       now: datetime) -> tuple[bool, tuple[str, ...], float | None]:
+    """Bound transport evidence without claiming quote-bound observation.
+
+    A Parlay book/fixture poll and a delivered row are useful research inputs.
+    Neither certifies that a particular unchanged selection is still offered.
+    This predicate can *never* grant native execution eligibility.
+    """
+    if quote.status in {"suspended", "withdrawn"}:
+        return False, ("Sportsbook selection explicitly suspended or withdrawn",), None
+    delivery_age = (now - quote.received_at).total_seconds() * 1000
+    if not 0 <= delivery_age <= config.trusted_max_delivery_age_ms:
+        return False, ("Provider-delivered price pair is expired or future-dated",), None
+    if quote.verification_reason in {
+        "retained_top_up", "truncated_response", "partial_response",
+        "incomplete_snapshot", "stale_cached_board", "paginated_response_not_atomic",
+        "degraded_source", "future_observation_clock",
+        "incomplete_or_cross_frame_outcomes", "unsynchronized_outcomes",
+    }:
+        return False, ("Provider reported incomplete, cached, or degraded price evidence",), None
+    for stamp, label in ((quote.source_observed_at if quote.observation_verified else None,
+                          "quote observation"), (quote.source_scope_poll_at, "book/fixture poll")):
+        if stamp is not None:
+            age = (now - stamp).total_seconds() * 1000
+            if not 0 <= age <= config.trusted_max_indicator_age_ms:
+                return False, (f"Provider {label} indicator is expired or future-dated",), delivery_age
+    caveats = ["Provider-trusted research estimate; not approved for live execution"]
+    if not quote.observation_verified or quote.source_observed_at is None:
+        caveats.append("Exact selection observation age unknown")
+    if not quote.market_status_verified or quote.status == "unknown":
+        caveats.append("Selection active status unverified")
+    if quote.source_scope_poll_at is None:
+        caveats.append("Book/fixture poll age unknown")
+    if quote.source_scope_is_current is False:
+        caveats.append("Provider did not mark book/fixture poll current")
+    if not quote.normal_outcome_verified:
+        caveats.append("Source-to-native normal WIN/LOSS condition not reviewed")
+    if market.extensions.get("research_only"):
+        caveats.append("Source market identity has no reviewed native mapping")
+    return True, tuple(caveats), delivery_age

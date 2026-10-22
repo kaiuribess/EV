@@ -8,6 +8,42 @@ from .reference_profiles import ReferenceFreshnessRule, ReferenceProfile
 from .paths import PROJECT_ROOT
 
 
+class TrustedPilotPolicy(BaseModel):
+    """Owner-review record only. Saving it never arms native execution."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    owner_approved: bool = False
+    exact_market_id: str | None = None
+    provider_id: str | None = None
+    trusted_books: list[str] = Field(default_factory=list)
+    accept_unknown_active_status: bool = False
+    accept_unknown_quote_observation_age: bool = False
+    max_indicator_age_ms: int | None = Field(default=None, ge=1000, le=600000)
+    independent_crosscheck: Literal["two_distinct_books", "separate_provider"] | None = None
+    uncertainty_margin_probability: Decimal | None = Field(default=None, gt=0, lt=1)
+    max_debit_usd: Decimal | None = Field(default=None, gt=0)
+    max_loss_usd: Decimal | None = Field(default=None, gt=0)
+    pregame_only: Literal[True] = True
+    maximum_native_attempts: Literal[1] = 1
+    automatic_followups: Literal[False] = False
+    approval_evidence: str | None = None
+
+    @model_validator(mode="after")
+    def complete_if_enabled(self):
+        if self.owner_approved and not self.enabled:
+            raise ValueError("An approved pilot must be explicitly enabled")
+        if self.enabled:
+            required = (self.exact_market_id, self.provider_id, self.max_indicator_age_ms,
+                        self.independent_crosscheck, self.uncertainty_margin_probability,
+                        self.max_debit_usd, self.max_loss_usd, self.approval_evidence)
+            if (not self.owner_approved or any(value is None or value == "" for value in required)
+                    or len(set(self.trusted_books)) < 2 or len(set(self.trusted_books)) != len(self.trusted_books)):
+                raise ValueError("Trusted live pilot requires an exact, complete owner-reviewed source policy")
+            if self.max_debit_usd > Decimal("1") or self.max_loss_usd > Decimal("1"):
+                raise ValueError("Existing one-dollar pilot ceiling cannot be enlarged here")
+        return self
+
+
 class PricingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     devig_method: Literal["proportional", "power"] = "proportional"
@@ -30,6 +66,13 @@ class PricingConfig(BaseModel):
     provider_priority: dict[str, int] = Field(default_factory=dict)
     market_overrides: dict[str, dict] = Field(default_factory=dict)
     reference_profile_mode: Literal["legacy", "strict"] = "legacy"
+    # Reference quality is independent of the win/loss payout model. Trusted
+    # provider estimates are research-only until a separate scoped pilot is
+    # reviewed; they never inherit the strict profile's execution permission.
+    reference_quality_mode: Literal["strict_verified", "trusted_provider"] = "strict_verified"
+    trusted_max_delivery_age_ms: int = Field(default=30000, ge=1000, le=600000)
+    trusted_max_indicator_age_ms: int = Field(default=30000, ge=1000, le=600000)
+    trusted_pilot_policy: TrustedPilotPolicy = Field(default_factory=TrustedPilotPolicy)
     reference_profiles: dict[str, ReferenceProfile] = Field(default_factory=dict)
     enabled_reference_profiles: list[str] = Field(default_factory=list)
     profile_freshness_rules: list[ReferenceFreshnessRule] = Field(default_factory=list)

@@ -39,6 +39,7 @@ def test_baseline_is_independent_provider_with_exact_documented_filters():
     assert query["kinds"] == ["game"]
     assert query["markets"] == ["h2h,spreads,totals"]
     assert query["limit"] == ["1000"]
+    assert query["snapshot"] == ["complete"]
 
 
 @pytest.mark.parametrize("limit", [0, 10001])
