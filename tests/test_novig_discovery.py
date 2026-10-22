@@ -8,7 +8,8 @@ import pytest
 
 from evplatform.integrations.novig_discovery import balanced_open_market_ids, open_market_ids
 from evplatform.plugins.external import NativeMonitor, NovigMonitorConfig
-from evplatform.venues.novig import NovigClient
+from evplatform.venues.novig import NovigBook, NovigClient
+from evplatform.venues.common import SequenceGap
 
 
 NOW = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
@@ -145,3 +146,32 @@ async def test_client_rotation_never_sends_an_order_and_validates_before_closing
     assert client.request_count == 0
     client._ws = None
     await client.disconnect()
+
+
+def test_gap_health_identifies_channel_without_exposing_market_or_account_id():
+    client = NovigClient()
+    client._record_sequence_gap(SequenceGap(f"{LIVE}:book", 12, 14))
+    client._record_sequence_gap(SequenceGap("PRIVATE:orders", 8, 10))
+    health = client.health_check()
+    assert health["sequence_gap_counts"] == {"book": 1, "private_orders": 1}
+    assert health["last_sequence_gap_channel"] == "private_orders"
+    assert health["last_sequence_gap_kind"] == "skipped_sequence"
+    assert LIVE not in str(health)
+    client._record_sequence_gap(SequenceGap(f"{LIVE}:book", None, 15))
+    assert client.health_check()["last_sequence_gap_kind"] == "missing_book_order"
+
+
+def test_missing_remove_diagnostic_distinguishes_zero_update_from_unseen_order():
+    book = NovigBook()
+    book.apply({"snapshot": {LIVE: {"lifecycle": {"seq": 1, "status": "OPEN"},
+        "book": {"seq": 1, "orders": {NEXT: [{"orderId": "resting-order",
+            "price": "0.4", "qty": 3}]}}}}})
+    book.apply({"delta": {LIVE: {"book": {"seq": 2, "deltas": [
+        {"kind": "update", "orderId": "resting-order", "remaining": 0}]}}}})
+    with pytest.raises(SequenceGap):
+        book.apply({"delta": {LIVE: {"book": {"seq": 3, "deltas": [
+            {"kind": "remove", "orderId": "resting-order"}]}}}})
+    assert book.last_gap_context == {"prior_zero_update": True,
+        "last_lifecycle": None, "market_status": "OPEN", "book_size": 0}
+    book.reset()
+    assert book.last_gap_context is None

@@ -1,5 +1,27 @@
 # Validation - 2026-10-20
 
+October 21 at 21:15 PDT: **2,099 backend tests passed** in 42.76 seconds,
+with one third-party Starlette warning. New Polymarket US tests cover public
+league discovery, bounded multi-league moneyline selection, wrong-status and
+wrong-market rejection, read-failure retention, and clean stream-baseline
+rotation. A real public catalog read found current NBA/NFL/MLB/NHL moneylines
+without a credential or order call. The catalog result was truncated, so it is
+monitoring coverage evidence, not exhaustive coverage, verified sportsbook
+matching, settlement equivalence, or production order certification.
+
+October 21 at 21:00–21:05 PDT: a 20-second Parlay-only, four-book NBA game
+capture authenticated on Scale and delivered 20 offers across four book/market
+groups. Every sampled row lacked `last_observed`, `last_update_type`, `status`,
+and `available`; all 20 retained `last_update`, which is not sufficient proof
+of current tradability. No Oddize credit was used. Account-only diagnostics
+read $50 Kalshi and $25 Novig available cash with empty inventories; ProphetX
+identity was authenticated but complete funded-cash scope remained unverified.
+Ten Novig markets triggered public book sequence gaps in both local workspaces;
+the paused production monitor now samples four, while duplicate paper-side
+native production monitors are stopped. Gap-channel diagnostics and the paper
+launcher policy have focused tests/PowerShell parse checks. No real-money order
+or live activation occurred in this follow-up.
+
 October 21, 2026 evening follow-up: **2,088 backend tests passed** in 42.23
 seconds, with one third-party Starlette deprecation warning. The new Novig
 catalog tests cover bounded multi-league selection, conflicting identities,

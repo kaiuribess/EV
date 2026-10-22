@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import time
+from collections import deque
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
@@ -70,11 +71,17 @@ class NovigBook:
         self.sequences = SequenceTracker()
         self.books: dict[str, dict[str, dict]] = {}
         self.statuses: dict[str, str] = {}
+        self._zero_updates: dict[str, deque[str]] = {}
+        self._last_lifecycle: dict[str, str] = {}
+        self.last_gap_context: dict[str, object] | None = None
 
     def reset(self):
         self.sequences.reset()
         self.books.clear()
         self.statuses.clear()
+        self._zero_updates.clear()
+        self._last_lifecycle.clear()
+        self.last_gap_context = None
 
     @staticmethod
     def _quantity(value: object, *, zero_allowed: bool = False) -> int:
@@ -122,6 +129,7 @@ class NovigBook:
                         for transition in data["deltas"]:
                             if transition in {"OPEN", "CLOSE", "GRADE"}:
                                 self.statuses[market] = {"OPEN": "OPEN", "CLOSE": "CLOSED", "GRADE": "SETTLED"}[transition]
+                            self._last_lifecycle[market] = transition
                             if transition in {"GOLIVE", "UNLIVE", "CLOSE", "GRADE"}:
                                 self.books[market] = {}
                     continue
@@ -143,6 +151,7 @@ class NovigBook:
                         self.sequences.invalid.add(subject)
                         raise ValueError("Invalid Novig snapshot level")
                     self.books[market] = rebuilt
+                    self._zero_updates.pop(market, None)
                 else:
                     # Validate a whole batch before publishing any changed book.
                     updated = deepcopy(self.books.get(market, {}))
@@ -151,6 +160,12 @@ class NovigBook:
                             order_id = self._identifier(delta, "order", "orderId")
                             if delta["kind"] == "remove":
                                 if order_id not in updated:
+                                    self.last_gap_context = {
+                                        "prior_zero_update": order_id in self._zero_updates.get(market, ()),
+                                        "last_lifecycle": self._last_lifecycle.get(market),
+                                        "market_status": self.statuses.get(market),
+                                        "book_size": len(updated),
+                                    }
                                     self.sequences.invalid.add(subject)
                                     raise SequenceGap(subject, None, int(data["seq"]))
                                 del updated[order_id]
@@ -160,6 +175,9 @@ class NovigBook:
                                     raise ValueError("Invalid Novig book level")
                                 outcome = self._identifier(delta, "outcome", "outcomeId")
                                 updated[order_id] = {"outcome": outcome, "price": price, "qty": qty}
+                                prior_zero = self._zero_updates.get(market)
+                                if prior_zero and order_id in prior_zero:
+                                    prior_zero.remove(order_id)
                             elif delta["kind"] == "update":
                                 # The live v3 stream also emits an observed
                                 # partial-fill form: orderId + remaining. The
@@ -176,6 +194,7 @@ class NovigBook:
                                     updated[order_id]["qty"] = remaining
                                 else:
                                     del updated[order_id]
+                                    self._zero_updates.setdefault(market, deque(maxlen=256)).append(order_id)
                             else:
                                 raise ValueError("Unknown Novig book delta")
                     except (KeyError, TypeError, ValueError):
@@ -228,6 +247,10 @@ class NovigClient(NativeTransport):
         self.authenticated = False
         self.health_reason = "Novig is disconnected"
         self.last_error_type: str | None = None
+        self.sequence_gap_counts: dict[str, int] = {}
+        self.last_sequence_gap_channel: str | None = None
+        self.last_sequence_gap_kind: str | None = None
+        self.last_sequence_gap_context: dict[str, object] | None = None
         self.received_close_code: int | None = None
         self.sent_close_code: int | None = None
 
@@ -287,7 +310,26 @@ class NovigClient(NativeTransport):
                 "requested_monitor_markets": len(self._configured_market_ids or ()),
                 "excluded_settled_markets": len(self._excluded_settled_markets),
                 "reason": self.health_reason, "last_error_type": self.last_error_type,
+                "sequence_gap_counts": dict(self.sequence_gap_counts),
+                "last_sequence_gap_channel": self.last_sequence_gap_channel,
+                "last_sequence_gap_kind": self.last_sequence_gap_kind,
+                "last_sequence_gap_context": self.last_sequence_gap_context,
                 "received_close_code": self.received_close_code, "sent_close_code": self.sent_close_code}
+
+    def _record_sequence_gap(self, gap: SequenceGap) -> None:
+        # Expose only the channel class. Market IDs and private account details
+        # are unnecessary for health monitoring and never enter public logs.
+        if gap.subject.startswith("PRIVATE:"):
+            channel = gap.subject.removeprefix("PRIVATE:")
+            category = f"private_{channel}" if channel in {"orders", "positions"} else "private_other"
+        else:
+            channel = gap.subject.rpartition(":")[2]
+            category = channel if channel in {"book", "lifecycle"} else "market_other"
+        self.sequence_gap_counts[category] = self.sequence_gap_counts.get(category, 0) + 1
+        self.last_sequence_gap_channel = category
+        self.last_sequence_gap_kind = "missing_book_order" if gap.expected is None else "skipped_sequence"
+        self.last_sequence_gap_context = (dict(self.book.last_gap_context)
+                                          if gap.expected is None and self.book.last_gap_context else None)
 
     def _invalidate_stream(self, state: str, reason: str) -> dict:
         self.error_count += 1
@@ -501,6 +543,8 @@ class NovigClient(NativeTransport):
             except (OSError, TimeoutError, ConnectionClosed, InvalidHandshake, VenueError,
                     ValueError, KeyError, TypeError, AttributeError) as exc:
                 self.last_error_type = type(exc).__name__
+                if isinstance(exc, SequenceGap):
+                    self._record_sequence_gap(exc)
                 self.received_close_code = int(exc.rcvd.code) if isinstance(exc, ConnectionClosed) and exc.rcvd else None
                 self.sent_close_code = int(exc.sent.code) if isinstance(exc, ConnectionClosed) and exc.sent else None
                 status = exc.response.status_code if isinstance(exc, InvalidStatus) else None

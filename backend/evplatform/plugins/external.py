@@ -335,6 +335,8 @@ class NativeMonitor(Plugin):
             await self._refresh_discovery()
         if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
             await self._refresh_novig_discovery()
+        if self.manifest.name == "polymarket_us" and context.config.get("discovery_leagues"):
+            await self._refresh_polymarket_discovery()
         configure = getattr(self.client, "configure_subscriptions", None)
         if configure is not None:
             if self.manifest.name == "prophetx":
@@ -346,6 +348,12 @@ class NativeMonitor(Plugin):
                                                *self.discovered_market_ids]))
                 await configure({**context.config, "market_ids": selected})
                 self._subscribed_market_ids = selected
+            elif self.manifest.name == "polymarket_us":
+                selected = list(dict.fromkeys([*context.config.get("market_slugs", []),
+                                               *self.discovered_market_ids]))
+                await configure({**context.config, "market_slugs": selected,
+                                 "discovery_leagues": []})
+                self._subscribed_market_ids = selected
             else:
                 await configure(context.config)
         elif context.config.get("market_ids"):
@@ -355,6 +363,9 @@ class NativeMonitor(Plugin):
             self.discovery_task = asyncio.create_task(self._discover_periodically(), name="prophetx-event-discovery")
         if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
             self.discovery_task = asyncio.create_task(self._discover_novig_periodically(), name="novig-market-discovery")
+        if self.manifest.name == "polymarket_us" and context.config.get("discovery_leagues"):
+            self.discovery_task = asyncio.create_task(self._discover_polymarket_periodically(),
+                                                      name="polymarket-us-market-discovery")
 
     async def _refresh_novig_discovery(self):
         from ..integrations.novig_discovery import balanced_open_market_ids
@@ -395,6 +406,64 @@ class NativeMonitor(Plugin):
                     await self.client.replace_monitor_markets(selected)
                 except Exception:
                     self.discovery_status = "subscription_failed"
+                    continue
+                self._subscribed_market_ids = selected
+        except asyncio.CancelledError:
+            raise
+
+    async def _refresh_polymarket_discovery(self):
+        from ..integrations.polymarket_us_discovery import balanced_open_moneylines
+
+        config = self.context.config
+        try:
+            pages = [await self.client.discover_league_events(league)
+                     for league in config["discovery_leagues"]]
+            selected, truncated = balanced_open_moneylines(pages,
+                leagues=config["discovery_leagues"], now=utcnow(),
+                max_markets=config.get("max_discovered_markets", 8))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.discovery_status = "read_failed"
+            return
+        self.discovered_market_ids = selected
+        self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
+
+    async def _discover_polymarket_periodically(self):
+        from ..venues.polymarket_us import PolymarketUSMonitorConfig
+
+        try:
+            while True:
+                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
+                await self._refresh_polymarket_discovery()
+                if self.discovery_status == "read_failed":
+                    continue
+                selected = list(dict.fromkeys([*self.context.config.get("market_slugs", []),
+                                               *self.discovered_market_ids]))
+                if selected == self._subscribed_market_ids:
+                    continue
+                replacement = {**self.context.config, "market_slugs": selected,
+                               "discovery_leagues": []}
+                try:
+                    PolymarketUSMonitorConfig.model_validate(replacement)
+                    # The retail market stream has no documented unsubscribe.
+                    # Restart both read-only sockets and require fresh baselines.
+                    if self.task:
+                        self.task.cancel()
+                        await asyncio.gather(self.task, return_exceptions=True)
+                    await self.client.configure_subscriptions(replacement)
+                    self.task = asyncio.create_task(self._run(), name="native-monitor:polymarket_us")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self.discovery_status = "subscription_failed"
+                    # A failed rotation must not leave monitoring silently off.
+                    try:
+                        await self.client.configure_subscriptions({**self.context.config,
+                            "market_slugs": self._subscribed_market_ids, "discovery_leagues": []})
+                        self.task = asyncio.create_task(self._run(), name="native-monitor:polymarket_us")
+                    except Exception:
+                        self.task = None
                     continue
                 self._subscribed_market_ids = selected
         except asyncio.CancelledError:

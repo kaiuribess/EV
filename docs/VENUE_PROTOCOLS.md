@@ -59,10 +59,16 @@ capacity. On a scope change, the monitor closes its socket, invalidates old
 books/private state, and follows the ordinary reconnect/snapshot path. The
 client revalidates every selected ID before subscription. Discovery changes
 only monitored order books; it does not approve mappings, fees, source odds,
-or native orders. The current installation uses a 10-market cap across NBA,
-NFL, MLB, and NHL moneylines because a 52-market subscription did not maintain
-a usable stream in this local test. The exact broad-subscription failure cause
-has not been established. See [Novig catalog](https://docs.novig.com/api-reference/catalog/list-markets)
+or native orders. The current paused production installation uses a four-market
+cap across NBA, NFL, MLB, and NHL moneylines. A 52-market subscription did not
+maintain a usable stream; 10 markets produced repeated public book sequence
+gaps; the four-market scope has also required recovery. The client invalidates
+all previously usable books and private state on a gap, then reconnects for a
+new authoritative snapshot. Health reports gap counts by channel and whether
+the last book failure was a skipped sequence or an unknown removal, without
+exposing account details. The exact upstream/drop cause is not yet established.
+The live-input paper workspace keeps only sportsbook comparison feeds, avoiding
+a second production-key native subscription. See [Novig catalog](https://docs.novig.com/api-reference/catalog/list-markets)
 and [streaming subscriptions](https://docs.novig.com/api/streaming/connection).
 
 The paper feed was observed using `orderId` and `outcomeId` where the documentation's book examples use `order` and `outcome`. The parser accepts these specific aliases, validates their types, and rejects conflicting values. A live 46-second paper observation processed 30 books and 48 frames with zero invalidations or reconnects; this is transport evidence, not order-execution validation.
@@ -167,6 +173,11 @@ interface; the public/account monitor itself remains GET-only. YES/NO mappings
 retain exact decimal prices and USD accounting. No undocumented client-order-ID
 or automatic resend is used after an unknown outcome. Exact private executions
 are required to establish cost and commissions; average price is insufficient.
+The monitor may now discover current moneylines from the documented public
+[`/v2/leagues/{slug}/events`](https://docs.polymarket.us/api-reference/sports/get-events-by-league-slug)
+route, balancing a bounded set across configured leagues. Scope changes restart
+read-only sockets and require new market/private baselines. A catalog row is
+never a reviewed cross-provider mapping or a verified profitable signal.
 No authoritative retail endpoint has established the stable wallet identity,
 spendable-cash semantics and order-attributed actual settlement needed for a
 launch, so those checks remain false. Public settlement prices and unlinked

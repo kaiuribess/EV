@@ -15,7 +15,7 @@ It is **not a completed production autonomous trading release**.
 | Kalshi | Current native clients, fractional-contract accounting, normalized books, private generation/revision fencing, narrow actual-cash settlement and expiring conservative fee bounds; real primary production balance/key identity/scopes, empty order/position inventory reconciliation and authenticated WebSocket book snapshot verified | Genuine sandbox order lifecycle testing, reviewed mappings/fees, genuine order lifecycle and settlement certification |
 | Novig | v3 signed REST/WS, native operations/private state, cent-contract accounting and reconciliation; bounded current-market discovery rotates a multi-league book subscription through fresh snapshots; authenticated paper subscriptions and production account/book reads verified; protected setup and durable recovery; one play-money Paper IOC order filled and reconciled | Actual production order lifecycle, location preflight at placement, paid settlement and complete launch evidence; unusual/shared-position settlement remains blocked |
 | ProphetX | Native auth, Talaria event/prop subscriptions, v4 orders/cancel, USD-stake accounting, matched-fill/wallet accounting and restricted funded-cash win/loss settlement; production read-only subscriptions and market messages verified | Genuine complete history, funded-cash and actual fee evidence; reviewed source clock units; sandbox lifecycle and settlement certification |
-| Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; earlier actual signed production read/stream checks passed | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
+| Polymarket US | Personal US read-only monitor plus separate guarded IOC executor/cancel, canonical book mapping, exact-fill reconciliation and inventory diagnostics; actual signed production read/stream checks passed; bounded public NBA/NFL/MLB/NHL discovery now rotates current open moneyline monitoring scope | Stable account identity/permissions, verified available cash and actual account-attributed settlement remain blocked; guarded executor tested offline only; no retail sandbox assumed |
 | Dashboard | Six responsive screens, market detail, references/age/depth/history, metadata config, paper controls, events, account-aware live setup, actionable launch blockers and separate native order ledger; final owner enable control bound to current launch scope | Broader browser/device QA; no current production scope passes the gate |
 | Analytics | Durable all-signal episodes and full normalized reference/policy audit even while paused; first-entry hypothetical grading; offline equal/anchor/prior/learned model comparison with event-grouped chronological splits, result-availability gating and log loss/Brier/calibration; processing/receipt/intent/ack/fill timings | Verified real forecast/result dataset; automatic verified result ingestion, live slippage calibration, CLV from verified closing data, production returns and independently clustered uncertainty estimates |
 | Storage | Async batched WAL SQLite audit, lossless large-event compression off the event loop, configurations, orders and fill IDs; legacy TEXT and compressed events both readable | Retention/compaction policy for long unattended runs; existing history is not rewritten or deleted |
@@ -61,13 +61,15 @@ monthly allowance. Its prior 30-credit process cap would stop an otherwise
 healthy hourly feed after 30 paid snapshots; the session ceiling is now 1,200
 while provider remaining credits and the monthly pacing rule remain enforced.
 The production Novig catalog returned 52 open NBA/NFL/MLB/NHL moneylines on
-October 21 at 20:46 PDT. The live-input paper monitor now subscribes to a
-bounded 10 of them across all four leagues (3 NBA, 3 NFL, 1 MLB, 3 NHL in the
-sample); its authenticated stream held 10 books and 794 resting orders after a
-restart. The separately paused production workspace also streamed 10 current
-Novig books with 782 resting orders. This is native book coverage only, with no reviewed fair-price mapping
-or order permission. Its truncated discovery health accurately indicates that
-other open markets are not being watched.
+October 21 at 20:46 PDT. Both workspaces initially streamed 10 current books,
+but repeated public book sequence gaps caused conservative resnapshots. The
+paused production workspace now monitors four nearby markets, one per league.
+The redundant paper-side native production subscriptions were disabled; its
+Parlay/Oddize paper comparison remains on. Novig still has production sequence
+gaps under the narrower scope, so stream recovery and stability need more
+observation. This is native book coverage only, with no reviewed fair-price
+mapping or order permission. `truncated` discovery health accurately indicates
+that other open markets are not being watched.
 At 20:50 PDT, ProphetX's running production monitor stopped at its scheduled
 token refresh because the live response omitted `refresh_token`; the original
 parser assumed it would be present. A one-time authenticated read-only refresh
@@ -75,6 +77,11 @@ confirmed the actual response fields. The client now retains the existing
 long-lived token when the refresh response supplies only a new access token and
 expiry. After a paused-workspace restart it authenticated and confirmed 7/7
 subscriptions; the subsequent automatic refresh still needs observation.
+At 21:02 PDT, read-only authenticated account diagnostics found $50 available
+on Kalshi and $25 on Novig, with empty open-order and position inventories and
+verified trading-key scopes. The ProphetX account identity was authenticated,
+but complete history/funded-cash evidence was absent, so its spendable cash
+was not certified. None of these diagnostics authorized execution.
 Equivalent Parlay schedule timestamp spellings now yield one source signature;
 an actual schedule change still requires renewed mapping review. No existing
 reviewed production mapping needed migration because none is installed.
@@ -134,6 +141,20 @@ This is the personal US API, not the international wallet/CLOB service. The
 monitor client is read-only: `execution_supported: false`, `reconciled: false`, and
 zero native orders sent. Private stream delivery does not establish complete
 account-risk reconciliation or permission to trade through this application.
+
+On October 21 at 21:15 PDT, the documented public league-events endpoint
+returned current open moneylines in NBA, NFL, MLB and NHL. A bounded monitor
+selector now balances nearby games across those leagues and refreshes its
+subscriptions with new stream baselines, replacing stale hardcoded slugs.
+After the paused native workspace loaded this configuration, its authenticated
+Polymarket US monitor streamed eight selected books with zero errors; all four
+other native/feed connectors also authenticated. Production automatic orders
+remained off with zero native orders. The separate live-input paper workspace
+remained on with 61 tracked markets, all marked NO SIGNAL at that check.
+The catalog can be truncated; it does not prove exhaustive coverage or any
+canonical sportsbook/settlement match. No additional credential is needed for
+this public discovery, and it never sends an order. The existing Polymarket US
+key is reserved for the separate authenticated account and stream reads.
 
 Missing credentials never silently trigger mock data. The separately named
 synthetic plugin runs in demo/paper mode and all its prices/fills are labeled.

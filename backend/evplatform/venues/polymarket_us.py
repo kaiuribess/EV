@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
@@ -37,11 +37,29 @@ class PolymarketUSMonitorConfig(BaseModel):
     environment: Literal["production"] = "production"
     market_slugs: list[str] = Field(default_factory=list, description="Discovered US market slugs; empty monitors only the account")
     private_updates: bool = True
+    discovery_leagues: list[str] = Field(default_factory=list, max_length=4,
+        description="Public league catalogs to monitor for current open moneylines; empty disables discovery")
+    discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    max_discovered_markets: int = Field(default=8, ge=1, le=50)
 
     @field_validator("market_slugs")
     @classmethod
     def check_slugs(cls, values):
         return validated_slugs(values)
+
+    @field_validator("discovery_leagues")
+    @classmethod
+    def check_leagues(cls, values):
+        if len(set(values)) != len(values) or any(not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", value)
+                                             for value in values):
+            raise ValueError("Use distinct public Polymarket US league slugs")
+        return values
+
+    @model_validator(mode="after")
+    def bounded_combined_scope(self):
+        if self.discovery_leagues and len(self.market_slugs) + self.max_discovered_markets > 50:
+            raise ValueError("Explicit and discovered Polymarket US market caps must total at most 50")
+        return self
 
 
 class PolymarketUSSettings(NativeSettings):
@@ -119,7 +137,8 @@ class PolymarketUSClient(NativeTransport):
     async def _get(self, path: str, *, private=False, params=None):
         if private and not self._allowed_path(path):
             raise VenueError("Unsupported private monitoring route")
-        if not private and path != "/v1/markets" and not re.fullmatch(r"/v1/markets/[A-Za-z0-9][A-Za-z0-9_-]{0,249}/book", path):
+        if not private and path != "/v1/markets" and not re.fullmatch(
+                r"/v1/markets/[A-Za-z0-9][A-Za-z0-9_-]{0,249}/book|/v2/leagues/[a-z0-9][a-z0-9-]{0,31}/events", path):
             raise VenueError("Unsupported public monitoring route")
         host = self.PRIVATE_HOST if private else self.PUBLIC_HOST
         request = self.http.build_request("GET", host + path, params=params,
@@ -190,6 +209,25 @@ class PolymarketUSClient(NativeTransport):
                 break
         # Bounded result is explicitly not an exhaustive venue catalog.
         return {"markets": rows, "bounded": True}
+
+    async def discover_league_events(self, league: str, *, limit=50, max_pages=2) -> list[dict]:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", league):
+            raise ValueError("Invalid Polymarket US public league slug")
+        if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100
+                or isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= 3):
+            raise ValueError("Polymarket US league discovery must stay bounded")
+        pages = []
+        for page in range(max_pages):
+            result = await self._get(f"/v2/leagues/{league}/events", params={
+                "limit": limit, "offset": page * limit, "type": "sport"})
+            if not isinstance(result, dict) or not isinstance(result.get("events"), list):
+                raise VenueError("Invalid Polymarket US league discovery response")
+            if len(result["events"]) > limit:
+                raise VenueError("Polymarket US league page exceeds requested bound")
+            pages.append({**result, "bounded": page == max_pages - 1 and len(result["events"]) == limit})
+            if len(result["events"]) < limit:
+                break
+        return pages
 
     async def fetch_snapshot(self, market_slug: str):
         validated_slugs([market_slug])
