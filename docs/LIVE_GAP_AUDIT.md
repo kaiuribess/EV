@@ -1,5 +1,31 @@
 # Live readiness audit — October 21, 2026
 
+## October 22, 09:56 PDT Kalshi NBA fixture and contract review
+
+The public Kalshi `KXNBAGAME` catalog exposed both sides of tonight's
+Cleveland–Philadelphia and Denver–Oklahoma City game-winner events. For both,
+`occurrence_datetime` equaled `expected_expiration_time` and was three hours
+**after** the [official NBA tipoff](https://www.nba.com/schedule?cal=October&region=1):
+23:00 versus 02:00 UTC for Cleveland–Philadelphia, and 01:30 versus 04:30 UTC
+for Denver–Oklahoma City. It is therefore not used as kickoff or as evidence
+that a sportsbook event's scheduled-start clock disagrees with the exchange.
+The exact [Philadelphia listing](https://external-api.kalshi.com/trade-api/v2/markets/KXNBAGAME-26OCT22CLEPHI-PHI)
+also says a postponed game that fails to start within 48 hours resolves to a
+**fair price**, rather than an ordinary automatic refund. That contingency
+must be compared against each reference book's actual rules before pricing.
+
+The new read-only `scripts/review_kalshi_nba.py` crosswalk uses known NBA team
+codes and the Eastern game date to find candidate fixtures while retaining
+the distinct source tipoff and Kalshi occurrence clocks. It records exact
+listing URLs and hashes of the public rule text. The code handles Kalshi's
+observed `PHX`, `BKN` and `CHA` spellings separately from Oddize's aliases.
+A bounded run found 38 provider/event candidate pairs, 4 conflicting
+source-event identities and 12 native events with more than two minutes of
+cross-provider start-time disagreement; it issued **zero** mappings,
+settlement certificates or order permissions.
+The local report is `data/kalshi-nba-crosswalk-20261022-v3.json`. Windows setup
+now installs `tzdata` so the Eastern date comparison works across DST.
+
 ## October 22, 09:52 PDT live-input review
 
 The running paper monitor had synthetic data off, both Parlay and Oddize
