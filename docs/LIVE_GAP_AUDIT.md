@@ -667,3 +667,27 @@ verified Kalshi key/account identity, trading permission, available cash and
 reconciled empty inventory. The diagnostic explicitly remains **not** a launch
 certificate. There are still no approved real market mappings, qualifying
 reference quotes or reviewed launch profiles, so automatic orders remain off.
+
+### Kalshi pilot limits and official NBA fixture check, October 22
+
+The paused production pilot preparation completed after the Kalshi diagnostic
+repair. The running risk configuration now has a $1 maximum order stake, one
+lifetime native attempt, quarter-Kelly sizing, a $5 unit and overlapping-event
+blocks. The limits also exist as a saved operator draft. They are **not** bound
+to a launch profile, and the production switch remains `auto_trade=false` with
+the kill switch on. The native order ledger remained empty.
+
+The [NBA's current Cleveland schedule](https://www.nba.com/team/1610612739/schedule)
+lists Cleveland at Philadelphia on October 22 at 7:00 p.m. ET; the
+[Oklahoma City schedule](https://www.nba.com/team/1610612760/schedule)
+lists Denver at Oklahoma City at 9:30 p.m. ET. Those independent league listings
+agree with both the Oddize and Parlay game-stream starts in a fresh bounded
+Kalshi crosswalk: 23:00 UTC on October 22 and 01:30 UTC on October 23. Each
+fixture has one candidate source event per provider and no start conflict.
+The corresponding Kalshi market
+`occurrence_datetime` values are three hours later, matching expected market
+expiration rather than tipoff. This corroborates two fixture leads only;
+there is still no approved exact market/settlement mapping, current active
+reference quote or profitable executable offer for a pilot order.
+The local read-only artifact is `data/kalshi-nba-crosswalk-20261022-v4.json`;
+its 40 candidates are not executable mappings.
