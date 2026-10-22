@@ -86,6 +86,28 @@ made a quote live-eligible. This rule applies only to the documented FanDuel
 REST prop shape. Other books and main lines still lack equivalent verified
 status evidence in the current feeds.
 
+A further pregame NBA `player_points` probe for the exact Lakers–Warriors
+fixture requested Pinnacle, FanDuel and DraftKings from Parlay (three credits).
+It returned six FanDuel rows, no Pinnacle or DraftKings rows, zero complete
+Over/Under pairs, zero bilateral links and zero collector clocks. This is
+observed coverage for that fixture at that time, not a claim about every NBA
+game. Oddize's documented event-props endpoint (two credits) returned 758
+`player_pts` price rows from Caesars, FanDuel, BetRivers, DraftKings and BetMGM
+for the same event, but its flat price records still lack an authoritative
+active-status field. The configured Oddize key reported 1,407 of 1,500 monthly
+credits before that probe; automatic all-event, high-frequency prop polling
+would exhaust that allowance. No sampled row was promoted to a live reference.
+
+The paused production Kalshi monitor completed a fresh read-only inventory:
+identity, $50.00 available cash, zero open orders/positions, trading permission
+and the current location attestation were reported verified. The local pilot
+still limits a first attempt to $1, one native order, quarter-Kelly sizing and
+a $5 reporting unit. Novig's read-only probe verified identity/inventory but
+not spendable cash or permission; ProphetX verified identity but not funded
+cash/inventory; Polymarket US did not verify retail account identity or cash.
+These account facts are time-limited and do not fix missing market mappings,
+source quote status or actual order-to-settlement evidence.
+
 **Result: blocked.** Rechecked the local application, authenticated account
 history, quarantined real prices, and current official API documentation. No
 orders, cancellations, transfers, or live activation were performed.
