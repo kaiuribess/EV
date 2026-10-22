@@ -608,6 +608,7 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                      "participant_ids": [fixture.get("participant1Id"), fixture.get("participant2Id")],
                      "scheduled_start": discovered.get("startTime") or fixture.get("startTime"),
                      "event_sport": fixture.get("sportId"),
+                     "tournament_id": fixture.get("tournamentId"),
                      "event_league": discovered.get("tournamentName"),
                      "market_catalog": {key: catalog[key] for key in (
                          "marketType", "marketName", "playerProp", "period", "handicap",

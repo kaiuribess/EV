@@ -677,6 +677,7 @@ def test_oddspapi_price_and_bookmaker_clocks_are_distinct():
 def test_oddspapi_discovery_names_only_attach_to_matching_fixture_identity():
     selection = {"price": 1.91, "active": True, "changedAt": NOW.isoformat()}
     fixture = {"fixtureId": "fixture1", "participant1Id": 1, "participant2Id": 2,
+               "sportId": 11, "tournamentId": 132,
                "statusId": 0, "hasOdds": True, "bookmakerOdds": {"pinnacle": {
                    "bookmakerIsActive": True, "suspended": False,
                    "markets": {"10": {"marketActive": True, "outcomes": {
@@ -693,6 +694,7 @@ def test_oddspapi_discovery_names_only_attach_to_matching_fixture_identity():
     assert offer.context["participants"] == ["Team A", "Team B"]
     assert offer.context["participant_ids"] == [1, 2]
     assert offer.context["scheduled_start"] == discovery["startTime"]
+    assert offer.context["tournament_id"] == 132
     assert offer.market_status_verified is True
     assert offer.observation_verified is False
 

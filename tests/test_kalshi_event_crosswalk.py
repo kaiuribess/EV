@@ -34,6 +34,28 @@ def test_matching_fixture_retains_distinct_tipoff_and_expiration():
     assert not result["execution_authorized"]
 
 
+def test_oddspapi_nba_fixture_lead_requires_exact_sport_tournament_and_names():
+    source = deepcopy(SOURCE)
+    identity = source["items"][0]["identity"]
+    identity["provider"] = "oddspapi_rest"
+    identity["event_id"] = "fixture-1"
+    identity["bookmaker"] = "pinnacle"
+    identity["context"] = {
+        "event_sport": 11, "tournament_id": 132, "event_league": "NBA",
+        "participants": ["Philadelphia 76ers", "Cleveland Cavaliers"],
+        "scheduled_start": "2026-10-22T23:00:00Z",
+    }
+    matched = fixture_candidates(MARKETS, source)
+    assert matched["match_count"] == 1
+    assert matched["matches"][0]["provider"] == "oddspapi_rest"
+    assert matched["execution_authorized"] is False
+    for field, bad in (("event_sport", 10), ("tournament_id", 133),
+                       ("event_league", "EuroLeague")):
+        changed = deepcopy(source)
+        changed["items"][0]["identity"]["context"][field] = bad
+        assert fixture_candidates(MARKETS, changed)["match_count"] == 0
+
+
 @pytest.mark.parametrize("mutation", [
     lambda native, source: native["markets"].pop(),
     lambda native, source: native["markets"][0].update(status="suspended"),

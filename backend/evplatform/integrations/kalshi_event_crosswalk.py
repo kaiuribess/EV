@@ -82,9 +82,18 @@ def fixture_candidates(kalshi_catalog: dict, source_snapshot: dict) -> dict:
     for row in rows:
         identity = row.get("identity") if isinstance(row, dict) else None
         context = identity.get("context") if isinstance(identity, dict) else None
-        if not isinstance(context, dict) or context.get("event_sport") not in ("nba", "basketball_nba"):
+        if not isinstance(context, dict):
             continue
         provider, source_id = identity.get("provider"), identity.get("event_id")
+        documented_nba = context.get("event_sport") in ("nba", "basketball_nba")
+        # OddsPapi documents participant1 as home and participant2 as away;
+        # the sport/tournament pair is its published NBA scope. This admits
+        # only a read-only fixture lead, never a wager or settlement mapping.
+        oddspapi_nba = (provider == "oddspapi_rest" and context.get("event_sport") == 11
+                         and context.get("tournament_id") == 132
+                         and context.get("event_league") == "NBA")
+        if not (documented_nba or oddspapi_nba):
+            continue
         participants = context.get("participants")
         start = parse_timestamp(context.get("scheduled_start"))
         if (not isinstance(provider, str) or not isinstance(source_id, str) or not source_id

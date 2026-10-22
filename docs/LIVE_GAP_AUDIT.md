@@ -768,3 +768,14 @@ workspace remains `auto_trade=false`, kill switch on, zero native orders, zero
 reviewed launch profiles, zero verified native market mappings and zero
 qualifying real reference markets. The free source adds real research data and
 reviewable status evidence; it does not authorize a real bet.
+
+The next read-only Kalshi crosswalk joined OddsPapi's NBA sport 11/tournament
+132 discovery names and scheduled time to the same fixture ID in its odds
+response. It found one additional Denver-at-Oklahoma City event lead from
+OddsPapi. The latest review report has 29 provider/event candidates, including
+14 source-start conflicts: Parlay game streams list that matchup at 9:40 p.m.
+ET while OddsPapi and Oddize list 9:30 p.m. ET, matching the
+[NBA's published Oklahoma City schedule](https://www.nba.com/team/1610612760/schedule).
+Those are review leads, not approved market mappings; the report flags the
+conflicts and retains the distinct Kalshi expiration time. Its local artifact
+is `data/kalshi-nba-crosswalk-20261022-v5.json`.
