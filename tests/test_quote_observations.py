@@ -72,6 +72,7 @@ def test_parlay_fanduel_bilateral_native_links_certify_only_that_rest_prop_obser
     assert offer.observation_verified and offer.observation_complete and offer.market_status_verified
     assert not extract_offers(parlay(row))[0].market_status_verified  # WS has no documented link contract.
     for change in ({"under_link": None}, {"over_link": "not-a-url"},
+                   {"over_link": "https://"}, {"under_link": "https://user:pass@example.com/"},
                    {"last_observed": None}, {"last_update_type": "price_change"},
                    {"bookmaker": "draftkings"}, {"under_price": None}):
         candidate, = extract_offers(ProviderEnvelope("parlay_rest", "props_snapshot",

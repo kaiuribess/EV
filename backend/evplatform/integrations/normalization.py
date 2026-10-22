@@ -14,6 +14,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -121,6 +122,16 @@ def _row_context(row: dict) -> dict:
 def _oldest(values: list[datetime | None]) -> datetime | None:
     # Both opposing sides need valid time evidence, not just the freshest side.
     return min(values) if values and all(value is not None for value in values) else None
+
+
+def _valid_native_link(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > 4096:
+        return False
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
+    except ValueError:
+        return False
 
 
 def _matches_scope(offer: SourceOffer, selectors: dict) -> bool:
@@ -363,8 +374,7 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
         status_verified = (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
                            and row.get("bookmaker") == "fanduel" and has_totals and not has_outcome
                            and not has_moneyline and set(prices) == {"over", "under"}
-                           and all(isinstance(row.get(f"{side}_link"), str)
-                                   and row[f"{side}_link"].startswith("https://")
+                           and all(_valid_native_link(row.get(f"{side}_link"))
                                    for side in ("over", "under"))
                            and observation["observation_verified"] and observation["observation_complete"]
                            and status == "active")
