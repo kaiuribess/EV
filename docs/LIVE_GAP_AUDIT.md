@@ -379,3 +379,12 @@ registered and disabled by default. There is no `OWLS_API_KEY` in this local
 installation, no paid entitlement was obtained, and no genuine quote or market
 was certified through this path. It also does not resolve cross-venue
 settlement equivalence or the first real order-to-settlement test.
+
+One additional three-credit, read-only Parlay NBA props request at
+**2026-10-22 02:26:58 UTC** omitted the market filter and asked for the four
+priority books. It returned zero rows at that instant. Thus the earlier
+`player_points` sample cannot be extrapolated to current availability, and
+there is still no complete current FanDuel pair with both native links and a
+recent collector observation. The diagnostic is repeatable with
+`python scripts/probe_parlay_prop_status.py --all-markets`; a zero-row result
+does not prove future or other-sport coverage is absent.
