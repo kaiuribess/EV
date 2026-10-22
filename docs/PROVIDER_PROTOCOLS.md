@@ -121,6 +121,19 @@ the present installation has no key, so only mocked protocol tests pass.
 [Realtime contract](https://owlsinsight.com/docs),
 [market clock schema](https://owlsinsight.com/openapi.json)
 
+To leave the optional NBA main-line scope ready in either local workspace,
+run `python scripts/prepare_owls_reference.py --url http://127.0.0.1:8002`
+(use port 8001 for paper). This saves a 30-second poll and deliberately keeps
+the plugin disabled. Once an eligible backend `OWLS_API_KEY` is present, restart
+the workspace and enable the plugin in Provider Center. One continuously
+enabled workspace at 30-second polling uses approximately 86,400 REST
+requests in a 30-day month; two workspaces double that. Check the account's
+remaining quota before enabling. The provider currently lists its Pinnacle
+realtime endpoint on MVP and above, with a 300,000 monthly REST allowance on
+MVP; a lower tier does not grant this endpoint.
+[Current tier limits](https://owlsinsight.com/docs),
+[pricing](https://owlsinsight.com/pricing)
+
 ## OddsPapi
 
 The v4 client implements sports, bookmaker and market catalogs, scheduled

@@ -388,3 +388,11 @@ there is still no complete current FanDuel pair with both native links and a
 recent collector observation. The diagnostic is repeatable with
 `python scripts/probe_parlay_prop_status.py --all-markets`; a zero-row result
 does not prove future or other-sport coverage is absent.
+
+The optional Owls NBA realtime plugin is now preconfigured in the paper and
+production workspaces for 30-second REST polls, but remains disabled in both.
+The preparation script made only local control requests: it read no credential,
+spent no provider quota and armed no native orders. An MVP-or-higher Owls key,
+actual response sampling, a validated exact-source TTL and additional
+independent active references would still be needed before a strict live
+profile can be reviewed.
