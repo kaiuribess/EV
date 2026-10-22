@@ -125,9 +125,10 @@ whose stored payloads occupied about 4.4 GB. A sampled no-candidate record
 repeated roughly 12 KB of pricing policy plus the current reference universe.
 This was repeated evaluation, not 1.3 million independent trading signals.
 The engine now records the initial `NO SIGNAL`, the first arrival or loss of
-reference quotes, and a periodic no-candidate state at most once per market
-per minute. A candidate episode and its subsequent withdrawal are always
-recorded immediately. Every underlying quote/order-book input remains in the
+reference quotes or target order books, and a periodic no-candidate state at
+most once per market per minute. A candidate episode and its subsequent
+withdrawal are always recorded immediately; a pricing-policy replacement also
+produces an immediate new snapshot. Every underlying quote/order-book input remains in the
 audit log for replay. The coalesced evaluation count is exposed in metrics.
 An integration test verifies 100 repeated no-candidate evaluations create one
 durable signal observation and that a later candidate withdrawal closes its

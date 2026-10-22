@@ -36,8 +36,8 @@ async def test_repeated_no_candidate_evaluations_do_not_flood_durable_audit(tmp_
             "SELECT COUNT(*) FROM events WHERE schema_name='signal.observation'")).fetchone())[0]
         assert count == 1
         assert engine.metrics.counters["coalesced_no_signal_evaluations"] == 99
-        identity, status, previous, quote_count = engine._signal_audit_state[market.id]
-        engine._signal_audit_state[market.id] = identity, status, previous - 61, quote_count
+        identity, status, previous, input_presence, policy = engine._signal_audit_state[market.id]
+        engine._signal_audit_state[market.id] = identity, status, previous - 61, input_presence, policy
         await engine._record_signal(market, "NO SIGNAL", "Periodic unchanged-state evidence")
         await engine.signal_queue.join()
         await engine.audit_queue.join()
@@ -45,6 +45,15 @@ async def test_repeated_no_candidate_evaluations_do_not_flood_durable_audit(tmp_
         count = (await (await engine.storage.connection.execute(
             "SELECT COUNT(*) FROM events WHERE schema_name='signal.observation'")).fetchone())[0]
         assert count == 2
+        engine.settings.pricing = engine.settings.pricing.model_copy(
+            update={"min_ev": Decimal(".1234")})
+        await engine._record_signal(market, "NO SIGNAL", "Reference policy changed")
+        await engine.signal_queue.join()
+        await engine.audit_queue.join()
+        await engine.storage.queue.join()
+        count = (await (await engine.storage.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE schema_name='signal.observation'")).fetchone())[0]
+        assert count == 3
         candidate = Candidate(strategy="positive_ev", market_id=market.id, venue="paper:test",
             outcome=market.outcomes[0], price=Decimal(".45"), fair_probability=Decimal(".60"),
             ev_per_contract=Decimal(".15"), roi=Decimal(".333"), max_quantity=1,
@@ -58,7 +67,7 @@ async def test_repeated_no_candidate_evaluations_do_not_flood_durable_audit(tmp_
         await engine.storage.queue.join()
         count = (await (await engine.storage.connection.execute(
             "SELECT COUNT(*) FROM events WHERE schema_name='signal.observation'")).fetchone())[0]
-        assert count == 4
+        assert count == 5
         episode = await (await engine.storage.connection.execute(
             "SELECT ended_at FROM signal_episodes WHERE market_id=?", (market.id,))).fetchone()
         assert episode and episode[0] is not None

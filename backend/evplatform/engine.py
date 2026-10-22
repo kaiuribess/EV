@@ -292,15 +292,17 @@ class Engine:
     async def _record_signal(self, market, status, reason, candidates=()):
         identity = market.identity()
         now_monotonic = time.monotonic()
-        quote_count = len(self.quotes.get(market.id, {}))
+        input_presence = (bool(self.quotes.get(market.id)), bool(self.books.get(market.id)))
         previous = self._signal_audit_state.get(market.id)
         if (status == "NO SIGNAL" and previous is not None
                 and previous[0] == identity and previous[1] == "NO SIGNAL"
                 and now_monotonic - previous[2] < 60
-                and (previous[3] > 0) == (quote_count > 0)):
+                and previous[3] == input_presence
+                and previous[4] is self.settings.pricing):
             self.metrics.counters["coalesced_no_signal_evaluations"] += 1
             return
-        self._signal_audit_state[market.id] = (identity, status, now_monotonic, quote_count)
+        self._signal_audit_state[market.id] = (identity, status, now_monotonic, input_presence,
+                                               self.settings.pricing)
         self._signal_audit_state.move_to_end(market.id)
         while len(self._signal_audit_state) > 10000:
             self._signal_audit_state.popitem(last=False)
