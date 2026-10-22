@@ -9,12 +9,12 @@ import pytest
 from scripts import prepare_kalshi_pilot as pilot
 
 
-def _client(monkeypatch, *, auto_trade=False, orders=(), authenticated=True, profile_count=0):
+def _client(monkeypatch, *, auto_trade=False, kill_switch=True, orders=(), authenticated=True, profile_count=0):
     calls = []
     risk = {**pilot.RUNTIME_LIMITS}
     state = {
         "mode": "production", "sample_feed_enabled": False,
-        "auto_trade": auto_trade, "kill_switch": False,
+        "auto_trade": auto_trade, "kill_switch": kill_switch,
         "plugins": [{"manifest": {"name": "kalshi"}, "enabled": True,
                      "config": {"environment": "production"},
                      "health": {"authenticated": authenticated, "streaming": True}}],
@@ -73,6 +73,7 @@ def test_prepares_only_paused_one_order_scope(monkeypatch):
 @pytest.mark.parametrize("options", [
     {"orders": ({"id": "existing"},)},
     {"auto_trade": True},
+    {"kill_switch": False},
     {"authenticated": False},
     {"profile_count": 1},
 ])

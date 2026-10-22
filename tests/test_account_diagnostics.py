@@ -1,12 +1,15 @@
 """Read-only account diagnostics use mocked HTTP, never real credentials."""
 import importlib.util
 import json
+import hashlib
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 
 from evplatform.core.models import utcnow
 from evplatform.venues.account_probe import NativeAccountSnapshot
@@ -98,6 +101,74 @@ async def test_sandbox_cash_and_empty_inventory_never_become_production_authoriz
     assert not snapshot["trading_permission_verified"]
     assert not snapshot["live_readiness_verified"]
     assert KEY not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_novig_production_management_witness_verifies_scoped_trading_signer(monkeypatch):
+    trading_key = ed25519.Ed25519PrivateKey.generate()
+    public = trading_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    fingerprint = "sha256:" + hashlib.sha256(public).hexdigest()
+    manager_id = "00000000-0000-4000-8000-000000000002"
+    monkeypatch.setattr(NovigClient, "headers", lambda *args, **kwargs: {})
+    monkeypatch.setattr(NovigClient, "_load_key", lambda self: trading_key)
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("/balance"):
+            return httpx.Response(200, json={"keyId": KEY, "balance": "25.00000"})
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(200, json={"open": [], "seq": 1})
+        if request.url.path.endswith("/positions"):
+            return httpx.Response(200, json={"positions": [], "seq": 1})
+        assert request.url.path == f"/v3/keys/{KEY}"
+        return httpx.Response(200, json={"keyId": KEY, "scope": "trading",
+            "restriction": "subaccount", "expiresAt": None, "fingerprint": fingerprint})
+    result = await diagnostic.check_account("novig", "production",
+        novig_credential_profile="environment", environ={
+            "NOVIG_PRODUCTION_TRADING_API_KEY": KEY,
+            "NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH": "trading-secret-path",
+            "NOVIG_PRODUCTION_MANAGEMENT_API_KEY": manager_id,
+            "NOVIG_PRODUCTION_MANAGEMENT_PRIVATE_KEY_PATH": "management-secret-path",
+            "NOVIG_MANAGEMENT_API_KEY": "paper-only",
+            "NOVIG_MANAGEMENT_PRIVATE_KEY_PATH": "paper-secret-path",
+        }, transport=httpx.MockTransport(handler))
+    assert result["management_credentials_present"]
+    inventory = result["checks"]["account_inventory"]
+    assert inventory["identity_verified"] and inventory["reconciled"]
+    assert inventory["trading_permission_verified"] and inventory["cash_available_verified"]
+    assert not result["live_readiness_verified"]
+    assert len([r for r in requests if r.url.path == f"/v3/keys/{KEY}"]) == 1
+    assert all(r.method == "GET" and r.url.host == "api.novig.com" for r in requests)
+    assert all(secret not in json.dumps(result) for secret in (
+        KEY, manager_id, "trading-secret-path", "management-secret-path", "paper-only"))
+
+
+@pytest.mark.asyncio
+async def test_novig_missing_management_pair_does_not_use_wrong_environment(monkeypatch):
+    monkeypatch.setattr(NovigClient, "headers", lambda *args, **kwargs: {})
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith("/balance"):
+            return httpx.Response(200, json={"keyId": KEY, "balance": "25.00000"})
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(200, json={"open": [], "seq": 1})
+        if request.url.path.endswith("/positions"):
+            return httpx.Response(200, json={"positions": [], "seq": 1})
+        pytest.fail("An unrelated management key was used")
+    result = await diagnostic.check_account("novig", "production",
+        novig_credential_profile="environment", environ={
+            "NOVIG_PRODUCTION_TRADING_API_KEY": KEY,
+            "NOVIG_PRODUCTION_TRADING_PRIVATE_KEY_PATH": "trading-secret-path",
+            "NOVIG_MANAGEMENT_API_KEY": "paper-only",
+            "NOVIG_MANAGEMENT_PRIVATE_KEY_PATH": "paper-secret-path",
+        }, transport=httpx.MockTransport(handler))
+    inventory = result["checks"]["account_inventory"]
+    assert not result["management_credentials_present"]
+    assert inventory["reconciled"] and not inventory["trading_permission_verified"]
+    assert not inventory["cash_available_verified"]
+    assert all(r.method == "GET" and r.url.host == "api.novig.com" for r in requests)
 
 
 @pytest.mark.asyncio

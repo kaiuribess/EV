@@ -122,7 +122,12 @@ The command performs a read-only Kalshi account inventory, then sets a $1
 per-order/total exposure cap, one lifetime native order attempt, one open
 order, and quarter-Kelly sizing. It writes the matching local limits draft and
 prints whether the current release gate passes. It never transmits an order or
-creates launch evidence. Re-running shared feed setup preserves any stricter
+creates launch evidence. The production kill switch must be active throughout
+this preparation; resetting it is a separate final activation step after all
+market and account checks pass. The helper completed on October 22, 2026 with
+the production account read-only, but the release gate still reported
+`safe_to_arm=false`, zero mapped native markets and zero real reference markets.
+Re-running shared feed setup preserves any stricter
 native money caps; it cannot silently reset this pilot's saved cap. Use the
 actual production port if different from 8002.
 
@@ -199,8 +204,8 @@ placing an order or moving money:
 This signed, read-only check compares the locally configured private signer to
 Novig's registered trading-key fingerprint, confirms the key has `trading`
 scope and a live subaccount, and compares management and personal balance reads.
-The management key is used only by this short-lived command, not loaded into the
-trading runtime. A passing result does not verify order-time location eligibility,
+The runtime may also load the separate management key as a read-only scope witness;
+it never uses that key to sign trading orders. A passing result does not verify order-time location eligibility,
 spendable cash semantics, a real fill or the sportsbook/native market match.
 
 ### Review and place one native order manually
@@ -521,8 +526,16 @@ select `production` and `credential_profile: environment` to use it. The default
 `legacy` profile preserves `NOVIG_API_KEY` and `NOVIG_PRIVATE_KEY_PATH`; no paper
 connection is silently switched. Missing/partial scoped credentials are blocked.
 
-The production management check on October 20 PDT verified the key and $25.00
-primary-wallet cash, but found no trading wallet or production trading key.
+The October 20 management check initially found no trading wallet or production
+trading key. The owner subsequently opened and funded a separate wallet. On
+October 22, `scripts/check_accounts.py` read that exact production wallet and
+used the management key's documented `GET /v3/keys/{id}` to verify the trading
+scope and local signer's public-key fingerprint. The fresh read showed $25.00,
+no resting orders or positions, and a reconciled wallet inventory. It marked
+cash available for this narrow account probe; location eligibility, a reviewed
+launch profile, quote/market equivalence and actual lifecycle evidence remain
+independent launch requirements. This diagnostic did not submit an order or
+move funds.
 Novig documents [opening a trading subaccount](https://docs.novig.com/api/subaccounts/manage)
 and [funding it](https://docs.novig.com/api/subaccounts/funding) as separate API
 operations. These are operator-performed financial actions, not read-only setup.

@@ -180,15 +180,13 @@ cannot be pooled between accounts. See [operator limits](OPERATOR_LIMITS.md).
 The October 20 21:22 PDT read-only account check confirmed production Kalshi cash
 and ProphetX's reported balance. Polymarket US returned a balance but omitted its
 source-change clock; available-cash/account certification remains incomplete.
-The saved Novig key returned production HTTP401 and sandbox success. Its funded
-production account was subsequently accessed with a newly created management
-key: signed production reads verified $25.00 primary-wallet cash, zero trading
-subaccounts and zero production trading keys. The website's $75.00 portfolio
-total is not assumed to be spendable API cash. Production trading still needs a
-separate trading wallet/key and account-bound validation; the sandbox runtime
-credentials remain unchanged. No account is labelled unfunded merely because
-its sandbox is empty. `scripts/check_accounts.py` repeats
-these explicit environment checks without sending orders or transferring money.
+The initial Novig key returned production HTTP401 and sandbox success. A
+subsequent management-key read found $25.00 primary-wallet cash, zero trading
+subaccounts and zero production trading keys at that time. The website's $75.00
+portfolio total was not assumed to be spendable API cash. The owner later
+created a separate production trading wallet/key; sandbox credentials remained
+unchanged. `scripts/check_accounts.py` repeats environment-bound reads without
+sending orders or transferring money.
 
 The owner subsequently completed wallet-opening and $25 funding confirmations
 in the [Novig setup helper](NOVIG_SETUP.md). A scoped transfer GET confirmed
@@ -199,6 +197,11 @@ The Novig monitor switched explicitly to production and streamed ten discovered
 markets with no reported errors. Paper credentials remain preserved; trading
 automation remains off and live release readiness remains false. Read access
 and a completed wallet transfer do not certify order/fill/settlement behavior.
+On October 22, the read-only diagnostic used the configured production management
+key to verify the trading key's scope and signer fingerprint. The production
+wallet reported $25.00, zero resting orders and positions, and reconciled
+inventory. Its cash-only flag passed this account check; geographic eligibility,
+a launch profile and genuine order-to-settlement evidence did not.
 
 ProphetX now has local private connection/revision fencing, heartbeat-gap
 invalidation and exact comparison with complete REST history. Its reporting

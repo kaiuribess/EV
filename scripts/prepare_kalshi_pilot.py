@@ -62,8 +62,8 @@ def _paused_production(client: httpx.Client) -> tuple[dict, dict]:
     orders = _get(client, "/api/native/orders")
     if state.get("mode") != "production" or state.get("sample_feed_enabled") is not False:
         raise ValueError("A sample-free production workspace is required")
-    if state.get("auto_trade") is not False or state.get("kill_switch") is True:
-        raise ValueError("Stop or resolve the current trading state before preparing a pilot")
+    if state.get("auto_trade") is not False or state.get("kill_switch") is not True:
+        raise ValueError("A stopped production workspace with its kill switch active is required")
     if orders.get("orders"):
         raise ValueError("This ledger already contains a native order attempt")
     records = [item for item in state.get("plugins", []) if item.get("manifest", {}).get("name") == "kalshi"]
@@ -124,6 +124,8 @@ def prepare(url: str) -> dict:
                 raise ValueError("The local runtime did not retain the pilot risk settings")
         if state.get("auto_trade") is not False:
             raise ValueError("Automatic trading changed during pilot preparation")
+        if state.get("kill_switch") is not True:
+            raise ValueError("The production kill switch changed during pilot preparation")
         _write_limits_draft()
         setup = _get(client, "/api/launch/setup")
         if setup.get("risk_policy", {}).get("values") != LiveLimits.model_validate(PILOT_LIMITS).model_dump(mode="json"):

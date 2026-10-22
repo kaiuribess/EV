@@ -1,5 +1,79 @@
 # Live readiness audit — October 21, 2026
 
+## October 22, 09:35–09:39 PDT production recheck
+
+The running production monitor's authenticated, read-only account probes now
+agree with the corrected local diagnostic for Novig: its separate management
+key verified the trading key and signer, the $25.00 wallet, and zero open
+orders/positions. A fresh Kalshi probe also succeeded after the earlier
+rate-limited attempts: it verified $50.00 available cash, trading-key scope,
+zero open orders/positions, and an account location attestation expiring
+October 27, 2026 PDT. ProphetX still lacks its complete-history funded-cash
+review; Polymarket US still lacks cash-only account and paid-settlement proof.
+All four probe results explicitly report `usable_for_execution=false`.
+
+The paused Kalshi pilot helper was corrected to require the emergency stop to
+remain **on** while it prepares limits. It then completed against the running
+production workspace: $1 per-order and total exposure caps, one lifetime
+native attempt, quarter-Kelly sizing, $5 units, and overlapping event/player
+blocks. The limits are a saved operator draft and current risk settings, not a
+reviewed launch profile. A direct operator-requested activation call returned
+HTTP 409 (`Native execution requires explicit enablement and all launch checks
+passing`). Afterward, `auto_trade=false`, `kill_switch=true`, zero native
+orders, zero approved native market mappings, zero real reference markets and
+`safe_to_arm=false` were confirmed. No real order was placed.
+
+A live read-only NBA event crosswalk found three fixture candidates, including
+Oddize and Parlay observations pointing to the same scheduled
+Oklahoma City–Denver ProphetX event. Its bounded moneyline inspection found
+six Oddize bookmaker labels for that event and exact native strike IDs. Each
+sampled Oddize quote lacked verified active-market status; the displayed
+source observations ranged from roughly 20 minutes to 16 hours old when reviewed.
+The native catalog was truncated at the bounded review limit. These are useful
+discovery leads, but neither an approved moneyline mapping nor a current
+three-book fair value. The current [Parlay API contract](https://parlay-api.com/docs)
+distinguishes source observation from price-change and delivery clocks; an
+API key does not supply a missing quote timestamp or market status.
+
+## October 22, 09:28–09:33 PDT follow-up
+
+The workspace is now 2.53 GiB after guarded removal of old pytest and
+benchmark artifacts; operational databases and account evidence were retained.
+Lossless signal-snapshot compression, six-hour raw-detail retention and the
+3 GiB per-database SQLite cap remain in force. The production workspace still
+reported `safe_to_arm=false`, `auto_trade=false`, `kill_switch=true`, zero
+reviewed launch profiles and zero verified native/source market mappings.
+
+The read-only production account diagnostic now uses the separately configured
+Novig management key as the runtime already does: the documented
+`GET /v3/keys/{id}` confirms the trading key's scope and the actual local
+signer's public-key fingerprint. At 16:28 UTC, the wallet reported $25.00,
+zero resting orders/positions, reconciled inventory, and verified cash for
+that wallet. This is neither geographic eligibility nor a launch profile or
+an order-to-settlement test. Kalshi's $50 balance read succeeded, but its
+inventory/key-metadata probe returned HTTP 429 twice; no current Kalshi cash
+or permission verification is claimed from those attempts. ProphetX reported
+$50.10 with zero global exposure credit and zero matched/unmatched balances,
+but its full financial history/identity review remains incomplete. Polymarket
+US reported a $50 balance and $50 reservation; cash-only availability and
+authoritative settlement remain unverified. These values are point-in-time
+reads, not spendable pooled funds.
+
+Parlay's credit-free coverage endpoints reported 14 NBA main-line games for
+FanDuel and Pinnacle, plus NBA points rows from FanDuel and Pinnacle. NFL
+receiving-yards coverage listed FanDuel, DraftKings and Pinnacle. A bounded
+three-credit NFL props request immediately afterward actually returned 137
+FanDuel and 125 DraftKings rows, with no Pinnacle row in that response, no
+recent validated collector-observation clock and no bilateral FanDuel active
+selection links. Coverage is not a quote, and these sampled rows cannot form
+a strict three-book NFL fair value or an executable opportunity. The diagnostic
+is repeatable with `scripts/probe_parlay_prop_status.py --sport
+americanfootball_nfl --market player_rec_yds --books
+pinnacle,fanduel,draftkings,betonline`. It reports counts only. No real order
+or transfer was made. [Novig key contract](https://docs.novig.com/api/api-keys),
+[Parlay coverage/prop contract](https://parlay-api.com/openapi.json),
+[Kalshi 429 guidance](https://docs.kalshi.com/getting_started/rate_limits).
+
 ## October 22 current-state check
 
 The production monitor was restarted on the tested build and remained paused:

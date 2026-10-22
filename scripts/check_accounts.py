@@ -157,6 +157,12 @@ async def check_account(venue, environment="production", *, environ=None, transp
     result = {"venue": venue, "environment": environment, "money_type": "real" if environment == "production" else "play",
               "credentials_present": all(values), "read_only": True, "live_readiness_verified": False,
               "observed_at": datetime.now(timezone.utc).isoformat(), "checks": {}}
+    management_values = []
+    if venue == "novig":
+        prefix = "NOVIG_PRODUCTION_MANAGEMENT" if environment == "production" else "NOVIG_MANAGEMENT"
+        management_values = [environ.get(prefix + suffix, "")
+                             for suffix in ("_API_KEY", "_PRIVATE_KEY_PATH")]
+        result["management_credentials_present"] = all(management_values)
     if not all(values):
         result["blocker"] = "Required backend credentials are missing"
         return result
@@ -166,6 +172,14 @@ async def check_account(venue, environment="production", *, environ=None, transp
     async with httpx.AsyncClient(timeout=10, transport=transport,
                                  event_hooks={"request": [read_guard(venue, environment)]}) as http:
         client = build_client(venue, environment, values, http)
+        management_client = None
+        if venue == "novig" and all(management_values):
+            try:
+                management_client = build_client(venue, environment, management_values, http)
+            except (TypeError, ValueError):
+                # A malformed optional witness cannot promote the wallet to
+                # verified trading scope or stop the trading-key diagnostic.
+                pass
         try:
             async with asyncio.timeout(35):
                 try:
@@ -188,7 +202,9 @@ async def check_account(venue, environment="production", *, environ=None, transp
                         "no exposure credits, trading permissions, or settlement; existing monitor is unchanged")
                 else:
                     try:
-                        snapshot = await probe_native_account(client)
+                        snapshot = await probe_native_account(client,
+                            **({"management_client": management_client}
+                               if venue == "novig" and management_client else {}))
                         result["checks"]["account_inventory"] = {"ok": True, **snapshot_summary(snapshot)}
                     except Exception as exc:
                         result["checks"]["account_inventory"] = error_summary(exc)
@@ -196,6 +212,8 @@ async def check_account(venue, environment="production", *, environ=None, transp
             result["checks"]["completion"] = error_summary(exc)
         finally:
             await client.disconnect()
+            if management_client is not None:
+                await management_client.disconnect()
     return result
 
 
