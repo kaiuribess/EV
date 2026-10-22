@@ -19,13 +19,13 @@ class AuditDataError(ValueError):
     """An unsupported/corrupt record must not be silently replayed or skipped."""
 
 
-def encode_audit_data(data: str) -> str | bytes:
+def encode_audit_data(data: str, *, threshold: int = COMPRESSION_THRESHOLD) -> str | bytes:
     if not isinstance(data, str):
         raise TypeError("Audit source must be serialized JSON text")
     raw = data.encode("utf-8")
     # Oversized legacy-compatible TEXT is preserved, never truncated. Keeping a
     # compression bound also bounds decoder allocation for every new BLOB.
-    if len(raw) < COMPRESSION_THRESHOLD or len(raw) > MAX_COMPRESSED_SOURCE_BYTES:
+    if len(raw) < threshold or len(raw) > MAX_COMPRESSED_SOURCE_BYTES:
         return data
     compressed = zlib.compress(raw, level=1)
     packed = MAGIC + HEADER.pack(len(raw), hashlib.sha256(raw).digest()) + compressed

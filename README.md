@@ -357,7 +357,9 @@ treating sportsbook and exchange prices as interchangeable.
 configuration. Never delete an active database or its WAL/SHM files. Stop the app
 before copying the database for a backup.
 
-Operational SQLite databases are capped at 5 GiB apiece after compaction. A
+The app sets a 3 GiB SQLite cap on each open operational database. New
+signal snapshots are losslessly compressed while their market JSON remains
+queryable; historical snapshots can be migrated offline. A
 background task removes raw quote/event detail, per-tick signal snapshots, and
 transition detail older than six hours. It keeps order/fill/settlement events,
 all order and fill tables, signal results, compact signal episodes, and cumulative
@@ -367,7 +369,7 @@ need one offline compaction to reclaim previously occupied disk space:
 
 ```powershell
 .\stop_local.ps1 -Port 8001
-.\.venv\Scripts\python.exe scripts\maintain_storage.py --database data\live-paper.db --compact
+.\.venv\Scripts\python.exe scripts\maintain_storage.py --database data\live-paper.db --compress-signals --compact
 .\start_live_paper.ps1 -Port 8001 -NoBrowser
 ```
 

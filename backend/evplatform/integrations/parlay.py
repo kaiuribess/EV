@@ -26,6 +26,10 @@ class ParlayConfig(ProviderConfig):
     include_props: bool = True
     stream_kinds: list[Literal["game", "prop"]] = Field(default_factory=list)
     max_age_seconds: int = Field(default=30, ge=1, le=3600)
+    # REST /props applies maxAgeSec to the last price write for most books,
+    # rather than to a verified observation of an unchanged quote. Keep that
+    # optional filter separate from the WebSocket's max_age_s setting.
+    props_max_age_seconds: int | None = Field(default=None, ge=1, le=3600)
     stream_limit: int = Field(default=1000, ge=1, le=1000)
     props_limit: int = Field(default=1000, ge=1, le=10000)
     watchdog_seconds: float = Field(default=90, ge=10, le=180)
@@ -107,8 +111,9 @@ class ParlayRest(RestProvider):
     async def fetch_props(self, sport: str, **filters: Any) -> ProviderEnvelope:
         # Parlay documents FanDuel per-side links only for stored native OPEN /
         # ACTIVE observations. They are evidence fields, never order URLs here.
-        params: dict[str, Any] = {"maxAgeSec": self.config.max_age_seconds, "limit": self.config.props_limit,
-                                  "includeLinks": True}
+        params: dict[str, Any] = {"limit": self.config.props_limit, "includeLinks": True}
+        if self.config.props_max_age_seconds is not None:
+            params["maxAgeSec"] = self.config.props_max_age_seconds
         if self.config.bookmakers:
             params["bookmakers"] = ",".join(self.config.bookmakers)
         params.update(filters)

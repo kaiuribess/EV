@@ -93,9 +93,11 @@ Configure-Input 'oddize_rest' @{
 # REST is scheduled discovery. Four sports × (3 game-market credits + 3 prop
 # credits) per 15-minute cycle is an estimated 24 Parlay credits/cycle;
 # provider usage headers remain authoritative. Polling never marks rows active.
+# Do not filter REST props by last price-change age: unchanged prices remain
+# visible for review, while strict quote-clock/status checks control eligibility.
 Configure-Input 'parlay_rest' @{
     sports = $sports; bookmakers = $books; markets = @('h2h', 'spreads', 'totals');
-    include_props = $true; props_limit = 5000; max_age_seconds = 120;
+    include_props = $true; props_limit = 5000;
     poll_interval_seconds = [double]900; session_request_budget = 80000;
     account_tier = 'unknown'
 }

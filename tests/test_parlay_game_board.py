@@ -12,7 +12,10 @@ from pydantic import ValidationError
 from evplatform.integrations import PROVIDER_FACTORIES
 from evplatform.integrations.base import ProviderEnvelope
 from evplatform.integrations.normalization import VerifiedProviderMapper, extract_offers
-from evplatform.integrations.parlay import ParlayConfig, ParlayGameBoardConfig, ParlayGameBoardWebSocket, ParlayRest
+from evplatform.integrations.parlay import (
+    ParlayConfig, ParlayGameBoardConfig, ParlayGameBoardWebSocket, ParlayRest,
+    ParlayWebSocket,
+)
 
 
 @pytest.mark.parametrize("override", [
@@ -51,9 +54,22 @@ async def test_rest_props_supports_large_scoped_page_without_extra_charge():
     await provider.fetch_props("basketball_nba")
     provider.request.assert_awaited_once_with(
         "/v1/sports/basketball_nba/props",
-        params={"maxAgeSec": 30, "limit": 5000, "includeLinks": True,
+        params={"limit": 5000, "includeLinks": True,
                 "bookmakers": "fanduel"}, cost=3,
     )
+
+
+async def test_rest_props_can_explicitly_filter_price_change_age_without_changing_ws_filter():
+    provider = ParlayRest({"props_max_age_seconds": 120, "max_age_seconds": 30}, credential="")
+    provider.request = AsyncMock(return_value=ProviderEnvelope(
+        "parlay_rest", "snapshot", [], datetime.now(UTC), 1))
+    await provider.fetch_props("basketball_nba", markets="player_points")
+    params = provider.request.await_args.kwargs["params"]
+    assert params["maxAgeSec"] == 120
+    assert params["markets"] == "player_points"
+    stream = ParlayWebSocket({"props_max_age_seconds": 120, "max_age_seconds": 30}, credential="")
+    query = parse_qs(urlsplit(stream.stream_url("basketball_nba")).query)
+    assert query["max_age_s"] == ["30"]
 
 
 def test_complete_flag_needs_provider_confirmation_and_never_certifies_quote():

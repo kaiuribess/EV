@@ -26,7 +26,7 @@ async def probe(*, all_markets: bool = False) -> dict:
     provider = ParlayRest({"enabled": True, "sports": ["basketball_nba"],
                            "bookmakers": ["pinnacle", "fanduel", "draftkings", "caesars"],
                            "markets": ["player_points"], "props_limit": 10000 if all_markets else 5000,
-                           "max_age_seconds": 120, "session_request_budget": 3}, credential=key)
+                           "session_request_budget": 3}, credential=key)
     try:
         frame = (await provider.fetch_props("basketball_nba") if all_markets else
                  await provider.fetch_props("basketball_nba", markets="player_points"))

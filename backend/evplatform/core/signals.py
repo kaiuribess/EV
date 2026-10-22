@@ -22,6 +22,7 @@ from pydantic import Field, field_validator, model_validator
 
 from .models import Candidate, Contract, FeeSchedule, Market, Quote, SettlementResult, utcnow
 from .storage import Storage
+from .audit_codec import decode_audit_data
 
 D = Decimal
 
@@ -290,7 +291,10 @@ class SignalLedger:
                         current.id, identity, observation.market.id, candidate.strategy, candidate.venue,
                         candidate.outcome, int(candidate.synthetic), int(snapshot.qualified), observation.market.sport,
                         observation.market.market_type, observation.model, at.isoformat(), at.isoformat(), 1,
-                        observation.market.model_dump_json(), text, text, text)))
+                        observation.market.model_dump_json(),
+                        self.storage.compact_signal_json(text),
+                        self.storage.compact_signal_json(text),
+                        self.storage.compact_signal_json(text))))
                 else:
                     if at < current.last.evaluated_at:
                         raise ValueError("Signal observations must be processed in timestamp order")
@@ -299,11 +303,13 @@ class SignalLedger:
                     if candidate.ev_per_contract > current.best.candidate.ev_per_contract:
                         current.best = snapshot
                     statements.append(("""UPDATE signal_episodes SET last_seen=?,update_count=?,last_json=?,best_json=?
-                        WHERE id=?""", (at.isoformat(), current.updates, snapshot.model_dump_json(),
-                                          current.best.model_dump_json(), current.id)))
+                    WHERE id=?""", (at.isoformat(), current.updates,
+                                      self.storage.compact_signal_json(snapshot.model_dump_json()),
+                                      self.storage.compact_signal_json(current.best.model_dump_json()), current.id)))
                 statements.append(("""INSERT INTO signal_observations
                     (episode_id,observed_at,candidate_id,snapshot_json) VALUES(?,?,?,?)""",
-                    (current.id, at.isoformat(), candidate.id, snapshot.model_dump_json())))
+                    (current.id, at.isoformat(), candidate.id,
+                     self.storage.compact_signal_json(snapshot.model_dump_json()))))
             # SQL dedup keeps NO SIGNAL transitions durable without unbounded in-memory history.
             for strategy in sorted(strategies):
                 original = [c for c in observation.candidates if c.strategy == strategy]
@@ -420,7 +426,7 @@ class SignalLedger:
                     encoded, provenance.model_dump_json(), fingerprint))]
             graded = 0
             for episode_id, snapshot_json, first_seen in rows:
-                snapshot = SignalSnapshot.model_validate_json(snapshot_json)
+                snapshot = SignalSnapshot.model_validate_json(decode_audit_data(snapshot_json))
                 if datetime.fromisoformat(first_seen) >= result.settled_at:
                     grade = {"grade": "unavailable", "grade_reason": "Entry was observed at or after settlement"}
                 else:
@@ -445,9 +451,9 @@ class SignalLedger:
     def _public(row, columns):
         item = dict(zip(columns, row))
         market = Market.model_validate_json(item.pop("market_json"))
-        first = SignalSnapshot.model_validate_json(item.pop("first_json"))
-        last = SignalSnapshot.model_validate_json(item.pop("last_json"))
-        best = SignalSnapshot.model_validate_json(item.pop("best_json"))
+        first = SignalSnapshot.model_validate_json(decode_audit_data(item.pop("first_json")))
+        last = SignalSnapshot.model_validate_json(decode_audit_data(item.pop("last_json")))
+        best = SignalSnapshot.model_validate_json(decode_audit_data(item.pop("best_json")))
         item.update({"synthetic": bool(item["synthetic"]), "qualified": bool(item["qualified"]),
             "canonical_identity": item.pop("identity"), "event_name": market.event_name,
             "player": market.player, "line": str(market.line) if market.line is not None else None,

@@ -75,6 +75,19 @@ async def test_all_signals_persist_without_trading_authorization(ledger, market)
     assert summary["clv"] is None
 
 
+async def test_episode_snapshots_use_lossless_compact_storage(ledger, market):
+    await ledger.process(observation(market, [candidate(market)]))
+    await ledger.drain()
+    types = await (await ledger.storage.connection.execute(
+        "SELECT typeof(market_json),typeof(first_json),typeof(last_json),typeof(best_json) "
+        "FROM signal_episodes")).fetchone()
+    assert types == ("text", "blob", "blob", "blob")
+    assert (await ledger.query())["items"][0]["first"]["candidate"]["ev_per_contract"] == "0.15"
+    settlement = result(market)
+    await ledger.apply_result(market, settlement, provenance(settlement))
+    assert (await ledger.summary())["wins"] == 1
+
+
 async def test_ticks_retain_first_last_best_without_fake_wins(ledger, market):
     first = candidate(market, ev=".10")
     await ledger.process(observation(market, [first]))

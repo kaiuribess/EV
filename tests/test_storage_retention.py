@@ -1,12 +1,14 @@
 """Raw-detail pruning must preserve the audit and signal accounting contract."""
 from datetime import timedelta
+import sqlite3
 
 import pytest
 
 from evplatform.core.models import utcnow
 from evplatform.core.signals import SignalLedger
 from evplatform.core.storage import Storage
-from scripts.maintain_storage import _compact, _fast_offline_prune
+from scripts.maintain_storage import _compact, _compress_signal_snapshots, _fast_offline_prune
+from evplatform.core.audit_codec import decode_audit_data
 
 
 @pytest.mark.asyncio
@@ -111,3 +113,19 @@ async def test_offline_bulk_prune_keeps_permanent_events_and_counts_once(tmp_pat
         assert row == (1,)
     finally:
         await storage.close()
+
+
+def test_offline_signal_compression_preserves_every_snapshot_and_is_repeatable(tmp_path):
+    path = tmp_path / "historical.db"
+    text = '{"snapshot":"' + "A" * 3000 + '"}'
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE signal_episodes (first_json TEXT,last_json TEXT,best_json TEXT,market_json TEXT)")
+        conn.execute("INSERT INTO signal_episodes VALUES(?,?,?,?)", (text, text, text, '{"event_id":"e1"}'))
+    first = _compress_signal_snapshots(path, batch_size=1)
+    assert first["signal_episodes_compressed"] == 1
+    assert first["snapshot_bytes_after"] < first["snapshot_bytes_before"]
+    assert _compress_signal_snapshots(path, batch_size=1)["signal_episodes_compressed"] == 0
+    with sqlite3.connect(path) as conn:
+        row = conn.execute("SELECT first_json,last_json,best_json,market_json FROM signal_episodes").fetchone()
+        assert all(isinstance(value, bytes) and decode_audit_data(value) == text for value in row[:3])
+        assert conn.execute("SELECT json_extract(market_json,'$.event_id') FROM signal_episodes").fetchone() == ("e1",)

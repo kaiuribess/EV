@@ -8,6 +8,20 @@ Reviewed against official documentation on 2026-10-20 and updated with a bounded
 
 The documented `last_observed` plus `last_update_type: collector_observation` pair establishes a quote-bound collector observation. The current parser accepts timezone-qualified ISO values; numeric units are unspecified in the reviewed schema and remain unverified. `last_update` has legacy meanings and cannot universally establish verification or price movement. `line_changed_at_ms` is retained separately. Book/fixture heartbeat fields do not verify each displayed selection. The adapter preserves unknown market status; collector observation alone is insufficient for automatic execution. [Official reference](https://parlay-api.com/docs), [timing distinctions](https://parlay-api.com/docs/streaming).
 
+The October 22 schema clarifies that REST props `maxAgeSec` is a Pinnacle
+observation-age filter only for rows with validated `last_observed`; other rows
+are filtered by last price write. The default REST request now omits that
+parameter so quiet prices can be retained for review. It does not promote
+them into strict reference eligibility; quote-bound observation and active
+status must still be verified independently. [Current OpenAPI](https://parlay-api.com/openapi.json).
+
+One authenticated, three-credit NBA `player_points` read on October 22 returned
+91 rows (71 FanDuel, 20 Pinnacle) without this filter, after a two-minute
+filtered request returned zero. Twenty rows had both prices; none had a
+recent verified collector-observation clock, bilateral FanDuel links, or both
+evidence types. This confirms the coverage effect in this bounded sample and
+does not make the rows eligible for native orders.
+
 Retained top-ups, partial/truncated snapshots, continuation pages and degraded sources prevent strict completeness. Separate outcomes must arrive together with matching observation clocks; an older cached opposing side remains research-only. Missing prices invalidate prior usable quotes, without treating unrelated null columns as withdrawals. Observation metadata never changes the source identity signature. These are deliberately conservative local eligibility rules, not claims of upstream guarantees. [Snapshot and pagination contract](https://parlay-api.com/docs).
 
 ### October 21 live parser repair

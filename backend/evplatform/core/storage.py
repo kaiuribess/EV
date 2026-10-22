@@ -18,12 +18,25 @@ from .audit_codec import decode_audit_data, encode_audit_data
 @dataclass(frozen=True)
 class _PendingAuditData:
     text: str
+    threshold: int | None = None
 
 
 def _prepare_audit_batch(batch):
     """CPU work runs in a worker thread before opening the SQLite transaction."""
-    return [(sql, tuple(encode_audit_data(value.text) if isinstance(value, _PendingAuditData) else value
-                        for value in params), future) for sql, params, future in batch]
+    def prepared(params):
+        return tuple((encode_audit_data(value.text) if value.threshold is None
+                      else encode_audit_data(value.text, threshold=value.threshold))
+                     if isinstance(value, _PendingAuditData) else value for value in params)
+
+    return [([(statement, prepared(values)) for statement, values in sql] if isinstance(sql, list) else sql,
+             prepared(params), future) for sql, params, future in batch]
+
+
+def _has_pending_audit_data(sql, params):
+    return (any(isinstance(value, _PendingAuditData) for value in params)
+            or isinstance(sql, list) and any(
+                isinstance(value, _PendingAuditData)
+                for _, values in sql for value in values))
 
 
 class Storage:
@@ -33,11 +46,18 @@ class Storage:
     # retained separately and are never selected by this raw-detail policy.
     RAW_DETAIL_HOURS = 6
     RETENTION_BATCH = 2000
-    MAX_DATABASE_BYTES = 5 * 1024**3
+    MAX_DATABASE_BYTES = 3 * 1024**3
     PERMANENT_EVENT_SCHEMAS = (
         "trade.order", "trade.fill", "trade.settlement", "native.order",
         "native.settlement", "signal.result", "system.notice",
     )
+
+    @staticmethod
+    def compact_signal_json(data: str) -> _PendingAuditData:
+        # Signal snapshots are normally ~2 KB and repeat across first/last/best.
+        # Encode them on the writer thread; market_json stays TEXT for SQLite
+        # JSON queries and historical TEXT snapshots remain readable.
+        return _PendingAuditData(data, threshold=512)
 
     def __init__(self, path: str):
         self.path = path
@@ -97,8 +117,7 @@ class Storage:
             while len(batch) < 256 and not self.queue.empty():
                 batch.append(self.queue.get_nowait())
             try:
-                if any(any(isinstance(value, _PendingAuditData) for value in params)
-                       for _, params, _ in batch):
+                if any(_has_pending_audit_data(sql, params) for sql, params, _ in batch):
                     prepared = await asyncio.to_thread(_prepare_audit_batch, batch)
                 else:
                     prepared = batch

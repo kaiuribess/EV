@@ -33,6 +33,15 @@ REST implements `/v1/sports`, per-sport `/events`, `/odds`, `/props`, and
 decimal odds; the prop parser uses the documented American fields. Completeness
 and pagination headers are preserved. [Official REST reference](https://parlay-api.com/docs)
 
+REST props omit `maxAgeSec` by default. Parlay applies that filter to a validated
+Pinnacle observation age where available, but to last price-write age for other
+books. A quiet, still-displayed FanDuel price can therefore disappear under a
+short `maxAgeSec` even though its active status remains separately observable.
+`props_max_age_seconds` opts into this REST filter for diagnostics. The existing
+`max_age_seconds` controls the distinct WebSocket `max_age_s` subscription
+parameter. Neither omitted filtering nor a recent delivery certifies an
+individual quote as fresh or executable. [Current schema](https://parlay-api.com/openapi.json)
+
 The WebSocket connects to `/v1/ws/odds/{sport_key}` and consumes `connected`,
 `initial_state`, `odds_update`, and `heartbeat`. It uses full rows (`diff=false`).
 Business, Enterprise, or Scale access is required. Close codes for invalid

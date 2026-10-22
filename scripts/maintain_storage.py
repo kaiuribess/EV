@@ -21,11 +21,12 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from evplatform.core.models import utcnow  # noqa: E402
 from evplatform.core.storage import Storage  # noqa: E402
+from evplatform.core.audit_codec import decode_audit_data, encode_audit_data  # noqa: E402
 
 
 class MaintenanceStorage(Storage):
     # A pre-existing oversized database needs room for cursor/aggregate writes
-    # while old detail is removed. The normal 5 GiB cap is set after VACUUM.
+    # while old detail is removed. The normal per-database cap is set after VACUUM.
     MAX_DATABASE_BYTES = 100 * 1024**3
 
 
@@ -150,12 +151,68 @@ def _compact(path: Path) -> dict:
         requested = Storage.MAX_DATABASE_BYTES // page_size
         applied = conn.execute(f"PRAGMA max_page_count={requested}").fetchone()[0]
         if applied > requested:
-            raise RuntimeError("Database remains above the 5 GiB cap after compaction")
+            raise RuntimeError("Database remains above the operational cap after compaction")
         check = conn.execute("PRAGMA quick_check").fetchone()[0]
         if check != "ok":
             raise RuntimeError(f"SQLite integrity check failed: {check}")
         return {"auto_vacuum": conn.execute("PRAGMA auto_vacuum").fetchone()[0],
                 "max_database_bytes": applied * page_size, "quick_check": check}
+
+
+def _compress_signal_snapshots(path: Path, *, batch_size: int = 2_000) -> dict[str, int]:
+    """Losslessly migrate first/last/best episode JSON; safe to resume.
+
+    market_json remains TEXT because the signal summary uses SQLite JSON
+    functions on it. No signal, grade, fill, or settlement row is deleted.
+    """
+    if batch_size < 1:
+        raise ValueError("Signal compression batch must be positive")
+    updated = 0
+    bytes_before = bytes_after = 0
+    cursor = 0
+    with closing(sqlite3.connect(path, timeout=30)) as conn:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA synchronous=FULL")
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_episodes'").fetchone():
+            return {"signal_episodes_compressed": 0, "snapshot_bytes_before": 0,
+                    "snapshot_bytes_after": 0}
+        while True:
+            rows = conn.execute(
+                "SELECT rowid,first_json,last_json,best_json FROM signal_episodes "
+                "WHERE rowid>? ORDER BY rowid LIMIT ?", (cursor, batch_size)).fetchall()
+            if not rows:
+                break
+            changes = []
+            for rowid, *values in rows:
+                cursor = rowid
+                encoded = []
+                for value in values:
+                    if isinstance(value, bytes):
+                        # Existing compressed rows must remain decodable.
+                        decode_audit_data(value)
+                        encoded.append(value)
+                    else:
+                        packed = encode_audit_data(value, threshold=512)
+                        if decode_audit_data(packed) != value:
+                            raise RuntimeError("Signal snapshot compression mismatch")
+                        bytes_before += len(value.encode("utf-8"))
+                        bytes_after += len(packed) if isinstance(packed, bytes) else len(packed.encode("utf-8"))
+                        encoded.append(packed)
+                if encoded != values:
+                    changes.append((*encoded, rowid))
+            if changes:
+                with conn:
+                    conn.executemany(
+                        "UPDATE signal_episodes SET first_json=?,last_json=?,best_json=? WHERE rowid=?",
+                        changes)
+                updated += len(changes)
+                # Keep the temporary WAL bounded during a long offline pass.
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if updated and updated % 20_000 < batch_size:
+                print(json.dumps({"signal_episodes_compressed": updated,
+                                  "through_rowid": cursor}), flush=True)
+    return {"signal_episodes_compressed": updated,
+            "snapshot_bytes_before": bytes_before, "snapshot_bytes_after": bytes_after}
 
 
 def main() -> None:
@@ -164,6 +221,8 @@ def main() -> None:
     parser.add_argument("--compact", action="store_true", help="Reclaim disk after pruning")
     parser.add_argument("--fast-offline", action="store_true",
                         help="Use large SQLite batches for a stopped historical database")
+    parser.add_argument("--compress-signals", action="store_true",
+                        help="Losslessly compress existing signal episode snapshots")
     parser.add_argument("--compact-only", action="store_true",
                         help="Compact a stopped database after an already completed pruning pass")
     args = parser.parse_args()
@@ -174,10 +233,11 @@ def main() -> None:
     pruned = ({"events": 0, "signal_observations": 0, "signal_transitions": 0}
               if args.compact_only else _fast_offline_prune(path) if args.fast_offline
               else asyncio.run(_prune(path)))
+    compressed = _compress_signal_snapshots(path) if args.compress_signals else {}
     result = _compact(path) if args.compact or args.compact_only else {}
     print(json.dumps({"database": str(path), "before_bytes": before,
                       "after_bytes": path.stat().st_size, "scanned_old_detail": pruned,
-                      **result}), flush=True)
+                      **compressed, **result}), flush=True)
 
 
 if __name__ == "__main__":
