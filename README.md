@@ -217,9 +217,10 @@ For frontend development, run `npm.cmd run dev` in `frontend/`; Vite proxies to
   fills, produces partial fills, supports cancellation, and recovers on restart.
 - Shows source clocks, quote age, books, model details, orders, positions,
   plugin status/configuration, latency samples, and audit events.
-- Saves every generated signal update even while trading is paused, including
-  negative opportunities and NO SIGNAL transitions. Performance shows permanent
-  signal episodes and explicitly hypothetical grades from supplied results.
+- Records generated signal updates even while trading is paused, including
+  negative opportunities and NO SIGNAL transitions. Detailed per-tick records
+  have a six-hour retention window. Compact signal episodes, cumulative decision
+  and transition counts, and explicitly hypothetical grades remain available.
 
 Synthetic paper fills are intentionally conservative and simplified. They are
 not an estimate of live queue position, matching probability, adverse selection,
@@ -356,6 +357,29 @@ treating sportsbook and exchange prices as interchangeable.
 configuration. Never delete an active database or its WAL/SHM files. Stop the app
 before copying the database for a backup.
 
+Operational SQLite databases are capped at 4 GiB apiece after compaction. A
+background task removes raw quote/event detail, per-tick signal snapshots, and
+transition detail older than six hours. It keeps order/fill/settlement events,
+all order and fill tables, signal results, compact signal episodes, and cumulative
+signal counts. The retention task works outside pricing and order routing.
+New databases use SQLite full auto-vacuum and a bounded WAL. Existing databases
+need one offline compaction to reclaim previously occupied disk space:
+
+```powershell
+.\stop_local.ps1 -Port 8001
+.\.venv\Scripts\python.exe scripts\maintain_storage.py --database data\live-paper.db --compact
+.\start_live_paper.ps1 -Port 8001 -NoBrowser
+```
+
+Only run that command on the database belonging to the stopped service. It
+preserves financial history and compact signal history. A separate inactive demo
+database can still consume disk; inspect its orders, fills, settlements, and
+real-market episodes before removing it. The folder-wide size can exceed 10 GiB
+if multiple databases or old test artifacts accumulate, so inspect `data` when
+adding another long-running workspace.
+For a large stopped historical database, add `--fast-offline` to prune in larger
+committed ranges before compaction; an interrupted run can be repeated safely.
+
 `fixtures/demo_replay.jsonl` contains fixed-clock synthetic frames including stale,
 suspended, sequence-gap, and recovery cases. Regenerate it with:
 
@@ -397,7 +421,7 @@ for one trusted Windows account, not a public multi-user service.
 
 ## Validation and limits
 
-`run_tests.ps1` uses a project-local temporary directory because this Windows
+`run_tests.ps1` reuses a project-local temporary directory because this Windows
 profile denied pytest access to its default Temp tree. It runs Python tests,
 statement coverage, TypeScript checking, and the Vite production build.
 An upstream Starlette/httpx deprecation warning does not fail these checks.

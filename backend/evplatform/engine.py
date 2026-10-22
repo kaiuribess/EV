@@ -188,6 +188,7 @@ class Engine:
             asyncio.create_task(self._audit(), name="audit-enqueue"),
             asyncio.create_task(self._dashboard_events(), name="dashboard-observer"),
             asyncio.create_task(self._maintenance(), name="freshness-fill-maintenance"),
+            asyncio.create_task(self._storage_maintenance(), name="storage-retention"),
             asyncio.create_task(self._settlement_loop(), name="settlement-accounting"),
             asyncio.create_task(self._signal_loop(), name="signal-ledger"),
             asyncio.create_task(self.native.maintain(), name="native-reconciliation"),
@@ -662,6 +663,13 @@ class Engine:
                         record.health = await record.plugin.health_check()
                     except Exception as exc:
                         record.health = {"status": "error", "message": type(exc).__name__}
+
+    async def _storage_maintenance(self):
+        # Raw tick cleanup uses a separate observer connection and small durable
+        # delete batches. It never runs in the pricing or order-routing loop.
+        while True:
+            await asyncio.sleep(300)
+            await self.storage.retention_pass(max_batches=24)
 
     async def _settlement_loop(self):
         while True:

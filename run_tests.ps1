@@ -4,7 +4,9 @@ $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 if (-not (Test-Path -LiteralPath ".venv\Scripts\python.exe")) { & ".\setup_windows.ps1" }
 New-Item -ItemType Directory -Path "data" -Force | Out-Null
-$testTemp = "data\pytest-" + [guid]::NewGuid().ToString("N")
+# pytest replaces this directory on each run, so repeated checks cannot leave
+# a new full copy of temporary test databases every time.
+$testTemp = "data\pytest-current"
 & ".\.venv\Scripts\python.exe" -m pytest --basetemp=$testTemp --cov=evplatform --cov-report=term-missing --cov-report=json:data/coverage.json
 if ($LASTEXITCODE -ne 0) { throw "Backend tests failed." }
 if (-not $SkipFrontend) {

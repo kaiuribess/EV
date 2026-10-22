@@ -1,8 +1,10 @@
 """Durable signal episodes and explicitly verified, hypothetical one-contract grades.
 
 This is an independent event-bus observer, never an execution authority. It keeps
-bounded active state and enqueues SQLite writes. Cache misses, API reads and result
-imports may consult SQLite from this observer; pricing never awaits this worker.
+bounded active state and enqueues SQLite writes. Detailed ticks have a short
+retention window; compact episodes and aggregate counts remain durable.
+Cache misses, API reads and result imports may consult SQLite from this observer;
+pricing never awaits this worker.
 """
 from __future__ import annotations
 
@@ -168,6 +170,9 @@ class SignalLedger:
                     observed_at TEXT NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL)""", ()),
                 ("CREATE INDEX IF NOT EXISTS signal_transition_lookup ON signal_transitions(identity,strategy,synthetic,seq DESC)", ()),
                 ("CREATE INDEX IF NOT EXISTS signal_transition_report ON signal_transitions(synthetic,status)", ()),
+                ("""CREATE TABLE IF NOT EXISTS signal_transition_totals (
+                    synthetic INTEGER NOT NULL, status TEXT NOT NULL, total INTEGER NOT NULL,
+                    PRIMARY KEY(synthetic,status))""", ()),
                 ("""CREATE TABLE IF NOT EXISTS signal_cursors (
                     identity TEXT NOT NULL, strategy TEXT NOT NULL, observed_at TEXT NOT NULL,
                     PRIMARY KEY(identity,strategy))""", ()),
@@ -517,10 +522,16 @@ class SignalLedger:
             result["win_rate"] = result["wins"] / (result["wins"] + result["losses"]) if result["wins"] + result["losses"] else None
             transition_counts = await (await self.storage.connection.execute(
                 "SELECT COUNT(*),COALESCE(SUM(status='NO SIGNAL'),0) FROM signal_transitions" + where, params)).fetchone()
-            result["transition_count"], result["no_signal_count"] = transition_counts
-            obs_where = " WHERE e.synthetic=?" if synthetic is not None else ""
+            archived_counts = await (await self.storage.connection.execute(
+                "SELECT COALESCE(SUM(total),0),COALESCE(SUM(CASE WHEN status='NO SIGNAL' THEN total ELSE 0 END),0) "
+                "FROM signal_transition_totals" + where, params)).fetchone()
+            result["transition_count"] = transition_counts[0] + archived_counts[0]
+            result["no_signal_count"] = transition_counts[1] + archived_counts[1]
+            # Every decision increments its episode's durable update_count.
+            # Per-tick snapshot_json detail is retained for a short diagnostic
+            # window, while first/last/best episode snapshots remain permanent.
             result["decision_count"] = (await (await self.storage.connection.execute(
-                "SELECT COUNT(*) FROM signal_observations o JOIN signal_episodes e ON e.id=o.episode_id" + obs_where, params)).fetchone())[0]
+                "SELECT COALESCE(SUM(update_count),0) FROM signal_episodes" + where, params)).fetchone())[0]
             groups = []
             # All dimensions are internal allowlisted identifiers, never request SQL.
             for dimension in ("synthetic", "strategy", "venue", "sport", "market_type", "reference_model", "qualified", "grade"):
