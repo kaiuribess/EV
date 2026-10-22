@@ -105,6 +105,10 @@ class VerifiedOfferMapping(BaseModel):
     bookmaker: str = Field(min_length=1)
     verified: bool = False
     evidence: str = Field(min_length=8)
+    # A reviewed team/market identity does not certify exceptional settlement.
+    # Identity-only mappings may be displayed, but strict live references stop
+    # at the contract-review gate until the source and target rules are bridged.
+    settlement_equivalence_verified: bool = True
 
     @model_validator(mode="after")
     def complete_outcomes(self):
@@ -586,15 +590,10 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                                 parse_timestamp(row.get("changedAt"))) for row in outcomes.values()]
                 source_time = _oldest([book_clock for book_clock, _ in clock_pairs])
                 provider_time = _oldest([recorded_clock for _, recorded_clock in clock_pairs])
-                # A bookmaker-reported *change* is a quote-bound observation at
-                # that instant. It is not proof that an unchanged price was
-                # observed again at REST receipt. Require both sides and the
-                # provider's recording clocks; downstream TTLs reject old
-                # changes even while the active flags remain affirmative.
-                change_observed = (active and len(outcomes) >= 2
-                                   and all(book_clock is not None and recorded_clock is not None
-                                           and book_clock <= recorded_clock <= envelope.received_at
-                                           for book_clock, recorded_clock in clock_pairs))
+                # v4 documents both clocks as *changes*, not quote observations.
+                # Availability flags do not prove an unchanged selection was
+                # re-observed in this REST response. Retain the change clocks
+                # separately and leave observation eligibility unknown.
                 result.append(SourceOffer(
                     envelope.provider_id, book_key, str(fixture.get("fixtureId", "")), str(market_id),
                     None if player_id == "0" else str(player_id),
@@ -613,14 +612,12 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                      "market_catalog": {key: catalog[key] for key in (
                          "marketType", "marketName", "playerProp", "period", "handicap",
                      ) if key in catalog}},
-                    source_observed_at=source_time if change_observed else None,
-                    observation_verified=change_observed,
-                    observation_complete=change_observed,
+                    source_observed_at=None,
+                    observation_verified=False,
+                    observation_complete=False,
                     source_price_changed_at=source_time,
                     market_status_verified=active,
-                    verification_reason=("bookmaker_price_change_with_active_market"
-                                         if change_observed else
-                                         "current_availability_flags_only_no_quote_observation"
+                    verification_reason=("odds_papi_v4_change_clocks_not_quote_observation"
                                          if active else "odds_papi_availability_missing_or_inactive"),
                 ))
     return result
@@ -724,7 +721,10 @@ def _oddize_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
         result.append(SourceOffer(
             envelope.provider_id, group["bookmaker"], group["event_id"], group["market_key"],
             group["player_key"], group["line"], None, group["points"], group["prices"],
-            observed, None, "active", group["context"],
+            # Oddize publishes an observation clock but no current
+            # sportsbook-market status. Do not turn a listed price into an
+            # affirmative ACTIVE claim.
+            observed, None, "unknown", group["context"],
             source_observed_at=observed, observation_verified=verified,
             observation_complete=complete,
             verification_reason=problem or ("unsynchronized_outcomes" if not synchronized else
@@ -1009,6 +1009,7 @@ class VerifiedProviderMapper:
                 source_price_changed_at=offer.source_price_changed_at,
                 verification_reason=offer.verification_reason,
                 market_status_verified=offer.market_status_verified,
+                settlement_equivalence_verified=mapping.settlement_equivalence_verified,
                 received_at=envelope.received_at, synthetic=envelope.synthetic,
                 status=offer.status, original_market_id=offer.market_key,
             )

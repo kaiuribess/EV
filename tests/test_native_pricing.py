@@ -79,12 +79,12 @@ async def test_manual_review_is_one_use_and_does_not_enable_automation(market, q
     service._fresh_candidate = AsyncMock(side_effect=[first, second])
     preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
     assert preview["candidate"]["intent"]["id"] == first.intent.id
-    result = await service.submit(preview["review_token"], preview["terms_digest"], D("1"))
+    result = await service.submit(preview["review_token"], preview["terms_digest"], D("1"), preview["proposal_digest"])
     assert result["order"]["id"] == second.intent.id
     assert reviewed == [first.intent.id]
     assert not risk.auto_trade and not risk.manual_order_active(second.intent.id)
     with pytest.raises(RiskRejected, match="already used"):
-        await service.submit(preview["review_token"], preview["terms_digest"], D("1"))
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"), preview["proposal_digest"])
 
 
 async def test_manual_review_rejects_changed_price_without_placement(market, quotes):
@@ -104,7 +104,7 @@ async def test_manual_review_rejects_changed_price_without_placement(market, quo
     service._fresh_candidate = AsyncMock(side_effect=[first, changed])
     preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
     with pytest.raises(RiskRejected, match="changed"):
-        await service.submit(preview["review_token"], preview["terms_digest"], D("1"))
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"), preview["proposal_digest"])
     execute.assert_not_awaited()
 
 
@@ -126,7 +126,53 @@ async def test_manual_review_binds_explicit_owner_confirmation_and_never_places_
     review = await service.preview(found.market_id, found.venue, found.outcome, D("1"))
     assert review["unsigned"] and review["risk_decisions"]["kill_switch_on"]
     with pytest.raises(RiskRejected, match="confirmation"):
-        await service.submit(review["review_token"], "0" * 64, D("1"))
+        await service.submit(review["review_token"], "0" * 64, D("1"), review["proposal_digest"])
+    execute.assert_not_awaited()
+
+
+async def test_manual_proposal_digest_and_account_recheck_block_changed_terms(market, quotes):
+    data = setup_native(market, quotes)
+    found = candidate(data)
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock()
+    accounts = iter(("a" * 64, "b" * 64))
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(found.market_id, found.venue, found.outcome): data[2]},
+        build_order=lambda item, **_: SimpleNamespace(id=item.intent.id,
+            account_fingerprint=next(accounts)), execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(return_value=found)
+    preview = await service.preview(found.market_id, found.venue, found.outcome, D("1"))
+    with pytest.raises(RiskRejected, match="Account, market"):
+        await service.submit(preview["review_token"], preview["terms_digest"],
+                             D("1"), preview["proposal_digest"])
+    execute.assert_not_awaited()
+    assert risk.kill_switch
+
+
+async def test_manual_proposal_expiry_and_duplicate_digest_fail_without_placement(market, quotes):
+    data = setup_native(market, quotes)
+    found = candidate(data)
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock()
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(found.market_id, found.venue, found.outcome): data[2]},
+        build_order=lambda item, **_: SimpleNamespace(id=item.intent.id,
+            account_fingerprint="a" * 64), execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(return_value=found)
+    review = await service.preview(found.market_id, found.venue, found.outcome, D("1"))
+    with pytest.raises(RiskRejected, match="confirmation"):
+        await service.submit(review["review_token"], review["terms_digest"], D("1"), "0" * 64)
+    with pytest.raises(RiskRejected, match="already used"):
+        await service.submit(review["review_token"], review["terms_digest"],
+                             D("1"), review["proposal_digest"])
     execute.assert_not_awaited()
 
 

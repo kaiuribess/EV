@@ -49,15 +49,13 @@ Invoke-RestMethod http://127.0.0.1:8002/api/launch/setup | Select-Object -Expand
 Invoke-RestMethod http://127.0.0.1:8002/api/native/orders
 ```
 
-After a genuine reviewed single-market profile and current qualified candidate exist, the owner can inspect an unsigned proposal without placement:
+The later [corrective pass](NBA_PILOT_CORRECTIVE_2026-10-22.md) persists the disabled pilot and replaces the unsafe first-row selection recipe. After an executable native mapping and qualified candidate exist, the owner can inspect an unsigned proposal without placement using exact identities:
 
 ```powershell
-$setup = Invoke-RestMethod http://127.0.0.1:8002/api/launch/setup
-$marketId = $setup.launch_scope[0].markets[0].id
-.\.venv\Scripts\python.exe scripts\owner_nba_pilot.py --market-id $marketId --outcome 'Denver Nuggets' --max-cost-usd 1
+& .\.venv\Scripts\python.exe scripts\owner_nba_pilot.py prepare --event-id nba-20261022-den-okc --native-ticker KXNBAGAME-26OCT22DENOKC-DEN --outcome 'Denver Nuggets' --max-cost-usd 1 --proposal-file data\den-okc-owner-proposal.json
 ```
 
-**Owner-only live submission, not executed in this audit:** repeat the last command with `--submit`. It requires a terminal confirmation naming the exact ticker and dollar cap; it refuses missing scope, failed risk checks, changed quotes/depth/economics, an active emergency stop at dispatch, or an existing native order. Reconcile afterward with `GET /api/native/orders` and `POST /api/native/orders/{order_id}/reconcile`; these reads remain available with the stop on. A local/deterministic test is not a production order-to-settlement test.
+**Owner-only live submission, not executed in this audit:** `scripts\owner_nba_pilot.py submit --proposal-file data\den-okc-owner-proposal.json` consumes that exact saved proposal after its normal checks and interactive confirmation. It is currently blocked. Reconcile afterward with `GET /api/native/orders` and `POST /api/native/orders/{order_id}/reconcile`; these reads remain available with the stop on. A local/deterministic test is not a production order-to-settlement test.
 
 ## E. Ranked remaining blockers
 

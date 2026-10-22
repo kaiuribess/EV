@@ -1,0 +1,75 @@
+{
+  "captured_at": "2026-10-22T19:05:17.805120+00:00",
+  "endpoint": "GET /api/v1/odds/latest",
+  "params": {
+    "sport": "nba",
+    "limit": 100,
+    "include_past": false,
+    "offer_types": [
+      "ml"
+    ]
+  },
+  "event": {
+    "event_id": "202610220OKC",
+    "sport": "nba",
+    "start_date": "2026-10-22T21:30:00-04:00",
+    "team1": "DEN",
+    "team2": "OKC",
+    "odds": [
+      {
+        "american_odds": "+250",
+        "book": "circa",
+        "line": null,
+        "offer_type": "ml",
+        "team": "DEN",
+        "timestamp": "2026-10-22T18:50:22Z",
+        "ts": 1792695022
+      },
+      {
+        "american_odds": "+270",
+        "book": "dk",
+        "line": null,
+        "offer_type": "ml",
+        "team": "DEN",
+        "timestamp": "2026-10-22T13:50:20Z",
+        "ts": 1792677020
+      },
+      {
+        "american_odds": "+260",
+        "book": "fd",
+        "line": null,
+        "offer_type": "ml",
+        "team": "DEN",
+        "timestamp": "2026-10-22T00:01:03Z",
+        "ts": 1792627263
+      },
+      {
+        "american_odds": "-300",
+        "book": "circa",
+        "line": null,
+        "offer_type": "ml",
+        "team": "OKC",
+        "timestamp": "2026-10-22T18:50:22Z",
+        "ts": 1792695022
+      },
+      {
+        "american_odds": "-340",
+        "book": "dk",
+        "line": null,
+        "offer_type": "ml",
+        "team": "OKC",
+        "timestamp": "2026-10-22T13:50:20Z",
+        "ts": 1792677020
+      },
+      {
+        "american_odds": "-320",
+        "book": "fd",
+        "line": null,
+        "offer_type": "ml",
+        "team": "OKC",
+        "timestamp": "2026-10-22T00:01:03Z",
+        "ts": 1792627263
+      }
+    ]
+  }
+}

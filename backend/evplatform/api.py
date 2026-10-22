@@ -84,6 +84,7 @@ class ManualSubmitBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_token: str
     terms_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    proposal_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     approved_max_cost_usd: Decimal = Field(gt=0, allow_inf_nan=False)
 
 
@@ -311,7 +312,8 @@ def create_app(settings=None):
     @app.post("/api/native/manual/submit")
     async def native_manual_submit(body: ManualSubmitBody):
         try:
-            return await manual_native.submit(body.review_token, body.terms_digest, body.approved_max_cost_usd)
+            return await manual_native.submit(body.review_token, body.terms_digest,
+                                               body.approved_max_cost_usd, body.proposal_digest)
         except (RiskRejected, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

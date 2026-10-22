@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..core.models import Envelope, ProviderFrame, utcnow
+from ..core.paths import runtime_data_file
 from ..core.plugins import InputPlugin, Manifest, Plugin
 from ..venues.prophetx_financial import ProphetXAccountReview
 
@@ -46,7 +47,8 @@ class ProviderBridge(InputPlugin):
         await self.stop()
         await super().start(context)
         from ..integrations.normalization import VerifiedProviderMapper
-        self.mapper = await asyncio.to_thread(VerifiedProviderMapper.from_file, "data/verified_mappings.json")
+        self.mapper = await asyncio.to_thread(VerifiedProviderMapper.from_file,
+            runtime_data_file("verified_mappings.json", self.engine.settings.data_dir))
         self.client = self.factory({**context.config, "enabled": True})
         if await self.client.connect():
             self.task = asyncio.create_task(self._run(), name=f"input:{self.manifest.name}")

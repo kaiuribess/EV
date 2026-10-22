@@ -26,7 +26,9 @@ class ManualReview:
     outcome: str
     max_cost_usd: Decimal
     terms_digest: str
+    proposal_digest: str
     profile_digest: str
+    created_at: datetime
     expires_at: datetime
 
 
@@ -73,6 +75,34 @@ class ManualNativeService:
             "settlement_probability_source": candidate.settlement_probability_source,
         })
 
+    def _proposal_digest(self, *, candidate, order, profile_digest: str,
+                         max_cost_usd: Decimal, created_at: datetime, expires_at: datetime) -> str:
+        market = self.engine.markets[candidate.market_id]
+        book = self.engine.native.books[(candidate.market_id, candidate.venue, candidate.outcome)]
+        registry = getattr(self.engine, "registry", None)
+        source_mappings = {}
+        for name, record in getattr(registry, "records", {}).items():
+            mapper = getattr(record.plugin, "mapper", None)
+            if mapper is not None:
+                source_mappings[name] = [item.model_dump(mode="json") for item in sorted(
+                    (item for item in mapper.mappings.values() if item.market.id == market.id),
+                    key=lambda item: item.signature)]
+        return digest_json({
+            "terms_digest": self._terms(candidate), "account_fingerprint": order.account_fingerprint,
+            "profile_digest": profile_digest, "market_identity": market.identity(),
+            "event_id": market.event_id, "native_outcome": candidate.intent.instrument.native_outcome,
+            "native_ticker": candidate.intent.instrument.instrument_id,
+            "source_mapping_digest": digest_json(source_mappings),
+            "build_id": getattr(self.engine.native, "build_id", None),
+            "pricing_digest": getattr(getattr(self.engine, "settings", None), "pricing", None).model_dump(mode="json")
+                if getattr(getattr(self.engine, "settings", None), "pricing", None) is not None else None,
+            "book_asks": [level.model_dump(mode="json") for level in book.asks],
+            "book_source_time": book.source_time.isoformat() if book.source_time else None,
+            "fee_bound": book.fee_bound.model_dump(mode="json"),
+            "max_cost_usd": str(max_cost_usd),
+            "created_at": created_at.isoformat(), "expires_at": expires_at.isoformat(),
+        })
+
     async def _fresh_candidate(self, market_id: str, venue: str, outcome: str, max_cost_usd: Decimal):
         native: NativeRuntime = self.engine.native
         record = self.engine.registry.records.get("native_positive_ev")
@@ -111,19 +141,25 @@ class ManualNativeService:
             # The submit path repeats the full armed check under the OMS lock.
             async with self.engine.oms.lock:
                 self.engine.native.preview_check(order)
-            expires_at = utcnow() + timedelta(seconds=90)
+            created_at = utcnow()
+            expires_at = created_at + timedelta(seconds=90)
             token = secrets.token_urlsafe(32)
+            proposal_digest = self._proposal_digest(candidate=candidate, order=order,
+                profile_digest=profile_digest, max_cost_usd=max_cost_usd,
+                created_at=created_at, expires_at=expires_at)
             self.reviews = {key: value for key, value in self.reviews.items() if value.expires_at > utcnow()}
             if len(self.reviews) >= 32:
                 self.reviews.pop(next(iter(self.reviews)))
-            self.reviews[token] = ManualReview(market_id, venue, outcome, max_cost_usd, self._terms(candidate),
-                                               profile_digest, expires_at)
+            self.reviews[token] = ManualReview(market_id, venue, outcome, max_cost_usd,
+                self._terms(candidate), proposal_digest, profile_digest, created_at, expires_at)
             market = self.engine.markets[market_id]
             book = self.engine.native.books[(market_id, venue, outcome)]
             return {"review_token": token, "terms_digest": self._terms(candidate),
-                    "created_at": utcnow().isoformat(), "expires_at": expires_at.isoformat(),
+                    "proposal_digest": proposal_digest,
+                    "created_at": created_at.isoformat(), "expires_at": expires_at.isoformat(),
                     "environment": self.engine.settings.mode,
-                    "market": {"id": market.id, "event_name": market.event_name,
+                    "market": {"id": market.id, "event_id": market.event_id,
+                               "identity": market.identity(), "event_name": market.event_name,
                                "market_type": market.market_type, "player": market.player,
                                "outcome": outcome, "settlement": market.settlement.model_dump(mode="json"),
                                "original_ids": market.original_ids},
@@ -141,13 +177,15 @@ class ManualNativeService:
                     "candidate": candidate.model_dump(mode="json"),
                     "note": "Review only. No order sent. A changed price, fair value, size or scope requires a new review."}
 
-    async def submit(self, token: str, terms_digest: str, approved_max_cost_usd: Decimal):
+    async def submit(self, token: str, terms_digest: str, approved_max_cost_usd: Decimal,
+                     proposal_digest: str | None = None):
         async with self.lock:
             review = self.reviews.pop(token, None)  # Consume before any await; never replay a click.
             if review is None or utcnow() >= review.expires_at:
                 raise RiskRejected("Manual review expired or was already used; review the trade again")
             try:
-                if (terms_digest != review.terms_digest or approved_max_cost_usd != review.max_cost_usd):
+                if (terms_digest != review.terms_digest or approved_max_cost_usd != review.max_cost_usd
+                        or proposal_digest != review.proposal_digest):
                     raise RiskRejected("Explicit confirmation does not match the reviewed trade")
                 profile_digest = self._gate(for_submit=True)
                 if profile_digest != review.profile_digest:
@@ -155,6 +193,11 @@ class ManualNativeService:
                 candidate = await self._fresh_candidate(review.market_id, review.venue, review.outcome, review.max_cost_usd)
                 if self._terms(candidate) != review.terms_digest:
                     raise RiskRejected("Trade size, price, model or edge changed; review the trade again")
+                order = self.engine.native.build_order(candidate, execution_origin="manual")
+                if self._proposal_digest(candidate=candidate, order=order,
+                        profile_digest=profile_digest, max_cost_usd=review.max_cost_usd,
+                        created_at=review.created_at, expires_at=review.expires_at) != review.proposal_digest:
+                    raise RiskRejected("Account, market, mapping, depth, fees or configuration changed")
                 with self.engine.risk.manual_order(candidate.intent.id):
                     order = await self.engine.native.execute(candidate, execution_origin="manual")
                 return {"order": order.model_dump(mode="json"), "automation_enabled": self.engine.risk.auto_trade,

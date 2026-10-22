@@ -56,7 +56,7 @@ def test_exact_nba_match_preserves_observation_and_excludes_stale():
     quote = quotes[0]
     assert quote.market_id == expected.id and quote.bookmaker == "circa"
     assert quote.decimal_odds["HOME"] == Decimal("1.909090909090909090909090909")
-    assert quote.status == "active" and quote.quality == 1
+    assert quote.status == "unknown" and quote.quality == 1
     assert quote.observation_verified and quote.observation_complete
     assert not quote.market_status_verified and not quote.synthetic
     assert abs((quote.source_time - (now - timedelta(seconds=10))).total_seconds()) < 1
@@ -85,7 +85,7 @@ def test_additional_real_book_codes_are_exactly_normalized_for_paper():
         source.register_market(expected)
         quote = source.apply_frame(snapshot(utcnow(), start=expected.start_time,
             book=source_code))[0]
-        assert quote.bookmaker == canonical and quote.status == "active"
+        assert quote.bookmaker == canonical and quote.status == "unknown"
 
 
 def test_incomplete_mismatched_or_conflicting_observations_cannot_price():
@@ -97,13 +97,13 @@ def test_incomplete_mismatched_or_conflicting_observations_cannot_price():
     assert not source.apply_frame(snapshot(now, start=expected.start_time, side_skew=1))
     assert not source.apply_frame(snapshot(now, start=expected.start_time, line=1.5))
     first = source.apply_frame(snapshot(now, start=expected.start_time))
-    assert first and first[0].status == "active"
+    assert first and first[0].status == "unknown"
     conflict = source.apply_frame(snapshot(now, start=expected.start_time, home_price=-120))
     assert len(conflict) == 1 and conflict[0].status == "suspended"
     assert conflict[0].quality == 0
     recovered = source.apply_frame(snapshot(now + timedelta(seconds=2), start=expected.start_time,
         home_price=-120))
-    assert len(recovered) == 1 and recovered[0].status == "active"
+    assert len(recovered) == 1 and recovered[0].status == "unknown"
     assert source.apply_frame(snapshot(now + timedelta(seconds=3), start=expected.start_time,
         complete=False))[0].status == "withdrawn"
 
@@ -238,7 +238,7 @@ async def test_cached_oddize_snapshot_joins_later_parlay_board_on_event_bus(tmp_
         matched = [q for values in engine.quotes.values() for q in values.values()
             if q.provider == "oddize_paper_input"]
         assert len(matched) == 1 and matched[0].bookmaker == "circa"
-        assert matched[0].status == "active" and not matched[0].market_status_verified
+        assert matched[0].status == "unknown" and not matched[0].market_status_verified
         assert engine.quote_public(matched[0])["paper_comparison_usable"]
         assert not engine.risk.orders and not engine.settings.live_enabled
         await engine.bus.publish(Envelope(schema_name="provider.frame", source="oddize_rest",

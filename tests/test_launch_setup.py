@@ -29,7 +29,8 @@ class RunningWorker:
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    result = Engine(Settings(_env_file=None, database_path=str(tmp_path / "offline.db")))
+    result = Engine(Settings(_env_file=None, database_path=str(tmp_path / "offline.db"),
+                             data_dir=str(tmp_path / "data")))
     register_external(result.registry, result)
     return result
 
@@ -302,7 +303,8 @@ def test_invalid_limits_do_not_echo_values(tmp_path, contents):
 
 
 def native_app(tmp_path):
-    app = create_app(Settings(_env_file=None, mode="production", database_path=str(tmp_path / "api.db")))
+    app = create_app(Settings(_env_file=None, mode="production", database_path=str(tmp_path / "api.db"),
+                              data_dir=str(tmp_path / "data")))
     return app
 
 
@@ -328,6 +330,7 @@ def test_manual_native_api_fails_closed_without_launch_profile(tmp_path, monkeyp
         assert response.status_code == 409
         assert client.post("/api/native/manual/submit", headers=HEADERS,
                            json={"review_token": "invented", "terms_digest": "0" * 64,
+                                 "proposal_digest": "0" * 64,
                                  "approved_max_cost_usd": "1"}).status_code == 409
         assert client.get("/api/native/orders").json()["orders"] == []
 

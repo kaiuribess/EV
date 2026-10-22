@@ -47,6 +47,7 @@ class NativeRuntime:
         self.profile = None
         self.portfolio = None
         self.profile_error = ""
+        self.structural_review = None
         self.build_id = ""
         self.mapper = None
         self.books = {}
@@ -74,8 +75,17 @@ class NativeRuntime:
 
     async def start(self):
         self.build_id = await asyncio.to_thread(build_fingerprint)
-        profile_path = Path("data/launch_profile.json")
-        portfolio_path = Path("data/launch_portfolio.json")
+        from .paths import runtime_data_file
+        from .structural_review import StructuralPilotReview
+        review_path = runtime_data_file("nba_pilot_structural_review.json", self.engine.settings.data_dir)
+        if review_path.exists():
+            try:
+                self.structural_review = await asyncio.to_thread(
+                    lambda: StructuralPilotReview.model_validate_json(review_path.read_text(encoding="utf-8")))
+            except (ValueError, OSError):
+                self.profile_error = "Structural pilot review is invalid; no pilot execution is permitted"
+        profile_path = runtime_data_file("launch_profile.json", self.engine.settings.data_dir)
+        portfolio_path = runtime_data_file("launch_portfolio.json", self.engine.settings.data_dir)
         if profile_path.exists() and portfolio_path.exists():
             self.profile_error = "Choose a portfolio or a legacy profile; conflicting launch files are blocked"
         elif portfolio_path.exists():
@@ -111,7 +121,8 @@ class NativeRuntime:
             self.engine.settings.risk = self.engine.risk.config
         from ..venues.book_normalization import NativeBookMapper
         try:
-            self.mapper = await asyncio.to_thread(NativeBookMapper.from_file, "data/native_mappings.json")
+            self.mapper = await asyncio.to_thread(NativeBookMapper.from_file,
+                runtime_data_file("native_mappings.json", self.engine.settings.data_dir))
         except (ValueError, OSError):
             self.profile_error = "Native mappings are invalid; review the exact market and fee evidence"
         await self.manager.start()

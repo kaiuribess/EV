@@ -58,6 +58,8 @@ class Engine:
             self.schemas.register(name, 1, model)
         self.bus = EventBus(self.schemas, self.risk.halt)
         self.metrics = Metrics()
+        from .core.paths import runtime_database_path
+        self.settings.database_path = str(runtime_database_path(self.settings.database_path))
         self.storage = Storage(self.settings.database_path)
         self.storage.on_failure = self.risk.halt
         self.signal_ledger = SignalLedger(self.storage)
@@ -807,7 +809,8 @@ class Engine:
         paper_age = quote.age_ms()
         paper_usable = (bool(market and market.extensions.get("paper_only"))
             and quote.provider in {"parlay_paper_input", "oddize_paper_input"}
-            and quote.status == "active" and quote.quality == 1.0
+            and (quote.status == "active" or quote.provider == "oddize_paper_input"
+                 and quote.status == "unknown") and quote.quality == 1.0
             and paper_age is not None and 0 <= paper_age <= 600000)
         return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": age,
                 "execution_freshness_reasons": reasons if strict else (),

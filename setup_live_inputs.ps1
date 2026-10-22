@@ -155,9 +155,10 @@ if (@($pricing.enabled_reference_profiles).Count -ne $enabled.Count -or $current
 # Native stores the requested quarter-Kelly/cash-only policy, but its separate
 # account and launch gates must still verify cash and authorize any real stake.
 $riskChanges = @{ block_overlapping_events = $true; block_overlapping_players = $true;
-    unit_size_usd = '5'; daily_loss_limit = $null }
+    unit_size_usd = '5' }
 if ($isPaper) {
     $riskChanges.max_order_stake = '5'
+    $riskChanges.daily_loss_limit = $null
 } else {
     $riskChanges.available_cash_only = $true
     $riskChanges.stake_sizing = 'quarter_kelly'

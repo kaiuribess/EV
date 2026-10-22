@@ -1,0 +1,109 @@
+{
+  "captured_at": "2026-10-22T19:03:48.410288+00:00",
+  "endpoint": "GET /v4/odds",
+  "params": {
+    "fixtureId": "id1100013273682538",
+    "bookmakers": "pinnacle,fanduel",
+    "verbosity": 3
+  },
+  "payload": {
+    "fixtureId": "id1100013273682538",
+    "statusId": 0,
+    "hasOdds": true,
+    "startTime": "2026-10-23T01:30:00.000Z",
+    "participant1Id": 3418,
+    "participant2Id": 3417,
+    "sportId": 11,
+    "tournamentId": 132,
+    "bookmakerOdds": {
+      "pinnacle": {
+        "bookmakerIsActive": true,
+        "suspended": false,
+        "markets": {
+          "111": {
+            "bookmakerMarketId": "line/4/487/1637469558/3775284939/0/moneyline",
+            "marketActive": true,
+            "outcomes": {
+              "111": {
+                "players": {
+                  "0": {
+                    "active": true,
+                    "bookmakerOutcomeId": "home",
+                    "bookmakerChangedAt": "2026-10-22T18:09:06.177Z",
+                    "changedAt": "2026-10-22T18:09:06.491Z",
+                    "price": 1.337
+                  }
+                }
+              },
+              "112": {
+                "players": {
+                  "0": {
+                    "active": true,
+                    "bookmakerOutcomeId": "away",
+                    "bookmakerChangedAt": "2026-10-22T18:09:06.177Z",
+                    "changedAt": "2026-10-22T18:09:06.491Z",
+                    "price": 3.62
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "fanduel": {
+        "bookmakerIsActive": true,
+        "suspended": false,
+        "markets": {
+          "111": {
+            "bookmakerMarketId": "734.180910683",
+            "marketActive": true,
+            "outcomes": {
+              "111": {
+                "players": {
+                  "0": {
+                    "active": true,
+                    "bookmakerOutcomeId": "3319741",
+                    "bookmakerChangedAt": null,
+                    "changedAt": "2026-10-22T18:41:18.600Z",
+                    "price": 1.3
+                  }
+                }
+              },
+              "112": {
+                "players": {
+                  "0": {
+                    "active": true,
+                    "bookmakerOutcomeId": "237492",
+                    "bookmakerChangedAt": null,
+                    "changedAt": "2026-10-22T18:41:18.600Z",
+                    "price": 3.65
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "metadata": {
+    "market_catalog": {
+      "111": {
+        "marketType": "moneyline",
+        "marketName": "Winner (incl. overtime)",
+        "playerProp": false,
+        "period": "result",
+        "handicap": 0.0
+      }
+    },
+    "fixture_discovery": {
+      "fixtureId": "id1100013273682538",
+      "participant1Id": 3418,
+      "participant2Id": 3417,
+      "participant1Name": "Oklahoma City Thunder",
+      "participant2Name": "Denver Nuggets",
+      "startTime": "2026-10-23T01:30:00+00:00",
+      "tournamentName": "NBA"
+    }
+  }
+}

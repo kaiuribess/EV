@@ -72,7 +72,7 @@ async def test_both_launch_files_fail_closed(tmp_path, monkeypatch):
     a, b, _, _ = accounts()
     (tmp_path/"data/launch_profile.json").write_text(a.model_dump_json())
     (tmp_path/"data/launch_portfolio.json").write_text(LaunchPortfolio(profiles=(a,b)).model_dump_json())
-    runtime = NativeRuntime(Engine(Settings()))
+    runtime = NativeRuntime(Engine(Settings(data_dir=str(tmp_path / "data"))))
     runtime.manager.start = AsyncMock()
     await runtime.start()
     assert "conflicting" in runtime.profile_error

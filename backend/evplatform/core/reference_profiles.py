@@ -128,6 +128,8 @@ def freshness_rule(config, market: Market, provider: str, bookmaker: str) -> Ref
 
 def quote_eligibility(config, market: Market, quote: Quote, now: datetime) -> tuple[bool, tuple[str, ...], float | None]:
     reasons = []
+    if quote.status != "active":
+        reasons.append("Current sportsbook market is not verified active")
     age = None if quote.source_observed_at is None else (now - quote.source_observed_at).total_seconds() * 1000
     if not quote.observation_verified or quote.source_observed_at is None:
         reasons.append("Validated outcome-level observation is missing")
@@ -135,6 +137,8 @@ def quote_eligibility(config, market: Market, quote: Quote, now: datetime) -> tu
         reasons.append("Synchronized complete outcome observation is unverified")
     if not quote.market_status_verified:
         reasons.append("Current outcome-level market status is unverified")
+    if not quote.settlement_equivalence_verified:
+        reasons.append("Source-to-target exceptional settlement comparison is unresolved")
     rule = freshness_rule(config, market, quote.provider, quote.bookmaker)
     if rule is None:
         reasons.append("Verified exact-source TTL is missing")

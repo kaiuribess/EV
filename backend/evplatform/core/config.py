@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .reference_profiles import ReferenceFreshnessRule, ReferenceProfile
+from .paths import PROJECT_ROOT
 
 
 class PricingConfig(BaseModel):
@@ -96,11 +97,12 @@ class RiskConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="EV_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="EV_", env_file=PROJECT_ROOT / ".env", extra="ignore")
     mode: Literal["demo", "paper", "sandbox", "production"] = "demo"
     auto_trade: bool = False
     live_enabled: bool = False
     database_path: str = "data/evplatform.db"
+    data_dir: str | None = None
     host: Literal["127.0.0.1", "localhost", "::1"] = "127.0.0.1"
     port: int = 8000
     demo_interval: float = Field(default=.5, ge=.05)

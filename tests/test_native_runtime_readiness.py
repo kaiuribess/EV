@@ -254,7 +254,8 @@ async def test_malformed_launch_artifact_fails_closed_without_secret_echo(tmp_pa
     (tmp_path/"data").mkdir()
     secret_marker = "misplaced-secret-must-not-be-displayed"
     (tmp_path/"data"/"launch_profile.json").write_text('{"venue":"'+secret_marker+'"}', encoding="utf-8")
-    engine = Engine(Settings(mode="sandbox", database_path=str(tmp_path/"test.db")))
+    engine = Engine(Settings(mode="sandbox", database_path=str(tmp_path/"test.db"),
+                             data_dir=str(tmp_path / "data")))
     await engine.start()
     try:
         assert engine.native.profile is None

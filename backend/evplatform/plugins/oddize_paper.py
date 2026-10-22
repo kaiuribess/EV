@@ -48,7 +48,7 @@ class OddizePaperNormalizer:
         if (offer.context.get("event_sport") != "nba" or "nba" not in self.config.sports
                 or offer.market_key != "ml" or offer.player_key is not None or offer.line is not None
                 or offer.period is not None or offer.bookmaker not in BOOKS
-                or offer.status != "active" or not offer.observation_verified
+                or offer.status != "unknown" or not offer.observation_verified
                 or not offer.observation_complete or offer.observed_at is None):
             return None
         teams = offer.context.get("participants")
@@ -85,7 +85,7 @@ class OddizePaperNormalizer:
         return Quote(market_id=market.id, provider="oddize_paper_input",
             bookmaker=BOOKS[offer.bookmaker],
             decimal_odds={"HOME": offer.prices[teams[0]], "AWAY": offer.prices[teams[1]]},
-            status="active" if current else "suspended", quality=1.0 if current else 0.0,
+            status="unknown" if current else "suspended", quality=1.0 if current else 0.0,
             source_time=offer.observed_at, source_observed_at=offer.source_observed_at,
             provider_time=offer.provider_time, received_at=now, synthetic=False,
             original_market_id=offer.event_id, observation_verified=True,
@@ -131,8 +131,8 @@ class OddizePaperNormalizer:
                     self.quotes[key] = suspended
                     updates.append(suspended)
                 proposed.pop(key)
-            elif old.source_time == new.source_time and old.status == "suspended" and new.status == "active":
-                # A later HTTP receipt cannot make an old observation active.
+            elif old.source_time == new.source_time and old.status == "suspended" and new.status == "unknown":
+                # A later HTTP receipt cannot renew an old observation.
                 proposed.pop(key)
         for key, quote in proposed.items():
             old = self.quotes.get(key)

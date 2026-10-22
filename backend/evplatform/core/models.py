@@ -151,7 +151,7 @@ class Quote(TimedData):
     provider: str
     bookmaker: str
     decimal_odds: dict[str, Decimal]
-    status: Literal["active", "suspended", "withdrawn"] = "active"
+    status: Literal["active", "unknown", "suspended", "withdrawn"] = "active"
     sequence: int | None = None
     original_market_id: str | None = None
     quality: float = Field(default=1.0, ge=0, le=1)
@@ -159,6 +159,7 @@ class Quote(TimedData):
     observation_verified: bool = False
     observation_complete: bool = False
     market_status_verified: bool = False
+    settlement_equivalence_verified: bool = True
     source_price_changed_at: datetime | None = None
     verification_reason: str | None = None
 

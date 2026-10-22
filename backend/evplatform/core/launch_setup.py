@@ -11,16 +11,17 @@ from pathlib import Path
 
 from .models import utcnow
 from .readiness import LiveLimits, ReadinessBlocker
+from .paths import runtime_data_file
 
 
 def _running(task):
     return task is not None and not task.done() and not task.cancelled()
 
 
-def operator_limits_draft(path="data/operator_launch_limits.json"):
+def operator_limits_draft(path=None):
     """Only validated, nonsecret money-policy fields may leave this boundary."""
     try:
-        target = Path(path)
+        target = Path(path) if path is not None else runtime_data_file("operator_launch_limits.json")
         if not target.exists():
             return None, None
         if target.stat().st_size > 16384:
@@ -153,6 +154,11 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
     }
     native_markets = {item.market.id for item in mappings}
     launch_scope = []
+    structural = native.structural_review
+    source_signatures_loaded = (bool(structural) and all(
+        any(record.plugin.mapper and signature in record.plugin.mapper.mappings
+            for record in engine.registry.records.values() if isinstance(record.plugin, ProviderBridge))
+        for signature in structural.source_signatures.values()))
     for venue, profile in profiles.items():
         scoped_markets = []
         for market_id in profile.market_ids:
@@ -160,7 +166,19 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
             name = market_id if market is None else " · ".join(str(value) for value in (
                 market.event_name, market.market_type, market.player, market.statistic,
                 market.line, market.settlement.period) if value is not None and value != "")
-            scoped_markets.append({"id": market_id, "name": name})
+            row = {"id": market_id, "name": name}
+            if market is not None:
+                row["event_id"] = market.event_id
+            if structural and structural.canonical_market_id == market_id:
+                row["event_id"] = structural.canonical_event_id
+                row["structural_native_outcomes"] = structural.native_outcomes
+            selections = [{"ticker": item.instrument.instrument_id,
+                           "outcome": item.instrument.outcome,
+                           "native_outcome": item.instrument.native_outcome}
+                for item in mappings if item.market.id == market_id and item.instrument.venue == venue]
+            if selections:
+                row["native_selections"] = selections
+            scoped_markets.append(row)
         launch_scope.append({"venue": venue, "environment": profile.environment,
             "account_fingerprint": profile.account_fingerprint,
             "markets": scoped_markets, "strategy_ids": list(profile.strategy_ids),
@@ -268,6 +286,8 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
             "synthetic_candidates": sum(bool(item.synthetic) for item in engine.opportunities.values())},
         "risk_policy": risk_policy, "accounts": accounts, "requirements": requirements,
         "launch_scope": launch_scope,
+        "structural_review": ({**structural.model_dump(mode="json"),
+            "source_signatures_loaded": source_signatures_loaded} if structural else None),
         "software_blockers": [item.model_dump(mode="json") for item in software_blockers],
         "pricing": engine.settings.pricing.model_dump(mode="json"), "inputs": inputs,
         "profile_draft": {"can_prepare": False, "blockers": draft_blockers,

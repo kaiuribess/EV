@@ -103,7 +103,10 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
     conflicts = set()
     eligible = None if config.eligible_books is None else set(config.eligible_books)
     for quote in quotes:
-        if quote.market_id != market.id or quote.status != "active":
+        paper_unknown = (market.extensions.get("paper_only") is True
+                         and quote.provider == "oddize_paper_input"
+                         and quote.status == "unknown")
+        if quote.market_id != market.id or (quote.status != "active" and not paper_unknown):
             continue
         if not quote.bookmaker or quote.bookmaker != quote.bookmaker.strip():
             continue
@@ -183,7 +186,9 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
             evidence.update({"source_observed_at": quote.source_observed_at.isoformat() if quote.source_observed_at else None,
                 "source_price_changed_at": quote.source_price_changed_at.isoformat() if quote.source_price_changed_at else None,
                 "observation_verified": quote.observation_verified, "observation_complete": quote.observation_complete,
-                "market_status_verified": quote.market_status_verified, "execution_eligible": eligible,
+                "market_status_verified": quote.market_status_verified,
+                "settlement_equivalence_verified": quote.settlement_equivalence_verified,
+                "execution_eligible": eligible,
                 "freshness_factor": "1" if eligible else "0", "ttl_seconds": str(rule.ttl_seconds) if rule else None,
                 "sensitivity_probabilities": {k: str(v) for k, v in sensitivity[book].items()}})
         references.append(evidence)
@@ -256,7 +261,8 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
             if fair.execution_eligible and (rule is None or source_time is None
                     or reference.get("source_observed_at") != raw_time
                     or any(reference.get(flag) is not True for flag in (
-                        "execution_eligible", "observation_verified", "observation_complete", "market_status_verified"))
+                        "execution_eligible", "observation_verified", "observation_complete",
+                        "market_status_verified", "settlement_equivalence_verified"))
                     or reference_age < 0 or D(str(reference_age)) > rule.ttl_seconds * 1000):
                 raise NoSignal("Reference profile observation/TTL eligibility expired or is unverified")
         elif reference_age is None or not 0 <= reference_age <= config.max_quote_age_ms:
