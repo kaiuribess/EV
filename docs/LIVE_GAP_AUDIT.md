@@ -291,3 +291,24 @@ approved, and no live order was submitted.
 - [ProphetX order lifecycle](https://docs.prophetx.co/docs/direct-link-order-lifecycle)
   distinguishes asynchronous matching, replicated reporting, per-fill quantities
   and cancellation races. An acknowledgement is not a fill.
+
+### Oddize flat-prop event binding, October 21 evening PDT
+
+Oddize's [current OpenAPI event schema](https://oddize.com/api/v1/openapi.json)
+supplies `event_id`, away/home teams and scheduled start in `/odds/latest`, but
+its flat `/events/{sport}/{event_id}/props` response supplies only the event ID,
+sport and prop rows. The adapter now selects a bounded future event directly
+from the same odds snapshot, rejects conflicting IDs, and carries that exact
+event reference into flat-prop normalization. No cached team or start-time
+guess is used. Its automated discovery default remains off and the configured
+credit budget accounts for each enabled 2-credit prop request.
+
+A read-only, three-credit maximum diagnostic at **2026-10-22 01:56:33 UTC**
+used event `202610210LAL`: 2,245 in-scope flat rows from five observed books
+formed 311 two-sided normalized offers; 252 had complete same-observation
+clocks. The event teams/start matched the source snapshot. None carried a
+verified active-market status, and the observed books included no Pinnacle or
+Circa in that event's sampled props. This proves the event-context join and
+some real two-sided feed coverage, not a current tradable quote, contract
+equivalence, a profitable edge, or order readiness. Re-run the bounded probe
+with `python scripts/probe_oddize_prop_event.py` when monitoring coverage.

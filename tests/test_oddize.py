@@ -12,9 +12,9 @@ from pydantic import ValidationError
 
 from evplatform.core.models import Market, Settlement
 from evplatform.integrations import PROVIDER_FACTORIES
-from evplatform.integrations.base import ProviderDisabled, ProviderEnvelope, QuotaExceeded
+from evplatform.integrations.base import ProtocolError, ProviderDisabled, ProviderEnvelope, QuotaExceeded
 from evplatform.integrations.normalization import VerifiedOfferMapping, VerifiedProviderMapper, extract_offers
-from evplatform.integrations.oddize import OddizeConfig, OddizeRest
+from evplatform.integrations.oddize import OddizeConfig, OddizeRest, prop_event_plan, prop_event_refs
 
 
 NOW = datetime(2026, 10, 20, 18, tzinfo=UTC)
@@ -42,6 +42,67 @@ def props_row(subject="Example Player", side="Over", line=24.5, **updates):
 
 def raw_props(rows):
     return raw(kind="props_snapshot", payload={"event_id": "event-1", "sport": "nba", "props": rows})
+
+
+def test_prop_event_refs_require_exact_current_provider_event_identity():
+    future = (NOW + timedelta(hours=1)).isoformat()
+    later = (NOW + timedelta(hours=2)).isoformat()
+    snapshot = {"sport": "nba", "events": [
+        {"event_id": "one", "sport": "nba", "team1": "AWAY", "team2": "HOME", "start_date": future},
+        {"event_id": "two", "sport": "nba", "team1": "A", "team2": "B", "start_date": later},
+        {"event_id": "bad", "sport": "nba", "team1": "A", "team2": "B", "start_date": future},
+        {"event_id": "bad", "sport": "nba", "team1": "C", "team2": "D", "start_date": future},
+        {"event_id": "malformed", "sport": "nba", "team1": "A", "team2": "B", "start_date": future},
+        {"event_id": "malformed", "sport": "nba", "team1": None, "team2": "B", "start_date": future},
+        {"event_id": "past", "sport": "nba", "team1": "A", "team2": "B", "start_date": NOW.isoformat()},
+        {"event_id": "other", "sport": "nfl", "team1": "A", "team2": "B", "start_date": future},
+        {"event_id": "../traversal", "sport": "nba", "team1": "A", "team2": "B", "start_date": future},
+    ]}
+    refs = prop_event_refs(snapshot, "nba", now=NOW, lookahead_hours=24)
+    assert set(refs) == {"one", "two"}
+    assert prop_event_plan(refs, ["two", "missing", "two"], 1) == ["two", "one"]
+    assert prop_event_plan(refs, [], 1) == ["one"]
+    assert prop_event_plan(refs, [], 0) == []
+    with pytest.raises(ValueError):
+        prop_event_plan(refs, [], 4)
+    with pytest.raises(ProtocolError):
+        prop_event_refs({"sport": "nfl", "events": []}, "nba", now=NOW, lookahead_hours=24)
+
+
+async def test_event_props_bind_exact_same_cycle_event_ref_without_claiming_status():
+    ref = {"event_id": "event-1", "sport": "nba", "team1": "AWAY", "team2": "HOME",
+           "start_date": (NOW + timedelta(hours=1)).isoformat()}
+
+    def handle(request):
+        assert request.url.path == "/api/v1/events/nba/event-1/props"
+        return httpx.Response(200, json={"event_id": "event-1", "sport": "nba", "props": [
+            props_row(side="Over"), props_row(side="Under")], "count": 2})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = OddizeRest({"enabled": True}, client=client, credential="offline-secret")
+        frame = await provider.fetch_event_props("nba", "event-1", prop_types=["player_pts"], event_ref=ref)
+    offer, = extract_offers(frame)
+    assert offer.context["participants"] == ["HOME", "AWAY"]
+    assert offer.context["scheduled_start"] == ref["start_date"]
+    assert offer.line == "24.5" and set(offer.prices) == {"Over", "Under"}
+    assert offer.observation_verified and offer.observation_complete
+    assert not offer.market_status_verified
+    assert frame.metadata["event_ref"] == ref
+
+
+async def test_event_props_reject_wrong_served_event_and_reference():
+    ref = {"event_id": "event-1", "sport": "nba", "team1": "AWAY", "team2": "HOME",
+           "start_date": (NOW + timedelta(hours=1)).isoformat()}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200,
+            json={"event_id": "wrong", "sport": "nba", "props": []}))) as client:
+        provider = OddizeRest({"enabled": True}, client=client, credential="offline-secret")
+        with pytest.raises(ProtocolError):
+            await provider.fetch_event_props("nba", "event-1", prop_types=["player_pts"], event_ref=ref)
+        calls = provider.quota.calls
+        with pytest.raises(ProtocolError):
+            await provider.fetch_event_props("nba", "event-1", prop_types=["player_pts"],
+                                             event_ref={**ref, "team1": "HOME"})
+        assert provider.quota.calls == calls
 
 
 async def test_exact_header_auth_and_repeated_query_filters():

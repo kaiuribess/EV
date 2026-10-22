@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -40,6 +40,8 @@ class OddizeConfig(ProviderConfig):
     # endpoint has intentionally untyped nested objects in the published spec.
     event_ids: dict[str, list[str]] = Field(default_factory=dict)
     prop_types: dict[str, list[str]] = Field(default_factory=dict)
+    auto_prop_event_limit: int = Field(default=0, ge=0, le=3)
+    prop_event_lookahead_hours: int = Field(default=24, ge=1, le=72)
 
     @field_validator("markets")
     @classmethod
@@ -98,6 +100,61 @@ def _event_path(sport: str, event_id: str) -> str:
     return f"/api/v1/events/{safe_component(sport)}/" + "/".join(
         safe_component(part) for part in event_id.split("/")
     )
+
+
+def prop_event_refs(snapshot: dict, sport: str, *, now: datetime,
+                    lookahead_hours: int) -> dict[str, dict]:
+    """Exact, bounded event refs supplied by Oddize's same-cycle odds snapshot.
+
+    Event props have no team/start fields of their own. Never use a cached ref,
+    inferred ID, or source receipt as a substitute for the event listing.
+    """
+    rows = snapshot.get("events") if isinstance(snapshot, dict) else None
+    if (not isinstance(snapshot, dict) or snapshot.get("sport") != sport
+            or not isinstance(rows, list) or len(rows) > 500
+            or not isinstance(now, datetime) or now.utcoffset() is None
+            or not 1 <= lookahead_hours <= 72):
+        raise ProtocolError("Oddize event listing is not a bounded sport snapshot")
+    refs, conflicts = {}, set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("sport") != sport:
+            continue
+        event_id, away, home = row.get("event_id"), row.get("team1"), row.get("team2")
+        if isinstance(event_id, str) and event_id in refs:
+            # Even a malformed duplicate poisons the ID: do not reuse a
+            # previously accepted event identity from this response.
+            conflicts.add(event_id)
+        if (not isinstance(event_id, str) or not event_id or len(event_id) > 256
+                or not isinstance(away, str) or not away.strip()
+                or not isinstance(home, str) or not home.strip() or away == home
+                or event_id in conflicts):
+            continue
+        try:
+            _event_path(sport, event_id)
+        except ValueError:
+            continue
+        try:
+            start = parse_timestamp(row.get("start_date"))
+        except (ValueError, TypeError):
+            start = None
+        if start is None or not now < start <= now + timedelta(hours=lookahead_hours):
+            continue
+        ref = {"event_id": event_id, "sport": sport, "team1": away, "team2": home,
+               "start_date": row["start_date"]}
+        refs[event_id] = ref
+    for event_id in conflicts:
+        refs.pop(event_id, None)
+    return refs
+
+
+def prop_event_plan(refs: dict[str, dict], configured: list[str], auto_limit: int) -> list[str]:
+    """Take only currently observed static IDs, then the next future fixtures."""
+    if not 0 <= auto_limit <= 3:
+        raise ValueError("Bound automatic prop event discovery")
+    selected = list(dict.fromkeys(event_id for event_id in configured if event_id in refs))
+    automatic = sorted(refs, key=lambda event_id: (parse_timestamp(refs[event_id]["start_date"]), event_id))
+    selected.extend([event_id for event_id in automatic if event_id not in selected][:auto_limit])
+    return selected
 
 
 class OddizeRest(RestProvider):
@@ -192,14 +249,23 @@ class OddizeRest(RestProvider):
         result = await self.request(_event_path(sport, event_id), cost=1)
         return replace(result, metadata={**result.metadata, "sport": sport, "odds_format": "american"})
 
-    async def fetch_event_props(self, sport: str, event_id: str, *, prop_types: list[str]) -> ProviderEnvelope:
+    async def fetch_event_props(self, sport: str, event_id: str, *, prop_types: list[str],
+                                event_ref: dict | None = None) -> ProviderEnvelope:
         if not prop_types:
             raise UnsupportedOperation("Choose discovered prop_types explicitly; the endpoint defaults to team totals")
+        if event_ref is not None and (not isinstance(event_ref, dict)
+                                      or event_ref.get("event_id") != event_id or event_ref.get("sport") != sport
+                                      or not all(event_ref.get(name) for name in ("team1", "team2", "start_date"))
+                                      or event_ref.get("team1") == event_ref.get("team2")
+                                      or parse_timestamp(event_ref.get("start_date")) is None):
+            raise ProtocolError("Oddize prop event reference conflicts with the requested scope")
         result = await self.request(_event_path(sport, event_id) + "/props", params={"prop_types": prop_types}, cost=2)
         body = result.payload
         rows = body.get("props") if isinstance(body, dict) else None
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ProtocolError("Oddize event props response has no valid flat row array")
+        if body.get("event_id") != event_id or body.get("sport") != sport:
+            raise ProtocolError("Oddize event props returned a different event or sport")
         # The live API can return other offer types despite a prop_types filter.
         # Never reclassify a team spread or unrelated prop as the requested
         # player market. Record the mismatch; normalize only exact requested IDs.
@@ -210,6 +276,7 @@ class OddizeRest(RestProvider):
         return replace(result, kind="props_snapshot", payload={**body, "props": selected},
                        metadata={**result.metadata, "sport": sport, "event_id": event_id,
                                  "odds_format": "american", "requested_prop_types": list(prop_types),
+                                 **({"event_ref": dict(event_ref)} if event_ref is not None else {}),
                                  "out_of_scope_prop_rows": excluded})
 
     async def discover_prop_events(self, sport: str, *, prop_type: str, limit: int = 50) -> ProviderEnvelope:
@@ -232,7 +299,8 @@ class OddizeRest(RestProvider):
     def effective_poll_interval(self) -> float:
         per_cycle = len(self._subscriptions)
         if self.config.include_props:
-            per_cycle += 2 * sum(len(self.config.event_ids.get(sport, [])) for sport in self._subscriptions
+            per_cycle += 2 * sum(len(self.config.event_ids.get(sport, [])) + self.config.auto_prop_event_limit
+                                 for sport in self._subscriptions
                                  if self.config.prop_types.get(sport))
         # Scale the free-tier budget with the number of sports/props, rather than
         # assuming 1,500 credits can fund fast polling of every league.
@@ -273,8 +341,13 @@ class OddizeRest(RestProvider):
                         self._newest[sport] = max(self._newest.get(sport, 0), max(stamps))
                     yield result
                     if self.config.include_props and self.config.prop_types.get(sport):
-                        for event_id in self.config.event_ids.get(sport, []):
-                            yield await self.fetch_event_props(sport, event_id, prop_types=self.config.prop_types[sport])
+                        refs = prop_event_refs(result.payload, sport, now=result.received_at,
+                            lookahead_hours=self.config.prop_event_lookahead_hours)
+                        selected = prop_event_plan(refs, self.config.event_ids.get(sport, []),
+                                                   self.config.auto_prop_event_limit)
+                        for event_id in selected:
+                            yield await self.fetch_event_props(sport, event_id,
+                                prop_types=self.config.prop_types[sport], event_ref=refs[event_id])
                 backoff.reset()
                 await asyncio.sleep(self.effective_poll_interval())
             except ProviderDisabled:

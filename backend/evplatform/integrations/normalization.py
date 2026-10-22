@@ -471,8 +471,19 @@ def _oddize_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
         raise ValueError("Oddize payload must be an object")
     props = envelope.kind == "props_snapshot"
     if props:
+        ref = envelope.metadata.get("event_ref")
+        if ref is not None and (not isinstance(ref, dict)
+                                or ref.get("event_id") != (payload.get("event_id") or envelope.metadata.get("event_id"))
+                                or ref.get("sport") != (payload.get("sport") or envelope.metadata.get("sport"))
+                                or any(not isinstance(ref.get(key), str) or not ref[key].strip()
+                                       for key in ("team1", "team2", "start_date"))
+                                or ref["team1"] == ref["team2"]
+                                or parse_timestamp(ref["start_date"]) is None):
+            raise ValueError("Oddize prop event reference does not match response identity")
         events = [{"event_id": payload.get("event_id") or envelope.metadata.get("event_id"),
                    "sport": payload.get("sport") or envelope.metadata.get("sport"),
+                   **({key: ref[key] for key in ("team1", "team2", "start_date")}
+                      if isinstance(ref, dict) else {}),
                    "props": payload.get("props", [])}]
     elif "event" in payload:
         events = [payload["event"]]
