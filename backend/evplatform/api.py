@@ -63,6 +63,13 @@ class LaunchProbeBody(BaseModel):
     venue: str = Field(min_length=1)
 
 
+class ProphetXDiscoveryBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tournament_id: int | None = Field(default=None, ge=1, le=1_000_000_000)
+    event_id: str | None = Field(default=None, pattern=r"^[0-9]{1,20}$")
+    limit: int = Field(default=20, ge=1, le=50)
+
+
 class ManualPreviewBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     market_id: str
@@ -211,6 +218,33 @@ def create_app(settings=None):
             raise HTTPException(409, str(exc)) from None
         return {"account": account, "read_only": True, "usable_for_execution": False,
                 "note": "Pre-profile account diagnostic; it does not arm trading or certify an order lifecycle."}
+
+    @app.post("/api/native/discovery/prophetx")
+    async def prophetx_catalog(body: ProphetXDiscoveryBody):
+        """Inspect an exact native event using the monitor's existing session."""
+        from .integrations.prophetx_discovery import summarize_events, summarize_markets
+        from .venues.common import VenueHTTPError
+
+        if (body.tournament_id is None) == (body.event_id is None):
+            raise HTTPException(422, "Provide exactly one tournament_id or event_id")
+        record = engine.registry.records.get("prophetx")
+        plugin = record.plugin if record else None
+        client = getattr(plugin, "client", None)
+        if (not record or not record.enabled or not isinstance(plugin, NativeMonitor)
+                or client is None or plugin.task is None or plugin.task.done()
+                or record.health.get("authenticated") is not True):
+            raise HTTPException(409, "A connected ProphetX native monitor is required")
+        try:
+            if body.tournament_id is not None:
+                payload = await asyncio.wait_for(client.discover_events(tournament_id=body.tournament_id), 15)
+                return summarize_events(payload, limit=body.limit)
+            payload = await asyncio.wait_for(client.fetch_snapshot(body.event_id), 15)
+            return summarize_markets(payload, limit=body.limit)
+        except VenueHTTPError as exc:
+            # VenueHTTPError contains only status and a provider error code.
+            raise HTTPException(502, {"provider_status": exc.status_code, "provider_code": exc.code}) from None
+        except (ValueError, RuntimeError, asyncio.TimeoutError):
+            raise HTTPException(502, "ProphetX catalog read or schema validation failed") from None
 
     @app.get("/api/accounts/cash")
     async def reported_cash():

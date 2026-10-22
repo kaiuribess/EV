@@ -15,8 +15,12 @@ def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10)):
     data = _object(_object(raw, "balance").get("data"), "balance data")
     if data.get("unmatched_order_balance_status") != "succeed":
         raise ReconciliationError("ProphetX unmatched balance has not synchronized")
+    # Live wallet reads have shown the provider's sync clock slightly ahead of
+    # the local receipt clock. This narrow allowance applies only to the
+    # wallet synchronization marker, never order/history/quote timestamps.
     source_time(data.get("unmatched_order_last_synced_at"), observed_at=observed_at,
-                name="Unmatched wallet balance", max_age=max_age)
+                name="Unmatched wallet balance", max_age=max_age,
+                max_future_skew=timedelta(seconds=2))
     cash = _number(data.get("balance"), "available balance")
     matched = _number(data.get("matched_order_balance"), "matched balance")
     unmatched = _number(data.get("unmatched_order_balance"), "unmatched balance")

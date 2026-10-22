@@ -1,0 +1,169 @@
+"""Read-only catalog diagnostics never grant market or order authorization."""
+import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+from fastapi.testclient import TestClient
+import pytest
+
+from evplatform.api import create_app
+from evplatform.core.config import Settings
+from evplatform.integrations.prophetx_discovery import open_event_ids, summarize_events, summarize_markets
+from evplatform.plugins.external import NativeMonitor, ProphetXMonitorConfig
+
+
+def test_catalog_summaries_are_bounded_allowlists():
+    events = summarize_events({"data": {"sport_events": [
+        {"event_id": 123, "name": "Away v Home", "scheduled": "2026-10-22T02:00:00Z",
+         "status": "active", "access_token": "private"},
+        {"event_id": "not-numeric", "name": "Rejected"},
+    ]}}, limit=2)
+    assert events["events"] == [{"event_id": "123", "name": "Away v Home",
+                                  "scheduled": "2026-10-22T02:00:00Z", "status": "active"}]
+    assert events["mapping_verified"] is False and "private" not in str(events)
+    markets = summarize_markets({"data": {"markets": [
+        {"id": 77, "type": "moneyline", "status": "active",
+         "selections": [[{"strike_id": "test"}]], "secret_key": "private"},
+    ]}}, limit=1)
+    assert markets["markets"][0]["selection_shape"] == "nested"
+    assert markets["markets"][0]["selection_count"] == 1
+    assert markets["mapping_verified"] is False and "private" not in str(markets)
+
+
+@pytest.mark.parametrize("payload", [{}, {"data": {}}, {"data": {"markets": None}}])
+def test_invalid_market_catalog_rejected(payload):
+    with pytest.raises(ValueError):
+        summarize_markets(payload, limit=1)
+
+
+def test_discovery_subscribes_only_bounded_known_active_or_upcoming_events():
+    now = datetime(2026, 10, 22, 1, tzinfo=timezone.utc)
+    events = {"data": {"sport_events": [
+        {"event_id": 4, "name": "B at A", "scheduled": "2026-10-22T02:00:00Z", "status": "not_started"},
+        {"event_id": 5, "name": "C at D", "scheduled": "2026-10-22T00:00:00Z", "status": "live"},
+        {"event_id": 6, "name": "E at F", "scheduled": "2026-10-23T12:00:00Z", "status": "not_started"},
+        {"event_id": 7, "name": "G at H", "scheduled": "2026-10-22T00:00:00Z", "status": "closed"},
+        {"event_id": 8, "name": "I at J", "scheduled": "unknown", "status": "live"},
+    ]}}
+    assert open_event_ids([events], now=now, max_events=2) == ["4", "5"]
+    conflict = {"data": {"sport_events": [{"event_id": 4, "name": "different fixture",
+        "scheduled": "2026-10-22T02:00:00Z", "status": "not_started"}]}}
+    assert open_event_ids([events, conflict], now=now, max_events=10) == ["5"]
+
+
+@pytest.mark.asyncio
+async def test_native_monitor_discovery_uses_existing_client_and_keeps_last_good_scope(monkeypatch):
+    fixed = datetime(2026, 10, 22, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: fixed)
+
+    class Client:
+        fail = False
+
+        async def discover_events(self, **kwargs):
+            assert kwargs == {"tournament_id": 132}
+            if self.fail:
+                raise RuntimeError("read failed")
+            return {"data": {"sport_events": [{"event_id": 123, "name": "A at B",
+                "status": "not_started", "scheduled": "2026-10-22T02:00:00Z"}]}}
+
+    client = Client()
+    monitor = SimpleNamespace(client=client,
+        context=SimpleNamespace(config={"discovery_tournament_ids": [132], "max_discovered_events": 5}),
+        discovery_status="disabled", discovered_event_ids=[])
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovered_event_ids == ["123"] and monitor.discovery_status == "current"
+    client.fail = True
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovered_event_ids == ["123"] and monitor.discovery_status == "read_failed"
+
+
+def test_prophetx_discovery_config_rejects_duplicate_or_invalid_tournaments():
+    assert ProphetXMonitorConfig(discovery_tournament_ids=[132]).discovery_tournament_ids == [132]
+    with pytest.raises(ValueError):
+        ProphetXMonitorConfig(discovery_tournament_ids=[132, 132])
+    with pytest.raises(ValueError):
+        ProphetXMonitorConfig(discovery_tournament_ids=[0])
+
+
+@pytest.mark.asyncio
+async def test_periodic_discovery_changes_stream_scope_only_after_success(monkeypatch):
+    sleeps = 0
+
+    async def one_cycle(_):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
+
+    class Client:
+        def __init__(self): self.calls = []
+
+        async def subscribe(self, event_ids, props):
+            self.calls.append((event_ids, props))
+
+    client = Client()
+    async def refresh():
+        monitor.discovered_event_ids = ["200"]
+        monitor.discovery_status = "current"
+
+    monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
+        "discovery_interval_seconds": 60, "event_ids": ["100"], "prop_subtypes": {}}),
+        discovered_event_ids=["100"], _subscribed_event_ids=["100"],
+        discovery_status="current", _refresh_discovery=refresh)
+    with pytest.raises(asyncio.CancelledError):
+        await NativeMonitor._discover_periodically(monitor)
+    assert client.calls == [(["100", "200"], {})]
+    assert monitor._subscribed_event_ids == ["100", "200"]
+
+
+def test_catalog_endpoint_requires_one_scope_and_connected_monitor(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = create_app(Settings(_env_file=None, database_path=str(tmp_path / "catalog.db")))
+    with TestClient(app) as client:
+        headers = {"X-EV-Control": "local"}
+        assert client.post("/api/native/discovery/prophetx", json={"tournament_id": 132}).status_code == 403
+        assert client.post("/api/native/discovery/prophetx", json={}, headers=headers).status_code == 422
+        assert client.post("/api/native/discovery/prophetx", json={"tournament_id": 132,
+            "event_id": "123"}, headers=headers).status_code == 422
+        assert client.post("/api/native/discovery/prophetx", json={"tournament_id": 132},
+                           headers=headers).status_code == 409
+
+
+def test_catalog_uses_existing_monitor_session_and_returns_only_allowlisted_fields(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = create_app(Settings(_env_file=None, database_path=str(tmp_path / "catalog-read.db")))
+
+    class Task:
+        def done(self): return False
+
+    class Client:
+        async def discover_events(self, **kwargs):
+            assert kwargs == {"tournament_id": 132}
+            return {"data": {"sport_events": [{"event_id": 123, "name": "A vs B",
+                "scheduled": "2026-10-23T00:00:00Z", "private_token": "do-not-return"}]}}
+
+        async def fetch_snapshot(self, event_id):
+            assert event_id == "123"
+            return {"data": {"markets": [{"id": 45, "type": "moneyline", "status": "active",
+                "selections": [{"strike_id": "public-strike"}], "private_token": "do-not-return"}]}}
+
+    with TestClient(app) as caller:
+        record = app.state.engine.registry.records["prophetx"]
+        plugin = record.plugin
+        original = (record.enabled, record.health, plugin.client, plugin.task)
+        record.enabled, record.health, plugin.client, plugin.task = True, {"authenticated": True}, Client(), Task()
+        try:
+            headers = {"X-EV-Control": "local"}
+            events = caller.post("/api/native/discovery/prophetx", json={"tournament_id": 132},
+                                 headers=headers)
+            markets = caller.post("/api/native/discovery/prophetx", json={"event_id": "123"},
+                                  headers=headers)
+            assert events.status_code == markets.status_code == 200
+            assert events.json()["events"][0]["event_id"] == "123"
+            assert markets.json()["markets"][0]["id"] == "45"
+            assert "do-not-return" not in events.text + markets.text
+            assert not events.json()["mapping_verified"] and not markets.json()["mapping_verified"]
+        finally:
+            record.enabled, record.health, plugin.client, plugin.task = original

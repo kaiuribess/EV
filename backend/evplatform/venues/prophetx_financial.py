@@ -67,12 +67,15 @@ def authenticated_identity(client) -> tuple[str, str]:
     return user, prophetx_fingerprint(client.settings.environment, user)
 
 
-def source_time(value, *, observed_at: datetime, name: str, max_age: timedelta | None = None) -> datetime:
+def source_time(value, *, observed_at: datetime, name: str, max_age: timedelta | None = None,
+                max_future_skew: timedelta = timedelta(0)) -> datetime:
     """Only documented ISO REST clocks; integer book-clock units are unknown."""
     if not isinstance(value, (str, datetime)):
         raise ReconciliationError(f"{name} requires an explicit ISO source timestamp; integer units are unverified")
     result, observed = _time(value), _time(observed_at)
-    if result > observed or (max_age is not None and observed - result > max_age):
+    if max_future_skew < timedelta(0):
+        raise ValueError("Future clock skew tolerance cannot be negative")
+    if result > observed + max_future_skew or (max_age is not None and observed - result > max_age):
         raise ReconciliationError(f"{name} is stale or in the future")
     return result
 

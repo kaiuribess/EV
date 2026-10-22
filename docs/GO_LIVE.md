@@ -72,6 +72,24 @@ before restarting with this switch. Without the switch, the native order path
 remains off by default. The current pilot process on port 8002 already has the
 path configured, and remains paused and blocked by its release checks.
 
+ProphetX market discovery can reuse the already connected monitor session:
+
+```powershell
+Invoke-RestMethod -Uri 'http://127.0.0.1:8002/api/native/discovery/prophetx' -Method Post -ContentType 'application/json' -Headers @{'X-EV-Control'='local'} -Body '{"tournament_id":132,"limit":20}'
+```
+
+The same local endpoint accepts one numeric `event_id` to inspect its market
+types and subtypes. It returns bounded public catalog fields, never credentials
+or an execution mapping. Set the ProphetX plugin's
+`discovery_tournament_ids: [132]` to refresh open NBA event subscriptions every
+five minutes; `max_discovered_events` caps channel scope and
+`discovery_interval_seconds` can be set between 60 and 3600. A failed catalog
+read retains the last subscribed event IDs. A changed scope reconnects the
+native stream, invalidating its books until they resynchronize. Discovery alone
+does not establish sportsbook quote status, contract equivalence, liquidity or
+order permission. The tournament/event flow follows the
+[ProphetX Trading API integration guide](https://docs.prophetx.co/docs/integration).
+
 That workspace also starts paused and uses `data/native-production.db`.
 Neither command grants order authorization or turns on automation, including
 after a restart. Native launch artifacts currently share the paths below;

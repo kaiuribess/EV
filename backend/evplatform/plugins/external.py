@@ -189,6 +189,10 @@ class ProphetXMonitorConfig(BaseModel):
     environment: Literal["sandbox", "production"] = "sandbox"
     event_ids: list[str] = Field(default_factory=list, description="Native ProphetX event IDs; empty monitors private/system channels only")
     prop_subtypes: dict[str, list[str]] = Field(default_factory=dict, description="Event ID to discovered prop sub_type values")
+    discovery_tournament_ids: list[int] = Field(default_factory=list, max_length=4,
+        description="Authenticated tournament catalogs to refresh for game-market subscriptions")
+    discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    max_discovered_events: int = Field(default=20, ge=1, le=50)
     account_review: ProphetXAccountReview | None = Field(default=None,
         description="Non-secret account inception/funded-cash evidence; does not authorize orders")
     legacy_market_ids: list[str] = Field(default_factory=list, deprecated=True,
@@ -207,6 +211,13 @@ class ProphetXMonitorConfig(BaseModel):
         if any(not key.isascii() or not key.isdigit() or any(not subtype.strip() for subtype in subtypes)
                for key, subtypes in values.items()):
             raise ValueError("Prop subscriptions require numeric event IDs and nonempty discovered subtypes")
+        return values
+
+    @field_validator("discovery_tournament_ids")
+    @classmethod
+    def valid_discovery_tournaments(cls, values):
+        if any(type(value) is not int or value <= 0 or value > 1_000_000_000 for value in values) or len(set(values)) != len(values):
+            raise ValueError("Use distinct positive tournament IDs from native discovery")
         return values
 
 
@@ -232,8 +243,12 @@ class NativeMonitor(Plugin):
         self.manifest = normalize_manifest(factory.get_manifest()).model_copy(update={
             "config_schema": self.config_model.model_json_schema()})
         self.client, self.task = None, None
+        self.discovery_task = None
         self.frames = 0
         self.config_error = ""
+        self.discovery_status = "disabled"
+        self.discovered_event_ids: list[str] = []
+        self._subscribed_event_ids: list[str] = []
 
     def credential_names(self, config):
         default_profile = getattr(self.config_model(), "credential_profile", "legacy")
@@ -248,6 +263,9 @@ class NativeMonitor(Plugin):
         await self.stop()
         await super().start(context)
         self.config_error = ""
+        self.discovery_status = "disabled"
+        self.discovered_event_ids = []
+        self._subscribed_event_ids = []
         if context.config.get("legacy_market_ids"):
             self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
             return
@@ -270,12 +288,56 @@ class NativeMonitor(Plugin):
             }:
                 return
             raise
+        if self.manifest.name == "prophetx" and context.config.get("discovery_tournament_ids"):
+            await self._refresh_discovery()
         configure = getattr(self.client, "configure_subscriptions", None)
         if configure is not None:
-            await configure(context.config)
+            selected = list(dict.fromkeys([*context.config.get("event_ids", []), *self.discovered_event_ids]))
+            await configure({**context.config, "event_ids": selected})
+            self._subscribed_event_ids = selected
         elif context.config.get("market_ids"):
             await self.client.subscribe(context.config["market_ids"])
         self.task = asyncio.create_task(self._run(), name=f"native-monitor:{self.manifest.name}")
+        if self.manifest.name == "prophetx" and context.config.get("discovery_tournament_ids"):
+            self.discovery_task = asyncio.create_task(self._discover_periodically(), name="prophetx-event-discovery")
+
+    async def _refresh_discovery(self):
+        from ..integrations.prophetx_discovery import open_event_ids
+        try:
+            payloads = [await self.client.discover_events(tournament_id=tournament_id)
+                        for tournament_id in self.context.config.get("discovery_tournament_ids", [])]
+            selected = open_event_ids(payloads, now=utcnow(),
+                max_events=self.context.config.get("max_discovered_events", 20))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.discovery_status = "read_failed"
+            # Retain the last validated subscription set until an explicit
+            # future catalog proves a replacement; stream invalidation is
+            # handled independently by the native client.
+            return
+        self.discovery_status = "current"
+        self.discovered_event_ids = selected
+
+    async def _discover_periodically(self):
+        try:
+            while True:
+                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
+                await self._refresh_discovery()
+                if self.discovery_status != "current":
+                    continue
+                selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
+                                               *self.discovered_event_ids]))
+                if selected == self._subscribed_event_ids:
+                    continue
+                try:
+                    await self.client.subscribe(selected, self.context.config.get("prop_subtypes", {}))
+                except Exception:
+                    self.discovery_status = "subscription_failed"
+                    continue
+                self._subscribed_event_ids = selected
+        except asyncio.CancelledError:
+            raise
 
     async def _run(self):
         try:
@@ -300,6 +362,10 @@ class NativeMonitor(Plugin):
                 await self.engine.native.on_frame(self.manifest.name, self.client, {"type": "transport_invalidated"})
 
     async def stop(self):
+        if self.discovery_task:
+            self.discovery_task.cancel()
+            await asyncio.gather(self.discovery_task, return_exceptions=True)
+            self.discovery_task = None
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
@@ -320,7 +386,9 @@ class NativeMonitor(Plugin):
         status = "blocked" if blocked else "error" if self.task and self.task.done() else state["state"]
         return {**state, "status": status,
                 "message": state.get("reason") or "Native monitor; normalized venue mapping and live preflight required for orders",
-                "frames": self.frames}
+                "frames": self.frames,
+                "discovery_status": self.discovery_status,
+                "discovered_event_count": len(self.discovered_event_ids)}
 
 
 def register_external(registry, engine):

@@ -1,5 +1,32 @@
 # Live readiness audit — October 21, 2026
 
+## October 21 evening follow-up (01:23 UTC October 22)
+
+The paused production workspace now uses ProphetX's authenticated tournament
+catalog to refresh NBA event subscriptions every five minutes. A read-only
+catalog call returned 11 open/live NBA events; the monitor subscribed to all
+11 plus its private/system channels, confirmed 13 of 13 channels, and received
+139 market frames in the bounded check. This verifies live native market-data
+delivery for that scope, not a mapped executable opportunity. The catalog
+endpoint reuses the monitor session, avoiding a second ProphetX login and its
+separate session slot. Event IDs rotate with the native catalog rather than
+requiring a daily static list. The client still invalidates books on a scope
+change and resynchronizes after reconnect.
+
+The ProphetX wallet sync timestamp was observed 0.6 seconds ahead of the local
+receipt clock. The account parser now allows at most two seconds of future
+clock skew **for that wallet marker only**. Reporting/order-history clocks
+remain strict. A fresh diagnostic now verifies the signed account identity,
+but cannot certify spendable cash because account inception and funded-cash
+history review remain absent. The production workspace still has zero reviewed
+launch profiles, zero verified source/native mappings, zero native candidates
+and zero native orders; `auto_trade=false`. Parlay's documented per-book
+verification heartbeat does not certify each outcome, and Oddize's current
+Price/PropRow schema has observation times but no authoritative market-active
+field. The currently sampled source observations had zero verified active
+statuses. No native order was submitted. The full backend suite passed 2,029
+tests, plus the added one-cycle discovery regression passed separately.
+
 **Result: blocked.** Rechecked the local application, authenticated account
 history, quarantined real prices, and current official API documentation. No
 orders, cancellations, transfers, or live activation were performed.

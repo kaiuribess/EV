@@ -10,7 +10,7 @@ from evplatform.core.conflicts import reviewed_correlations, risk_family
 from evplatform.core.models import OrderStatus
 from evplatform.core.native_accounting import NativeInstrument, NativeOrderIntent
 from evplatform.core.native_oms import NativeOrder
-from evplatform.venues.prophetx_account import probe_prophetx_account
+from evplatform.venues.prophetx_account import balance_facts, probe_prophetx_account
 from evplatform.venues.prophetx_financial import (
     ProphetXAccountReview, complete_order_history, normalize_financial_order,
     prophetx_fingerprint, reconcile_prophetx_financial, reporting_pages,
@@ -27,6 +27,21 @@ OID = "partner_offline-owned-order"
 
 def iso(seconds=0):
     return (NOW+timedelta(seconds=seconds)).isoformat()
+
+
+def test_wallet_sync_accepts_only_bounded_provider_clock_skew():
+    data = {"balance": "25", "matched_order_balance": "0", "unmatched_order_balance": "0",
+            "gec_balance": "0", "unmatched_order_balance_status": "succeed",
+            "unmatched_order_last_synced_at": iso(.6)}
+    assert balance_facts({"data": data}, observed_at=NOW) == (D("25"), D("0"), D("0"))
+    data["unmatched_order_last_synced_at"] = iso(2.1)
+    with pytest.raises(ReconciliationError):
+        balance_facts({"data": data}, observed_at=NOW)
+    data["unmatched_order_last_synced_at"] = iso(-10.1)
+    with pytest.raises(ReconciliationError):
+        balance_facts({"data": data}, observed_at=NOW)
+    with pytest.raises(ReconciliationError):
+        source_time(iso(.6), observed_at=NOW, name="Order history")
 
 
 class Client:
