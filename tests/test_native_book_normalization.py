@@ -110,6 +110,25 @@ def test_novig_opposite_liquidity_aggregates_cent_contracts_without_refreshed_ol
     assert closed.status == "closed" and closed.revision > second.revision and not closed.asks
 
 
+def test_novig_remaining_update_refreshes_only_the_changed_depth_clock(market):
+    mapper = NativeBookMapper([mapping(market, "novig")])
+    client = SimpleNamespace(book=NovigBook())
+    snapshot = novig_snapshot(1_800_000_000_000)
+    client.book.apply(snapshot)
+    first = mapper.process("novig", client, snapshot)[0][1]
+    update_a = {"ts": 1_800_000_001_000, "delta": {"native-market": {"book": {"seq": 9,
+        "deltas": [{"kind": "update", "orderId": "a", "remaining": 50}]}}}}
+    client.book.apply(update_a)
+    second = mapper.process("novig", client, update_a)[0][1]
+    assert second.asks[0].quantity == 140 and second.source_time == first.source_time
+    update_b = {"ts": 1_800_000_002_000, "delta": {"native-market": {"book": {"seq": 10,
+        "deltas": [{"kind": "update", "orderId": "b", "remaining": 30}]}}}}
+    client.book.apply(update_b)
+    third = mapper.process("novig", client, update_b)[0][1]
+    assert third.asks[0].quantity == 80
+    assert third.source_time > first.source_time
+
+
 def prophet_frame(updated_at=1_800_000_000, seq=100):
     return {"event": "v2.market_selections", "scope": {"event_id": 12}, "envelope": {"op": "u"},
             "data": {"sport_event_id": 12, "market_id": 22, "info": {"id": 22, "sequence_number": seq,

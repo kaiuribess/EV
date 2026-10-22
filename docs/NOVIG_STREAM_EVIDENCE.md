@@ -23,5 +23,9 @@ fields, or non-integer values invalidate the book and require a fresh snapshot.
 Sequence validation and atomic batch application still apply. Tests cover both
 the accepted reduction and rejection paths.
 
+The native book mapper advances the source clock only for that updated order.
+An untouched order at the same price keeps its older clock, so aggregation
+cannot make the entire ladder appear fresh from one partial fill.
+
 This observation is limited to the sampled wire behavior. If Novig changes or
 documents the `update` form, the parser contract should be reviewed again.

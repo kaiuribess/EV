@@ -334,7 +334,10 @@ class NativeBookMapper:
                     order_id = book._identifier(delta, "order", "orderId")
                     if delta["kind"] == "remove":
                         clocks.pop(order_id, None)
-                    elif delta["kind"] == "add":
+                    elif delta["kind"] in {"add", "update"}:
+                        # An observed `update` replaces a known order's
+                        # remaining quantity; this frame is a new observation
+                        # of that exact depth, not a heartbeat of other rows.
                         clocks[order_id] = publication
             clocks = clocks or {}
             self._clocks[key] = {order_id: time for order_id, time in clocks.items() if order_id in rows}
