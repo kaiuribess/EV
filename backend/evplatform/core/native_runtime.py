@@ -197,7 +197,9 @@ class NativeRuntime:
             try:
                 snapshot = await asyncio.wait_for(probe_native_account(
                     client, managed_orders=tuple(self.engine.risk.native_orders.values()),
-                    settled_order_ids=frozenset(self.engine.risk.settled)), timeout=20)
+                    settled_order_ids=frozenset(self.engine.risk.settled),
+                    **({"management_client": record.plugin.management_client}
+                       if venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -876,7 +878,9 @@ class NativeRuntime:
                 settled = frozenset(self.engine.risk.settled)
             snapshot = await asyncio.wait_for(probe_native_account(client,
                 managed_orders=inventory, settled_order_ids=settled,
-                **({"adapter": adapter} if p.venue == "polymarket_us" else {})), timeout=20)
+                **({"adapter": adapter} if p.venue == "polymarket_us" else {}),
+                **({"management_client": record.plugin.management_client}
+                   if p.venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
             return snapshot, token
 
         def unchanged(token):

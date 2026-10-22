@@ -176,6 +176,13 @@ Run `.\setup_novig.ps1` for a read-only setup status. The
 owner-performed wallet opening/funding, and unknown-outcome recovery. Preparing
 or exporting credentials never enables betting.
 
+The existing Novig Paper keys have also exercised a genuine play-money IOC
+through the durable native OMS and fill reconciliation. See the
+[Paper connector evidence](docs/NOVIG_PAPER_PROBE.md) for the exact scope and
+the remaining settlement and production checks. Novig account probes use the
+same-environment management key only to verify the trading key's permission
+and local signer fingerprint; an unverified scope cannot become spendable cash.
+
 For frontend development, run `npm.cmd run dev` in `frontend/`; Vite proxies to
 8001. Set `EV_API_TARGET=http://127.0.0.1:8002` for another backend port.
 

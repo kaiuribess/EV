@@ -14,13 +14,15 @@ import hashlib
 from urllib.parse import quote
 from uuid import UUID
 
+from cryptography.hazmat.primitives import serialization
+
 from pydantic import BaseModel, ConfigDict
 
 from ..core.models import OrderStatus, utcnow
 from .novig import NovigClient
 from .kalshi import KalshiClient
 from .prophetx import ProphetXClient
-from .common import decimal_value
+from .common import VenueError, decimal_value
 from .reconciliation import ReconciliationError, _number, _object, _text, _time, normalize_kalshi_order
 
 
@@ -67,7 +69,26 @@ def _sequence(value):
     return value
 
 
-async def probe_native_account(client, managed_orders=(), *, settled_order_ids=frozenset(), adapter=None) -> NativeAccountSnapshot:
+def _novig_trading_scope(client: NovigClient, metadata: dict) -> bool:
+    """Match management-read key metadata to the actual local signing key."""
+    if not isinstance(metadata, dict) or metadata.get("keyId") != client.settings.api_key:
+        return False
+    if metadata.get("scope") != "trading" or not isinstance(metadata.get("restriction"), str) or not metadata["restriction"]:
+        return False
+    expiry = metadata.get("expiresAt")
+    if expiry is not None:
+        try:
+            if _time(expiry) <= utcnow():
+                return False
+        except ReconciliationError:
+            return False
+    public = client._load_key().public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return metadata.get("fingerprint") == "sha256:" + hashlib.sha256(public).hexdigest()
+
+
+async def probe_native_account(client, managed_orders=(), *, settled_order_ids=frozenset(),
+                               adapter=None, management_client=None) -> NativeAccountSnapshot:
     """No connection/login management; use an already authenticated client.
 
     Managed orders are the native OMS's durable records. Account snapshots are
@@ -158,11 +179,24 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
             reasons.append("Zero-quantity position retains unexplained cash cost")
     if actual_positions != dict(expected_positions):
         reasons.append("Unmanaged, missing or netted native positions require review")
+    scope_verified = False
+    if (management_client is not None and isinstance(management_client, NovigClient)
+            and management_client.settings.environment == environment
+            and management_client.settings.api_key != key_id):
+        try:
+            metadata = await management_client.request("GET", f"/v3/keys/{quote(key_id, safe='')}")
+            scope_verified = _novig_trading_scope(client, metadata)
+        except (ValueError, OSError, VenueError):
+            pass
+    permission_reason = "Authenticated Novig trading-key scope and signer are not verified" if not scope_verified else ""
     return NativeAccountSnapshot(venue=venue, environment=environment, account_fingerprint=fingerprint,
         identity_verified=True, observed_at=utcnow(), balance_usd=cash,
         open_order_count=len(orders), position_count=len(actual_positions), reconciled=not reasons,
         order_sequence=order_seq, position_sequence=position_seq,
-        reason="; ".join(dict.fromkeys(reasons)))
+        reason="; ".join(dict.fromkeys([*reasons, *([permission_reason] if permission_reason else [])])),
+        api_key_scopes=("trading",) if scope_verified else (),
+        trading_permission_verified=scope_verified,
+        cash_available_verified=scope_verified and not reasons)
 
 
 async def _kalshi_pages(client, path, collection, **params):

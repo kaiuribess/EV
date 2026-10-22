@@ -21,6 +21,12 @@ from .stake_sizing import StakeSizing
 from .native_trace import NativeTrace
 
 
+# An exchange match clock can be slightly ahead of this Windows host. Keep
+# the original source and receipt clocks; never turn the difference into a
+# latency measurement. Larger disagreements still quarantine the fill.
+MAX_MATCH_CLOCK_SKEW = timedelta(seconds=1)
+
+
 class NativeOrder(Contract):
     intent: NativeOrderIntent
     candidate_id: str
@@ -175,7 +181,9 @@ class NativeOrderManager:
         changed = {}
         for raw in fills:
             fill = NativeFill.model_validate(raw)
-            if fill.observed_at > utcnow() or (fill.filled_at and fill.filled_at > fill.observed_at):
+            if (fill.observed_at > utcnow() or
+                    (fill.filled_at and (fill.filled_at > fill.observed_at + MAX_MATCH_CLOCK_SKEW
+                                         or fill.filled_at > utcnow() + MAX_MATCH_CLOCK_SKEW))):
                 raise ValueError("Future native execution evidence")
             # Validate individual economics even when intervening executions
             # are still missing. Keep its ORIGINAL cumulative watermark in the

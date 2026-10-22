@@ -11,7 +11,7 @@ from evplatform.core.config import RiskConfig
 from evplatform.core.conflicts import reviewed_correlations, risk_family
 from evplatform.core.metrics import Metrics
 from evplatform.core.models import OrderStatus, utcnow
-from evplatform.core.native_accounting import NativeCumulativeSnapshot, NativeInstrument, NativeOrderIntent, NativePriceBand
+from evplatform.core.native_accounting import NativeCumulativeSnapshot, NativeFill, NativeInstrument, NativeOrderIntent, NativePriceBand
 from evplatform.core.native_oms import NativeOrder, NativeOrderManager, NativeSettlement
 from evplatform.core.pricing import fair_value, opportunity
 from evplatform.core.risk import RiskEngine, RiskRejected
@@ -85,6 +85,22 @@ def report(order, *, quantity="40", cost=".18", fees=".001", status="partial", t
     return NativeOrderReport(native_order_id=order.venue_order_id, client_order_id=order.client_order_id,
         status=status, remaining_quantity=0 if terminal else 100-qty, terminal=terminal,
         financial_complete=True, snapshot=snapshot)
+
+
+def test_native_fill_retains_bounded_exchange_clock_skew_but_rejects_large_future(market):
+    placed = order(market).model_copy(update={"venue_order_id": "native-order"})
+    observed = utcnow() - timedelta(milliseconds=500)
+    fill = NativeFill(fill_id="exchange-fill", order_id="native-order",
+        client_order_id=placed.client_order_id, quantity="100", price=".45",
+        cost_usd=".45", gross_payout_usd="1", fee_usd="0",
+        filled_at=observed+timedelta(milliseconds=150), observed_at=observed,
+        source="novig.rest.fill")
+    stager = type("Stager", (), {"_fill_evidence": {}})()
+    staged, changed = NativeOrderManager._stage_fills(stager, placed, [fill])
+    assert list(staged) == ["exchange-fill"] and changed == [fill]
+    with pytest.raises(ValueError, match="Future native execution evidence"):
+        NativeOrderManager._stage_fills(stager, placed,
+            [fill.model_copy(update={"filled_at": observed+timedelta(seconds=2)})])
 
 
 async def test_durable_intent_precedes_submission_ack_is_not_fill(system, market):

@@ -243,6 +243,7 @@ class NativeMonitor(Plugin):
         self.manifest = normalize_manifest(factory.get_manifest()).model_copy(update={
             "config_schema": self.config_model.model_json_schema()})
         self.client, self.task = None, None
+        self.management_client = None
         self.discovery_task = None
         self.frames = 0
         self.config_error = ""
@@ -276,6 +277,19 @@ class NativeMonitor(Plugin):
         self.client = self.factory(self.settings_factory(
             environment=context.config.get("environment", "sandbox"),
             **{key: os.environ[env] for key, env in credentials.items()}))
+        if self.manifest.name == "novig":
+            # Management metadata is a read-only permission witness. It is
+            # never used as the execution signer or substituted for a missing
+            # trading key, and Paper/Production credentials never cross hosts.
+            from ..venues.novig import NovigClient, NovigSettings
+
+            environment = context.config.get("environment", "sandbox")
+            prefix = "NOVIG_PRODUCTION_MANAGEMENT_" if environment == "production" else "NOVIG_MANAGEMENT_"
+            manager_id = os.getenv(prefix + "API_KEY", "")
+            manager_path = os.getenv(prefix + "PRIVATE_KEY_PATH", "")
+            if manager_id and manager_path:
+                self.management_client = NovigClient(NovigSettings(environment=environment,
+                    api_key=manager_id, private_key_path=manager_path))
         if self.manifest.name == "prophetx":
             review = context.config.get("account_review")
             self.client.account_review = ProphetXAccountReview.model_validate(review) if review else None
@@ -376,6 +390,9 @@ class NativeMonitor(Plugin):
         if self.client:
             await self.client.disconnect()
             self.client = None
+        if self.management_client:
+            await self.management_client.disconnect()
+            self.management_client = None
 
     async def health_check(self):
         if self.config_error:

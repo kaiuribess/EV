@@ -1,7 +1,11 @@
 import httpx
 import pytest
+import hashlib
 from decimal import Decimal
 from types import SimpleNamespace
+
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 
 from evplatform.core.models import OrderStatus, utcnow
 
@@ -39,6 +43,55 @@ async def test_authenticated_echoed_wallet_identity_and_empty_inventory():
     assert result.identity_verified and result.reconciled and result.balance_usd == 100
     assert not result.trading_permission_verified
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize("scope,matching_fingerprint,verified", [
+    ("trading", True, True), ("trading::read", True, False), ("trading", False, False),
+])
+async def test_novig_management_witness_verifies_actual_trading_signer(scope, matching_fingerprint, verified):
+    private = ed25519.Ed25519PrivateKey.generate()
+    der = private.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    fingerprint = "sha256:" + hashlib.sha256(der).hexdigest()
+    trading = NovigClient(NovigSettings(api_key=KEY))
+    management = NovigClient(NovigSettings(api_key="22222222-2222-4222-8222-222222222222"))
+    trading._load_key = lambda: private
+    async def trading_request(method, path):
+        return fixtures()[path]
+    async def management_request(method, path):
+        assert (method, path) == ("GET", f"/v3/keys/{KEY}")
+        return {"keyId": KEY, "scope": scope, "restriction": "subaccount",
+                "expiresAt": None, "fingerprint": fingerprint if matching_fingerprint else "sha256:"+"0"*64}
+    trading.request = trading_request
+    management.request = management_request
+    try:
+        result = await probe_native_account(trading, management_client=management)
+        assert result.identity_verified and result.reconciled
+        assert result.trading_permission_verified is verified
+        assert result.cash_available_verified is verified
+        assert result.api_key_scopes == (("trading",) if verified else ())
+    finally:
+        await trading.disconnect()
+        await management.disconnect()
+
+
+async def test_novig_management_witness_must_match_environment():
+    trading = NovigClient(NovigSettings(api_key=KEY, environment="sandbox"))
+    management = NovigClient(NovigSettings(api_key="22222222-2222-4222-8222-222222222222",
+                                            environment="production"))
+    async def trading_request(method, path):
+        return fixtures()[path]
+    async def no_management_read(*_):
+        pytest.fail("A production key must never witness a Paper trading key")
+    trading.request = trading_request
+    management.request = no_management_read
+    try:
+        result = await probe_native_account(trading, management_client=management)
+        assert result.reconciled and not result.trading_permission_verified
+        assert not result.cash_available_verified
+    finally:
+        await trading.disconnect()
+        await management.disconnect()
 
 
 async def test_server_wallet_mismatch_rejected():
