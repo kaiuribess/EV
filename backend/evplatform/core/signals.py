@@ -129,9 +129,10 @@ class _ActiveEpisode:
 class SignalLedger:
     """Episode keys include canonical rules, strategy, venue, outcome and origin.
 
-    A qualification change or an unavailable signal ends an episode. Every tick is
-    retained as an observation, but statistics use only the first snapshot of each
-    qualifying episode. Repeated ticks cannot manufacture independent wins.
+    A qualification change or an unavailable signal ends an episode. Per-tick
+    detail is retained for six hours, while compact episodes and aggregate counts
+    remain durable. Performance uses the first qualifying episode snapshot;
+    repeated ticks cannot manufacture independent wins.
     """
     def __init__(self, storage: Storage, *, max_open_episodes=10000):
         self.storage = storage
