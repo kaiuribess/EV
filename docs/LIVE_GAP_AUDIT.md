@@ -135,6 +135,14 @@ durable signal observation and that a later candidate withdrawal closes its
 episode. This change bounds future write rate; it does not delete or rewrite
 historical audit data, so the existing database size remains large.
 
+The live-paper latency panel also mixed retained quote age into its
+`receipt_to_calculation_ms` series: a heartbeat can republish an unchanged
+paper quote while preserving the original source receipt. That series now
+excludes those derived paper events. A separate
+`bus_publish_to_calculation_ms` series measures local queue/processing delay
+for every market update. Source observation age stays on the quote and must
+not be described as sportsbook-to-client or order-execution latency.
+
 The paused production Kalshi monitor completed a fresh read-only inventory:
 identity, $50.00 available cash, zero open orders/positions, trading permission
 and the current location attestation were reported verified. The local pilot

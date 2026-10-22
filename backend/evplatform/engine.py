@@ -452,9 +452,16 @@ class Engine:
             self.books[market_id][key] = payload
         if market_id and market_id in self.markets:
             await self.recalculate(market_id, event)
+            calculated_at = utcnow()
+            self.metrics.observe("bus_publish_to_calculation_ms",
+                                 (calculated_at - event.emitted_at).total_seconds() * 1000)
             received = getattr(payload, "received_at", None)
-            if received:
-                self.metrics.observe("receipt_to_calculation_ms", (utcnow() - received).total_seconds() * 1000)
+            # Paper inputs can republish a retained quote on a heartbeat with
+            # its *original* data receipt clock. That is quote age, not a
+            # 30-second delay in the engine's processing queue.
+            if received and event.source not in {"parlay_paper_input", "oddize_paper_input"}:
+                self.metrics.observe("receipt_to_calculation_ms",
+                                     (calculated_at - received).total_seconds() * 1000)
         # Non-odds strategies can also subscribe independently to typed bus events in start().
 
     async def recalculate(self, market_id, event=None):
