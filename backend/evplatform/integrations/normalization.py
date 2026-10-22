@@ -602,13 +602,15 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                     "active" if active else "suspended",
                     {"bookmaker_market_id": market.get("bookmakerMarketId"),
                      "native_outcomes": {key: row.get("bookmakerOutcomeId") for key, row in outcomes.items()},
-                     "participants": [discovered.get("participant1Name") or fixture.get("participant1Id"),
-                                      discovered.get("participant2Name") or fixture.get("participant2Id")],
+                     "participants": [discovered.get("participant1Name") or fixture.get("participant1Name")
+                                      or fixture.get("participant1Id"),
+                                      discovered.get("participant2Name") or fixture.get("participant2Name")
+                                      or fixture.get("participant2Id")],
                      "participant_ids": [fixture.get("participant1Id"), fixture.get("participant2Id")],
                      "scheduled_start": discovered.get("startTime") or fixture.get("startTime"),
                      "event_sport": fixture.get("sportId"),
                      "tournament_id": fixture.get("tournamentId"),
-                     "event_league": discovered.get("tournamentName"),
+                     "event_league": discovered.get("tournamentName") or fixture.get("tournamentName"),
                      "market_catalog": {key: catalog[key] for key in (
                          "marketType", "marketName", "playerProp", "period", "handicap",
                      ) if key in catalog}},

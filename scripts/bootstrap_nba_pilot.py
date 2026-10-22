@@ -44,6 +44,56 @@ def _write_once(path: Path, payload: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _replace_reviewed_json(path: Path, payload: dict) -> None:
+    """Atomically persist an already validated, append-only review update."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,
+                            prefix=path.name + ".", suffix=".tmp", delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _append_reviewed_mappings(path: Path, mappings: MappingFile) -> None:
+    payload = mappings.model_dump(mode="json")
+    if not path.exists():
+        _write_once(path, payload)
+        return
+    previous = MappingFile.model_validate_json(path.read_text(encoding="utf-8"))
+    old = {item.signature: item for item in previous.mappings}
+    new = {item.signature: item for item in mappings.mappings}
+    if previous.version != mappings.version or len(new) != len(mappings.mappings) or any(
+            signature not in new or new[signature] != item for signature, item in old.items()):
+        raise ValueError("Reviewed source mappings changed or disappeared; inspect before replacing")
+    if old != new:
+        _replace_reviewed_json(path, payload)
+
+
+def _extend_structural_review(path: Path, review: StructuralPilotReview) -> None:
+    payload = review.model_dump(mode="json")
+    if not path.exists():
+        _write_once(path, payload)
+        return
+    previous = StructuralPilotReview.model_validate_json(path.read_text(encoding="utf-8"))
+    old, new = previous.model_dump(mode="json"), dict(payload)
+    old_signatures = old.pop("source_signatures")
+    new_signatures = new.pop("source_signatures")
+    old.pop("reviewed_at")
+    new.pop("reviewed_at")
+    old_provenance = old.pop("review_provenance")
+    new_provenance = new.pop("review_provenance")
+    if (old != new or any(new_signatures.get(key) != value for key, value in old_signatures.items())
+            or review.reviewed_at < previous.reviewed_at
+            or not new_provenance.startswith(old_provenance)):
+        raise ValueError("Structural pilot scope or authorization changed; inspect before replacing")
+    if payload != previous.model_dump(mode="json"):
+        _replace_reviewed_json(path, payload)
+
+
 def _refresh_disabled_pilot(path: Path, payload: dict, *, mutable_fields: tuple[str, ...]) -> None:
     """Refresh only build-bound metadata of this still-disabled reviewed pilot."""
     if not path.exists():
@@ -165,8 +215,8 @@ def bootstrap(data_dir: Path, *, url: str = "http://127.0.0.1:8002") -> dict:
                         "Kalshi cancellation can resolve at fair price, not sportsbook refund",
                         "The $1 ceiling is a proposal, not prior stake approval"],
         "execution_authorized": False}
-    _write_once(source_path, mappings.model_dump(mode="json"))
-    _write_once(data_dir / "nba_pilot_structural_review.json", structural.model_dump(mode="json"))
+    _append_reviewed_mappings(source_path, mappings)
+    _extend_structural_review(data_dir / "nba_pilot_structural_review.json", structural)
     _refresh_disabled_pilot(data_dir / "nba_pilot_owner_approval_draft.json", approval,
                             mutable_fields=("profile_digest", "build_id"))
     _refresh_disabled_pilot(data_dir / "launch_profile.json", profile.model_dump(mode="json"),

@@ -103,13 +103,20 @@ Configure-Input 'parlay_rest' @{
 }
 
 # The free OddsPapi account is pregame-only and has a small shared monthly
-# allowance. Collect at most two upcoming NBA fixtures per day, stopping while
+# allowance. A native one-market pilot with explicitly selected fixture IDs
+# spends its limited fixture requests on those IDs before broad discovery;
+# otherwise collect at most two upcoming NBA fixtures per day. Stop while
 # 150 provider requests remain. These quotes are research inputs until exact
 # market/settlement mappings and source freshness are independently verified.
 $oddspapiKeyConfigured = [bool]$env:ODDSPAPI_API_KEY -or
     ((Test-Path -LiteralPath '.env') -and
      (Select-String -LiteralPath '.env' -Pattern '^ODDSPAPI_API_KEY=\S+' -Quiet))
 if ($oddspapiKeyConfigured) {
+    $oddspapiPlugin = @($state.plugins | Where-Object { $_.manifest.name -eq 'oddspapi_rest' })
+    $targetedFixtureCount = if ($isNative -and $oddspapiPlugin.Count -eq 1) {
+        @($oddspapiPlugin[0].config.fixture_ids | Where-Object { $_ }).Count
+    } else { 0 }
+    $fixtureRequestCap = if ($targetedFixtureCount -gt 0) { $targetedFixtureCount } else { 2 }
     Configure-Input 'oddspapi_rest' @{
         sports = @('11'); bookmakers = @('pinnacle', 'fanduel', 'draftkings', 'circasports');
         tournament_id = 132;
@@ -117,7 +124,7 @@ if ($oddspapiKeyConfigured) {
         poll_interval_seconds = [double]86400;
         discovery_interval_seconds = [double]86400;
         discovery_window_hours = 24;
-        max_fixture_requests_per_cycle = 2;
+        max_fixture_requests_per_cycle = $fixtureRequestCap;
         provider_remaining_floor = 150;
         session_request_budget = 100;
         max_requests_per_minute = 10

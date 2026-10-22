@@ -28,12 +28,69 @@ from scripts import bootstrap_nba_pilot
 
 
 FIXTURE = PROJECT_ROOT / "tests/fixtures/oddspapi_den_okc_v4_20261022.json"
+ROTATED_FIXTURE = PROJECT_ROOT / "tests/fixtures/oddspapi_den_okc_v4_market_rotation_20261022.json"
 
 
 def recorded_frame():
     row = json.loads(FIXTURE.read_text(encoding="utf-8"))
     return ProviderEnvelope("oddspapi_rest", "snapshot", row["payload"],
         datetime.fromisoformat(row["captured_at"]), 0, metadata=row["metadata"])
+
+
+def test_reviewed_pinnacle_replacement_clears_identity_only():
+    row = json.loads(ROTATED_FIXTURE.read_text(encoding="utf-8"))
+    frame = ProviderEnvelope("oddspapi_rest", "snapshot", row["payload"],
+        datetime.fromisoformat(row["captured_at"]), 0, metadata=row["metadata"])
+    _, mappings, structural = bootstrap_nba_pilot.validated_review()
+    offer, = extract_offers(frame)
+    assert offer.signature == structural.source_signatures["oddspapi_rest/pinnacle/replacement_3775347026"]
+    assert offer.context["native_outcomes"] == {"111": "home", "112": "away"}
+    mapped = VerifiedProviderMapper(mappings.mappings)(frame)
+    assert len(mapped) == 1
+    market, quote = mapped[0]
+    assert market.id == "nba-20261022-den-okc-normal-winner"
+    assert quote.bookmaker == "pinnacle" and quote.status == "active"
+    assert quote.source_observed_at is None and not quote.observation_verified
+    assert not quote.settlement_equivalence_verified
+
+
+def test_explicit_oddspapi_fixture_uses_response_team_and_league_names():
+    row = json.loads(ROTATED_FIXTURE.read_text(encoding="utf-8"))
+    # fixture_ids are polled before discovery, so they have no discovery join.
+    metadata = {"market_catalog": row["metadata"]["market_catalog"]}
+    frame = ProviderEnvelope("oddspapi_rest", "snapshot", row["payload"],
+        datetime.fromisoformat(row["captured_at"]), 0, metadata=metadata)
+    _, mappings, _ = bootstrap_nba_pilot.validated_review()
+    offers = extract_offers(frame)
+    assert len(offers) == 1 and offers[0].signature == mappings.mappings[-1].signature
+    mapped = VerifiedProviderMapper(mappings.mappings)(frame)
+    assert len(mapped) == 1 and mapped[0][1].bookmaker == "pinnacle"
+    assert not mapped[0][1].observation_verified
+
+
+def test_reviewed_replacement_is_append_only_and_cannot_change_pilot_scope(tmp_path):
+    _, mappings, structural = bootstrap_nba_pilot.validated_review()
+    source = tmp_path / "verified_mappings.json"
+    initial = mappings.model_copy(update={"mappings": mappings.mappings[:-1]})
+    bootstrap_nba_pilot._append_reviewed_mappings(source, initial)
+    bootstrap_nba_pilot._append_reviewed_mappings(source, mappings)
+    assert json.loads(source.read_text(encoding="utf-8"))["mappings"][-1]["signature"] == mappings.mappings[-1].signature
+    changed = mappings.model_copy(update={"mappings": [
+        mappings.mappings[0].model_copy(update={"evidence": "unreviewed replacement"}), *mappings.mappings[1:]]})
+    with pytest.raises(ValueError, match="changed or disappeared"):
+        bootstrap_nba_pilot._append_reviewed_mappings(source, changed)
+    review_path = tmp_path / "nba_pilot_structural_review.json"
+    initial_review = structural.model_copy(update={
+        "source_signatures": {key: value for key, value in structural.source_signatures.items()
+                              if key != "oddspapi_rest/pinnacle/replacement_3775347026"},
+        "review_provenance": structural.review_provenance.split("; Pinnacle native market ID replacement")[0],
+    })
+    bootstrap_nba_pilot._extend_structural_review(review_path, initial_review)
+    bootstrap_nba_pilot._extend_structural_review(review_path, structural)
+    assert len(json.loads(review_path.read_text(encoding="utf-8"))["source_signatures"]) == 4
+    with pytest.raises(ValueError, match="scope or authorization changed"):
+        bootstrap_nba_pilot._extend_structural_review(review_path,
+            structural.model_copy(update={"canonical_market_id": "another-market"}))
 
 
 def test_recorded_real_pair_clears_identity_but_not_quote_or_settlement_gate():
@@ -200,7 +257,7 @@ def test_provider_bridge_loads_reviewed_mapping_from_both_working_directories(
     async def check():
         await bridge.start(PluginContext(engine.bus, engine.schemas, config={}))
         try:
-            assert len(bridge.mapper.mappings) == 3
+            assert len(bridge.mapper.mappings) == 4
             matched = bridge.mapper(recorded_frame())
             assert len(matched) == 2
             assert all(quote.source_observed_at is None for _, quote in matched)
@@ -236,7 +293,7 @@ def test_bootstrap_persists_disabled_profile_and_structural_review(monkeypatch, 
     assert profile.validation_pilot and profile.evidence == ()
     assert profile.limits.unit_size_usd == 5 and profile.limits.max_native_order_attempts == 1
     assert not json.loads((tmp_path / "data/nba_pilot_owner_approval_draft.json").read_text())["approved"]
-    assert len(VerifiedProviderMapper.from_file(tmp_path / "data/verified_mappings.json").mappings) == 3
+    assert len(VerifiedProviderMapper.from_file(tmp_path / "data/verified_mappings.json").mappings) == 4
     assert calls == [("GET", "/api/state"), ("POST", "/api/launch/probe"),
                      ("GET", "/api/launch/setup"), ("GET", "/api/native/orders")]
     # Only the build-bound metadata may advance; scope, limits and disabled
