@@ -13,6 +13,10 @@ The exact [Philadelphia listing](https://external-api.kalshi.com/trade-api/v2/ma
 also says a postponed game that fails to start within 48 hours resolves to a
 **fair price**, rather than an ordinary automatic refund. That contingency
 must be compared against each reference book's actual rules before pricing.
+For example, [bet365's Iowa basketball rules](https://help.ia.bet365.com/s/en-us/sportsrules/basketball)
+say an abandoned game is generally *no action* if it does not finish within
+48 hours. That is a concrete rules difference; the book's applicable
+jurisdiction and exact wager terms still need separate review.
 
 The new read-only `scripts/review_kalshi_nba.py` crosswalk uses known NBA team
 codes and the Eastern game date to find candidate fixtures while retaining
