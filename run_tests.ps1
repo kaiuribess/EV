@@ -19,4 +19,7 @@ if (-not $SkipFrontend) {
     } finally { Pop-Location }
 }
 Write-Host "All offline checks passed. These checks do not establish live API connectivity." -ForegroundColor Green
+# Keep previous ad-hoc pytest basetemp trees from accumulating indefinitely.
+# The canonical data/pytest-current tree is retained and reused above.
+& ".\clean_workspace.ps1" -Apply
 

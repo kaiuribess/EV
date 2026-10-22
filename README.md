@@ -379,6 +379,13 @@ database can still consume disk; inspect its orders, fills, settlements, and
 real-market episodes before removing it. The folder-wide size can exceed 10 GiB
 if multiple databases or old test artifacts accumulate, so inspect `data` when
 adding another long-running workspace.
+`clean_workspace.ps1` reports the size of disposable old pytest directories and
+benchmark databases without changing anything. Run `powershell -NoProfile
+-ExecutionPolicy Bypass -File .\clean_workspace.ps1 -Apply -MinAgeHours 12` to
+remove only those files after tests have stopped. `run_tests.ps1` also cleans
+these old test artifacts after a successful run. It never selects operational
+databases or account evidence. The report includes the total workspace size and
+whether it is below 10 GiB.
 For a large stopped historical database, add `--fast-offline` to prune in larger
 committed ranges before compaction; an interrupted run can be repeated safely.
 If pruning finished but compaction was interrupted, rerun with `--compact-only`
