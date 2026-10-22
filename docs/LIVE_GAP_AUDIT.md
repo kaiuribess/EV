@@ -357,3 +357,25 @@ Circa in that event's sampled props. This proves the event-context join and
 some real two-sided feed coverage, not a current tradable quote, contract
 equivalence, a profitable edge, or order readiness. Re-run the bounded probe
 with `python scripts/probe_oddize_prop_event.py` when monitoring coverage.
+
+### Optional status and observation feeds, October 21 evening PDT
+
+The [OddsPapi v4 odds contract](https://oddspapi.io/en/docs/get-odds) provides
+explicit fixture, bookmaker, market and selection availability flags. The
+adapter now requires all positive flags before marking market status verified;
+missing fields fail closed. Its bookmaker and provider change timestamps still
+do not verify when an unchanged individual price was last observed. No
+OddsPapi credential is configured, so this was validated with controlled
+responses only.
+
+The [Owls Pinnacle realtime contract](https://owlsinsight.com/docs) separately
+documents `markets[].last_seen` as a confirmation of a specific main market.
+An optional `owls_pinnacle_realtime` REST plugin now preserves that observation
+apart from `last_update` price changes. It accepts only an actual Pinnacle
+response with a healthy feed, a future scheduled event, an unsuspended main
+market, and a nonfuture market confirmation; a PS3838 fallback or failed poll
+invalidates cached quotes immediately. The new plugin is independently
+registered and disabled by default. There is no `OWLS_API_KEY` in this local
+installation, no paid entitlement was obtained, and no genuine quote or market
+was certified through this path. It also does not resolve cross-venue
+settlement equivalence or the first real order-to-settlement test.

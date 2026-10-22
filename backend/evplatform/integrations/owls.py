@@ -67,6 +67,40 @@ class OwlsRest(RestProvider):
             yield await self.fetch_props(sport)
 
 
+class OwlsPinnacleRealtimeRest(OwlsRest):
+    """Pinnacle's source-confirmed main lines, isolated from Owls' v1 board.
+
+    The endpoint can serve a PS3838 fallback. A fallback is deliberately not
+    labelled Pinnacle, and the raw payload is retained only as provider health
+    evidence. This poller uses a separate provider ID so a full realtime board
+    cannot replace or invalidate the standard Owls provider's markets.
+    """
+
+    provider_id = "owls_pinnacle_realtime"
+    config_class = OwlsConfig
+
+    async def fetch_snapshot(self, sport: str, **filters: Any) -> ProviderEnvelope:
+        params: dict[str, Any] = {}
+        if self.config.league:
+            params["league"] = self.config.league
+        params.update(filters)
+        result = await self.request(f"/api/v1/{safe_component(sport)}/realtime", params=params)
+        meta = result.payload.get("meta", {}) if isinstance(result.payload, dict) else {}
+        if not isinstance(meta, dict) or meta.get("source") != "pinnacle":
+            return replace(result, kind="feed_invalidated", payload={
+                "sport": sport,
+                "reason": "Pinnacle realtime feed unavailable or serving a different source",
+                "source": meta.get("source") if isinstance(meta, dict) else None,
+            }, metadata={**result.metadata, "sport": sport})
+        return replace(result, kind="snapshot", snapshot_complete=True,
+                       published_at=parse_timestamp(meta.get("timestamp")),
+                       metadata={**result.metadata, "sport": sport, "provider_meta": meta,
+                                 "odds_format": "american"})
+
+    async def _poll_sport(self, sport: str):
+        yield await self.fetch_snapshot(sport)
+
+
 OwlsRest.manifest = provider_manifest(
     "owls_rest", "Owls Insight REST", transports=["rest"], env="OWLS_API_KEY",
     config=OwlsConfig, docs=["https://owlsinsight.com/docs", "https://owlsinsight.com/openapi.json"],
@@ -75,5 +109,18 @@ OwlsRest.manifest = provider_manifest(
         "meta.availableBooks and returned metadata define actual book/sport coverage.",
         "Per-book feeder publication is not per-quote freshness; retained quote timestamps are preserved.",
         "Circa game-line coverage does not imply Circa player-prop coverage.",
+    ],
+)
+
+OwlsPinnacleRealtimeRest.manifest = provider_manifest(
+    "owls_pinnacle_realtime", "Owls Pinnacle realtime main lines", transports=["rest"],
+    env="OWLS_API_KEY", config=OwlsConfig,
+    docs=["https://owlsinsight.com/docs", "https://owlsinsight.com/openapi.json"],
+    limitations=[
+        "Requires an eligible Owls paid plan; no credential is bundled.",
+        "Only the official Pinnacle realtime main-line shape is eligible for source-confirmed status.",
+        "Market last_seen is observation; last_update is only a price-change clock.",
+        "PS3838 fallback, stale feed, missing market confirmation, alternates and props are blocked.",
+        "REST polling consumes quota; this plugin does not implement the realtime WebSocket sequence protocol.",
     ],
 )

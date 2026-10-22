@@ -16,6 +16,7 @@ Synthetic demo data comes from the separate demo plugin, never these adapters.
 | `parlay_rest` | REST polling | Backend `PARLAY_API_KEY`, `X-API-Key` header | e.g. `basketball_nba` |
 | `parlay_ws` | WebSocket, REST discovery methods | Same key, header on upgrade | One sport per socket |
 | `owls_rest` | REST polling | Backend `OWLS_API_KEY`, Bearer header | e.g. `nba` |
+| `owls_pinnacle_realtime` | REST polling of Pinnacle realtime | Same backend key | e.g. `nba` |
 | `oddspapi_rest` | v4 REST polling | Backend `ODDSPAPI_API_KEY`, documented query auth | Numeric sport ID as a string |
 
 Plugins are disabled by default. A missing credential returns `missing_credentials`
@@ -106,6 +107,20 @@ endpoints are extension work. The published metadata API was not accessible
 from the development network without passing the provider's access controls;
 no bypass was attempted. Entitled account coverage remains unverified.
 
+The optional, separate `owls_pinnacle_realtime` plugin polls
+`/api/v1/{sport}/realtime` for Pinnacle main markets. It accepts only an
+explicit Pinnacle-source response. For pregame h2h, spread and total markets,
+the documented market-level `last_seen` is a source confirmation of that
+market even when its `last_update` price-change clock is old. Missing or
+future `last_seen`, a stale/unavailable feed, a resubscription, a withdrawn
+market or a started event suspends the quote. The plugin does not use
+event-level `seenAt` to date individual markets and does not certify
+alternates or player props. A PS3838 fallback immediately invalidates its
+Pinnacle quotes. It is disabled until an eligible `OWLS_API_KEY` is configured;
+the present installation has no key, so only mocked protocol tests pass.
+[Realtime contract](https://owlsinsight.com/docs),
+[market clock schema](https://owlsinsight.com/openapi.json)
+
 ## OddsPapi
 
 The v4 client implements sports, bookmaker and market catalogs, scheduled
@@ -125,14 +140,14 @@ catalog coverage. Null coverage stays unknown. [Account capabilities](https://od
 reference. The market catalog is needed to verify period, threshold, player and
 outcome IDs. [Market catalog](https://oddspapi.io/en/docs/get-markets)
 
-The odds response also declares `bookmakerIsActive`, fixture suspension,
-`marketActive` and selection `active`. An explicit false bookmaker flag now
-blocks the offer even when the nested market and selections say true. This is
-negative availability evidence, not proof that a returned active selection was
-re-observed recently or is executable. The adapter still leaves
-`market_status_verified=false` for strict live references. The current account
-has no OddsPapi API key, so this behavior is covered by offline protocol tests,
-not a live account probe. [Odds response fields](https://oddspapi.io/us/docs/get-odds)
+The odds response declares fixture `hasOdds` and `statusId`, bookmaker
+`bookmakerIsActive` and `suspended`, `marketActive`, and selection `active`.
+All must affirm availability before a quote receives verified market status;
+missing flags suspend it. This verifies status only. Neither
+`bookmakerChangedAt` nor `changedAt` is a repeated observation of an unchanged
+price, so source observation remains unverified for strict live references.
+The current installation has no OddsPapi API key; only mocked protocol tests
+pass. [Odds response fields](https://oddspapi.io/en/docs/get-odds)
 
 Quota accounting reserves requests before transmission, because failure
 responses can consume the provider allowance. Account usage refresh is

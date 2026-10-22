@@ -24,7 +24,7 @@ from evplatform.integrations.normalization import (
     VerifiedOfferMapping, VerifiedProviderMapper, decimal_price, extract_offers,
 )
 from evplatform.integrations.oddspapi import OddsPapiRest
-from evplatform.integrations.owls import OwlsRest
+from evplatform.integrations.owls import OwlsPinnacleRealtimeRest, OwlsRest
 from evplatform.integrations.parlay import ParlayRest, ParlayWebSocket
 from evplatform.integrations.templates import map_json_fields, parse_sse, replay_envelopes
 
@@ -412,6 +412,95 @@ def test_owls_per_book_liveness_never_dates_a_quote():
     assert extract_offers(raw)[0].observed_at is None
 
 
+def test_owls_pinnacle_realtime_uses_main_market_confirmation_only():
+    event = {"id": "event-1", "sport_key": "nba", "home_team": "Team A", "away_team": "Team B",
+             "commence_time": (NOW + timedelta(hours=2)).isoformat(),
+             "status": "scheduled", "phase": "scheduled", "isLive": False,
+             "bookmakers": [{"key": "pinnacle", "markets": [
+                 {"key": "h2h", "last_seen": (NOW - timedelta(seconds=5)).isoformat(),
+                  "last_update": (NOW - timedelta(minutes=2)).isoformat(),
+                  "outcomes": [{"name": "Team A", "price": -120},
+                               {"name": "Team B", "price": 110}]},
+                 {"key": "special_123_total_p0", "last_seen": NOW.isoformat(),
+                  "outcomes": [{"name": "over", "price": -110}, {"name": "under", "price": -110}]},
+             ]}]}
+    payload = {"data": [event], "meta": {"source": "pinnacle", "sport": "nba",
+        "available": True, "freshness": {"stale": False}, "feed": {"resubscribing": False}}}
+    raw = replace(envelope(), provider_id="owls_pinnacle_realtime", kind="snapshot", payload=payload)
+    offers = extract_offers(raw)
+    assert len(offers) == 1  # Special/prop markets have different clock semantics.
+    offer = offers[0]
+    assert offer.status == "active"
+    assert offer.observation_verified and offer.observation_complete and offer.market_status_verified
+    assert offer.source_observed_at == NOW - timedelta(seconds=5)
+    assert offer.source_price_changed_at == NOW - timedelta(minutes=2)
+    assert offer.prices == {"Team A": Decimal("1.833333333333333333333333333"), "Team B": Decimal("2.1")}
+
+    def first(changes=None, *, market_changes=None, meta_changes=None):
+        market = {**event["bookmakers"][0]["markets"][0], **(market_changes or {})}
+        changed_event = {**event, **(changes or {}), "bookmakers": [{"key": "pinnacle", "markets": [market]}]}
+        changed = {**payload, "data": [changed_event], "meta": {**payload["meta"], **(meta_changes or {})}}
+        return extract_offers(replace(raw, payload=changed))[0]
+
+    for changes in ({"phase": "suspended"}, {"phase": "live"}, {"status": "final"},
+                    {"commence_time": (NOW - timedelta(minutes=1)).isoformat()}):
+        result = first(changes)
+        assert result.status == "suspended" and not result.market_status_verified
+    for market_changes in ({"suspended": True}, {"last_seen": None},
+                           {"last_seen": (NOW + timedelta(seconds=1)).isoformat()},
+                           {"last_update": NOW.isoformat()}):
+        result = first(market_changes=market_changes)
+        assert result.status == "suspended" and not result.observation_verified
+    for meta_changes in ({"available": False}, {"freshness": {"stale": True}},
+                         {"feed": {"resubscribing": True}}):
+        result = first(meta_changes=meta_changes)
+        assert result.status == "suspended" and not result.observation_verified
+    assert extract_offers(replace(raw, payload={**payload, "meta": {**payload["meta"],
+                                             "source": "ps3838"}})) == []
+
+
+async def test_owls_pinnacle_realtime_rest_isolated_source_and_auth():
+    requests = []
+    source = "pinnacle"
+    async def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"data": [], "meta": {
+            "source": source, "sport": "nba", "available": True,
+            "freshness": {"stale": False}, "timestamp": NOW.isoformat(),
+        }})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = OwlsPinnacleRealtimeRest({"enabled": True, "sports": ["nba"]},
+                                            client=client, credential="test-secret")
+        result = await provider.fetch_snapshot("nba")
+        assert result.provider_id == "owls_pinnacle_realtime"
+        assert result.snapshot_complete is True
+        assert result.published_at == NOW
+        assert requests[0].url.path == "/api/v1/nba/realtime"
+        assert requests[0].headers["Authorization"] == "Bearer test-secret"
+        assert "owls_pinnacle_realtime" in PROVIDER_FACTORIES
+        source = "ps3838"
+        fallback = await provider.fetch_snapshot("nba")
+        assert fallback.kind == "feed_invalidated"
+        assert fallback.payload["sport"] == "nba"
+        assert extract_offers(fallback) == []
+        await provider.disconnect()
+
+
+async def test_realtime_rest_poll_failure_invalidates_cached_reference():
+    async def fail(_request):
+        raise httpx.ConnectError("transport unavailable")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as client:
+        provider = OwlsPinnacleRealtimeRest({"enabled": True, "sports": ["nba"]},
+                                            client=client, credential="test-secret")
+        stream = provider.stream_updates()
+        frame = await stream.__anext__()
+        assert frame.kind == "feed_invalidated"
+        assert frame.payload == {"reason": "provider_poll_failed"}
+        assert extract_offers(frame) == []
+        await stream.aclose()
+        await provider.disconnect()
+
+
 def test_oddspapi_price_and_bookmaker_clocks_are_distinct():
     outcome = {"price": 1.91, "active": True, "bookmakerChangedAt": None, "changedAt": NOW.isoformat()}
     raw = replace(envelope(), provider_id="oddspapi_rest", kind="snapshot", payload={
@@ -441,6 +530,50 @@ def test_oddspapi_explicit_inactive_bookmaker_blocks_its_active_market():
     offer = extract_offers(raw)[0]
     assert offer.status == "suspended"
     assert offer.market_status_verified is False
+
+
+def test_oddspapi_explicit_availability_verifies_status_but_not_quote_observation():
+    selection = {"price": 1.91, "active": True,
+                 "bookmakerChangedAt": NOW.isoformat(), "changedAt": NOW.isoformat()}
+    fixture = {"fixtureId": "fixture1", "statusId": 0, "hasOdds": True,
+               "bookmakerOdds": {"pinnacle": {
+                   "bookmakerIsActive": True, "suspended": False,
+                   "markets": {"10": {"marketActive": True, "outcomes": {
+                       "11": {"players": {"0": selection}},
+                       "12": {"players": {"0": selection}},
+                   }}},
+               }}}
+    raw = replace(envelope(), provider_id="oddspapi_rest", kind="snapshot", payload=fixture)
+    offer = extract_offers(raw)[0]
+    assert offer.status == "active"
+    assert offer.market_status_verified is True
+    assert offer.observed_at == NOW
+    assert offer.observation_verified is False
+    assert offer.source_observed_at is None
+    assert offer.verification_reason == "current_availability_flags_only_no_quote_observation"
+
+    # Missing, inactive, or suspended fields cannot be interpreted as a
+    # verified current quote, even when price-change timestamps are recent.
+    for field, value in (("hasOdds", None), ("hasOdds", False), ("statusId", None),
+                         ("statusId", 2)):
+        changed = {**fixture, field: value}
+        result = extract_offers(replace(raw, payload=changed))[0]
+        assert result.status == "suspended"
+        assert result.market_status_verified is False
+    for field, value in (("bookmakerIsActive", None), ("bookmakerIsActive", False),
+                         ("suspended", None), ("suspended", True)):
+        changed_book = {**fixture["bookmakerOdds"]["pinnacle"], field: value}
+        changed = {**fixture, "bookmakerOdds": {"pinnacle": changed_book}}
+        result = extract_offers(replace(raw, payload=changed))[0]
+        assert result.status == "suspended"
+        assert result.market_status_verified is False
+    changed_market = {**fixture["bookmakerOdds"]["pinnacle"]["markets"]["10"], "marketActive": None}
+    changed = {**fixture, "bookmakerOdds": {"pinnacle": {
+        **fixture["bookmakerOdds"]["pinnacle"], "markets": {"10": changed_market},
+    }}}
+    result = extract_offers(replace(raw, payload=changed))[0]
+    assert result.status == "suspended"
+    assert result.market_status_verified is False
 
 
 async def test_sse_multiline_comments_and_truncated_event():

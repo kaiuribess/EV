@@ -390,9 +390,20 @@ class RestProvider:
                 backoff.reset()
                 await asyncio.sleep(self.config.poll_interval_seconds)
             except ProviderDisabled:
+                received = datetime.now(UTC)
+                yield ProviderEnvelope(self.provider_id, "feed_invalidated",
+                                       {"reason": "provider_access_unavailable"}, received,
+                                       time.perf_counter_ns())
                 return
             except (ProviderError, QuotaExceeded):
                 self.state = ProviderState.BACKOFF
+                received = datetime.now(UTC)
+                # A failed poll cannot confirm that previously cached prices
+                # are still offered. Revoke the provider's quotes immediately;
+                # the next successful snapshot can repopulate them.
+                yield ProviderEnvelope(self.provider_id, "feed_invalidated",
+                                       {"reason": "provider_poll_failed"}, received,
+                                       time.perf_counter_ns())
                 await asyncio.sleep(max(backoff.next_delay(), min(self.quota.stats()["cooldown_seconds"], 60)))
 
     async def health_check(self) -> dict[str, Any]:

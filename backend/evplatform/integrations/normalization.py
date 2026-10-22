@@ -416,6 +416,77 @@ def _owls_props(envelope: ProviderEnvelope) -> list[SourceOffer]:
     return result
 
 
+def _owls_pinnacle_realtime_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
+    payload = envelope.payload
+    if not isinstance(payload, dict) or not isinstance(payload.get("meta"), dict):
+        raise ValueError("Expected Owls realtime snapshot and metadata")
+    meta = payload["meta"]
+    if meta.get("source") != "pinnacle":
+        return []
+    events = payload.get("data")
+    if not isinstance(events, list):
+        raise ValueError("Expected Owls realtime event list")
+    feed = meta.get("feed") if isinstance(meta.get("feed"), dict) else {}
+    freshness = meta.get("freshness") if isinstance(meta.get("freshness"), dict) else {}
+    feed_ready = (meta.get("available") is True and freshness.get("stale") is False
+                  and feed.get("resubscribing") is not True)
+    result = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("Expected Owls realtime event")
+        phase = event.get("phase")
+        start = parse_timestamp(event.get("commence_time"))
+        pregame = (phase == "scheduled" and event.get("status") in {None, "scheduled"}
+                   and event.get("isLive") is not True and start is not None
+                   and start > envelope.received_at)
+        context = {"event_sport": event.get("sport_key") or meta.get("sport"),
+                   "participants": [event.get("home_team"), event.get("away_team")],
+                   "scheduled_start": event.get("commence_time")}
+        if event.get("market_type") == "outright":
+            continue
+        for book in event.get("bookmakers", []):
+            if not isinstance(book, dict) or book.get("key") != "pinnacle":
+                continue
+            for market in book.get("markets", []):
+                if not isinstance(market, dict) or market.get("key") not in {"h2h", "spreads", "totals"}:
+                    continue
+                outcomes = market.get("outcomes")
+                if not isinstance(outcomes, list):
+                    raise ValueError("Expected Owls realtime outcomes")
+                prices, points = {}, {}
+                for outcome in outcomes:
+                    name = str(outcome["name"])
+                    if name in prices:
+                        raise ValueError("Duplicate Owls realtime outcome")
+                    prices[name] = decimal_price(outcome["price"], "american")
+                    points[name] = number_identity(outcome.get("point"))
+                seen = parse_timestamp(market.get("last_seen"))
+                changed = parse_timestamp(market.get("last_update"))
+                # The documented last_seen confirms this individual main
+                # market, even if its price did not change. Event-level seenAt,
+                # sport-level freshness and REST arrival cannot replace it.
+                seen_valid = (seen is not None and seen <= envelope.received_at
+                              and (changed is None or changed <= seen))
+                status_active = (feed_ready and pregame and market.get("suspended") is not True
+                                 and seen_valid)
+                verified = status_active
+                result.append(SourceOffer(
+                    envelope.provider_id, "pinnacle", str(event.get("eventId") or event.get("id") or ""),
+                    str(market["key"]), None, None, market.get("period"), points, prices,
+                    changed, envelope.published_at,
+                    "active" if status_active else "suspended",
+                    {**_row_context(market), **context},
+                    source_observed_at=seen if seen_valid else None,
+                    observation_verified=verified,
+                    observation_complete=verified and len(prices) >= 2,
+                    source_price_changed_at=changed,
+                    market_status_verified=verified,
+                    verification_reason=("owls_pinnacle_market_last_seen"
+                                         if verified else "owls_pinnacle_feed_status_or_market_seen_unverified"),
+                ))
+    return result
+
+
 def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
     fixture = envelope.payload
     result = []
@@ -433,9 +504,15 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                 ):
                     continue
                 prices = {key: decimal_price(row["price"], "decimal") for key, row in outcomes.items()}
-                active = (book.get("bookmakerIsActive") is not False
-                          and book.get("suspended") is not True and market.get("marketActive") is True
-                          and all(row.get("active") is True for row in outcomes.values()))
+                # The v4 snapshot explicitly reports fixture, bookmaker, market
+                # and selection availability. Require affirmative evidence at
+                # every level; an omitted flag is not an active market. These
+                # flags verify availability, not when the book last observed
+                # unchanged prices (bookmakerChangedAt is a change clock).
+                active = (fixture.get("statusId") in {0, 1} and fixture.get("hasOdds") is True
+                          and book.get("bookmakerIsActive") is True
+                          and book.get("suspended") is False and market.get("marketActive") is True
+                          and bool(outcomes) and all(row.get("active") is True for row in outcomes.values()))
                 # Provider recorded-change time and bookmaker clock are kept separate.
                 source_time = _oldest([parse_timestamp(row.get("bookmakerChangedAt")) for row in outcomes.values()])
                 provider_time = _oldest([parse_timestamp(row.get("changedAt")) for row in outcomes.values()])
@@ -444,13 +521,16 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                     None if player_id == "0" else str(player_id),
                     number_identity(catalog.get("handicap")), catalog.get("period"),
                     {key: None for key in outcomes}, prices, source_time, provider_time,
-                    "active" if active and fixture.get("statusId") not in {2, 3} else "suspended",
+                    "active" if active else "suspended",
                     {"bookmaker_market_id": market.get("bookmakerMarketId"),
                      "native_outcomes": {key: row.get("bookmakerOutcomeId") for key, row in outcomes.items()},
                      "participants": [fixture.get("participant1Id"), fixture.get("participant2Id")],
                      "market_catalog": {key: catalog[key] for key in (
                          "marketType", "marketName", "playerProp", "period", "handicap",
                      ) if key in catalog}},
+                    market_status_verified=active,
+                    verification_reason=("current_availability_flags_only_no_quote_observation"
+                                         if active else "odds_papi_availability_missing_or_inactive"),
                 ))
     return result
 
@@ -580,6 +660,8 @@ def extract_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
         # A game may occur under several book keys; deduplicate exact source identity.
         events = [event for group in envelope.payload.get("data", {}).values() for event in group]
         return list({offer.signature: offer for offer in _toa_offers(envelope, events, odds_format="american")}.values())
+    if envelope.provider_id == "owls_pinnacle_realtime":
+        return _owls_pinnacle_realtime_offers(envelope)
     if envelope.provider_id == "oddspapi_rest":
         return _oddspapi_offers(envelope)
     if envelope.provider_id == "oddize_rest":
