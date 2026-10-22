@@ -7,8 +7,8 @@ The production monitor was restarted on the tested build and remained paused:
 source/native market mapping. The live-input paper workspace restarted with
 synthetic odds off and simulated trading on. Its real-signal ledger had zero
 eligible episodes; repeated `NO SIGNAL` evaluations are tracked but are not
-profitable opportunities or placed orders. The full offline check passed 2,114
-backend tests, 103 dashboard tests and the frontend build.
+profitable opportunities or placed orders. The latest full offline check passed
+2,115 backend tests, 104 dashboard tests and the frontend build.
 
 Four authenticated, read-only account diagnostics at 08:44 PDT returned:
 
@@ -28,6 +28,16 @@ quote-bound observation clock. This did not produce an eligible live reference
 or remove the mapping, settlement and genuine lifecycle gates. The existing
 database retention/compaction had reduced the workspace to about 8.6 GB,
 below the requested 10 GB target.
+
+The provider review now counts complete quote-clock evidence and verified
+active status **on the same observation**, separately from the two individual
+counts. In a bounded October 22 production review window, Parlay REST had
+236 clock-verified observations and 46 status-verified observations among its
+last 1,000 quarantined rows, but zero carried both complete clock and status
+evidence. The window hit its cap and is not a census of all markets. Parlay's
+streaming feeds and Oddize also had zero joint observations in their current
+windows. This is a measured reason no quote was promoted to a strict live
+reference, not a claim that either provider never supplies useful odds.
 
 ## Existing-key follow-up (02:42 UTC October 22)
 

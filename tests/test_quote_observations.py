@@ -73,6 +73,7 @@ def test_parlay_fanduel_bilateral_native_links_certify_only_that_rest_prop_obser
     assert not extract_offers(parlay(row))[0].market_status_verified  # WS has no documented link contract.
     for change in ({"under_link": None}, {"over_link": "not-a-url"},
                    {"over_link": "https://"}, {"under_link": "https://user:pass@example.com/"},
+                   {"under_link": "https://fanduel.com.evil.invalid/under"},
                    {"last_observed": None}, {"last_update_type": "price_change"},
                    {"bookmaker": "draftkings"}, {"under_price": None}):
         candidate, = extract_offers(ProviderEnvelope("parlay_rest", "props_snapshot",
@@ -107,6 +108,11 @@ def test_parlay_game_links_certify_each_fanduel_side_status_but_not_quote_clock(
             event["bookmakers"][0]["markets"][0]["outcomes"][0],
             {"name": "Away", "price": 2.1}]}]}]}
     assert not offer_for(one_link).market_status_verified
+    unrelated_link = {**event, "bookmakers": [{**event["bookmakers"][0],
+        "markets": [{**event["bookmakers"][0]["markets"][0], "outcomes": [
+            event["bookmakers"][0]["markets"][0]["outcomes"][0],
+            {"name": "Away", "price": 2.1, "link": "https://other-book.example/away"}]}]}]}
+    assert not offer_for(unrelated_link).market_status_verified
     assert not offer_for(event, kind="initial_state").market_status_verified
     other_book = {**event, "bookmakers": [{**event["bookmakers"][0], "key": "pinnacle"}]}
     assert not offer_for(other_book).market_status_verified

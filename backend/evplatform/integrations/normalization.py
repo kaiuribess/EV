@@ -132,12 +132,16 @@ def _oldest(values: list[datetime | None]) -> datetime | None:
     return min(values) if values and all(value is not None for value in values) else None
 
 
-def _valid_native_link(value: Any) -> bool:
+def _valid_fanduel_link(value: Any) -> bool:
     if not isinstance(value, str) or len(value) > 4096:
         return False
     try:
         parsed = urlsplit(value)
-        return parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
+        host = parsed.hostname
+        return (parsed.scheme == "https" and host is not None
+                and (host == "fanduel.com" or host.endswith(".fanduel.com"))
+                and parsed.port in (None, 443)
+                and not parsed.username and not parsed.password)
     except ValueError:
         return False
 
@@ -298,7 +302,7 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                     and book.get("key") == "fanduel"
                     and market.get("key") in {"h2h", "spreads", "totals"}
                     and len(prices) >= 2 and status == "active"
-                    and all(_valid_native_link(outcome.get("link")) for outcome in outcomes)
+                    and all(_valid_fanduel_link(outcome.get("link")) for outcome in outcomes)
                     and _observation_problem(envelope, event, book, market) is None
                 )
                 result.append(SourceOffer(
@@ -418,7 +422,7 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
         status_verified = (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
                            and row.get("bookmaker") == "fanduel" and has_totals and not has_outcome
                            and not has_moneyline and set(prices) == {"over", "under"}
-                           and all(_valid_native_link(row.get(f"{side}_link"))
+                           and all(_valid_fanduel_link(row.get(f"{side}_link"))
                                    for side in ("over", "under"))
                            and observation["observation_verified"] and observation["observation_complete"]
                            and status == "active")

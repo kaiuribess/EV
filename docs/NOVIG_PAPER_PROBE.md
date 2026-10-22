@@ -47,6 +47,11 @@ The native-only test market is deliberately excluded from sportsbook fair
 pricing and live launch profiles. The position remains open until Novig grades
 that Paper event; final cash settlement can be checked afterward.
 
+An authenticated, read-only recheck on October 22 found the existing Paper
+market still `OPEN`. The saved fixture starts on December 26, 2026 UTC, so this
+order cannot yet provide genuine paid-settlement evidence. The already used
+one-attempt probe was not reset and no further Paper order was placed.
+
 The configured Novig production trading key and production management key also
 passed separate read-only authentication and permission checks. At the time
 of the probe, the production subaccount reported $25.00000 available, zero open

@@ -68,7 +68,26 @@ def test_input_review_counts_keep_source_clock_separate_from_market_status(engin
     assert row["quarantined"] == 2 and row["review_window_capped"] is True
     assert row["quote_clock_verified_in_review_window"] == 1
     assert row["market_status_verified_in_review_window"] == 0
+    assert row["both_evidence_verified_in_review_window"] == 0
     assert row["mapped_quotes"] == 0
+
+
+def test_input_review_requires_complete_clock_and_status_on_the_same_observation(engine):
+    record = engine.registry.records["parlay_rest"]
+    record.plugin.mapper = SimpleNamespace(mapped_count=0, quarantine_limit=6, quarantine={
+        "clock_only": {"observation": {"observation_verified": True,
+            "observation_complete": True, "market_status_verified": False}},
+        "status_only": {"observation": {"observation_verified": False,
+            "observation_complete": False, "market_status_verified": True}},
+        "partial": {"observation": {"observation_verified": True,
+            "observation_complete": False, "market_status_verified": True}},
+        "both": {"observation": {"observation_verified": True,
+            "observation_complete": True, "market_status_verified": True}},
+    })
+    row = next(item for item in launch_setup(engine)["inputs"] if item["provider"] == "parlay_rest")
+    assert row["quote_clock_verified_in_review_window"] == 3
+    assert row["market_status_verified_in_review_window"] == 3
+    assert row["both_evidence_verified_in_review_window"] == 1
 
 
 def test_review_scope_uses_only_profile_whitelist_and_nonsecret_identity(engine, market):

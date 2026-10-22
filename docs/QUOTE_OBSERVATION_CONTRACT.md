@@ -29,13 +29,16 @@ The REST adapter now requests these links and marks the exact main market's
 status verified only when every priced outcome has a valid link, the response
 is not partial/truncated/degraded or topped up, and no event, bookmaker,
 market or outcome explicitly reports closed, suspended or unavailable status.
+Link hosts must be FanDuel HTTPS domains; an unrelated HTTPS URL is not
+accepted as FanDuel quote evidence. A later one-credit read-only NBA moneyline
+check observed 28 links on `sportsbook.fanduel.com` across 14 bilateral games.
 It does not retain links in normalized offers or use them for order placement.
 This status evidence does **not** provide a quote-bound observation clock: the
 REST game `last_update` and book/fixture heartbeat fields still cannot establish
 current price freshness. [Current OpenAPI](https://parlay-api.com/openapi.json),
 [WebSocket and timestamp guidance](https://api.parlay-api.com/docs/websocket).
 
-Two one-credit read-only NBA FanDuel moneyline requests on October 22 returned
+Three one-credit read-only NBA FanDuel moneyline requests on October 22 returned
 14 complete two-sided game offers each. After the parser change, 14/14 had
 link-based active-status evidence; 0/14 had verified quote-bound observation,
 and 0/14 met both conditions. This is a narrow live sample, not proof that

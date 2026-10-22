@@ -42,6 +42,7 @@ export type SetupReport = {
     enabled_reference_profiles?: string[]; profile_freshness_rules?: ReferenceFreshnessRule[] };
   inputs: { provider: string; enabled: boolean; authenticated: boolean; mapped_quotes: number; quarantined: number;
     quote_clock_verified_in_review_window?: number; market_status_verified_in_review_window?: number;
+    both_evidence_verified_in_review_window?: number;
     review_window_capped?: boolean }[];
 }
 const record = (v: unknown): v is RecordValue => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -162,6 +163,7 @@ export function parseSetupReport(value: unknown): SetupReport {
       || !bools(p, ['enabled', 'authenticated']) || !count(p.mapped_quotes) || !count(p.quarantined)
       || p.quote_clock_verified_in_review_window !== undefined && !count(p.quote_clock_verified_in_review_window)
       || p.market_status_verified_in_review_window !== undefined && !count(p.market_status_verified_in_review_window)
+      || p.both_evidence_verified_in_review_window !== undefined && !count(p.both_evidence_verified_in_review_window)
       || p.review_window_capped !== undefined && typeof p.review_window_capped !== 'boolean')) return fail()
   return value as unknown as SetupReport
 }

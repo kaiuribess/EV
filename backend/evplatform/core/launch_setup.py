@@ -68,6 +68,10 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                 isinstance(item, dict) and item.get("observation_verified") is True for item in observations),
             "market_status_verified_in_review_window": sum(
                 isinstance(item, dict) and item.get("market_status_verified") is True for item in observations),
+            "both_evidence_verified_in_review_window": sum(
+                isinstance(item, dict) and item.get("observation_verified") is True
+                and item.get("observation_complete") is True
+                and item.get("market_status_verified") is True for item in observations),
             "review_window_capped": bool(source_mapper and
                 len(source_mapper.quarantine) >= source_mapper.quarantine_limit)})
     for venue, record in engine.registry.records.items():
