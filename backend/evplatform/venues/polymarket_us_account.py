@@ -94,7 +94,13 @@ async def probe_polymarket_us_account(client, managed_orders=(), *, settled_orde
     cash = number(usd[0].get("currentBalance"), "current USD balance")
     # Buying power is reported separately by the venue; currentBalance is not
     # certified available cash and never used as such by this account probe.
-    source_time(usd[0].get("lastUpdated"), utcnow())
+    try:
+        source_time(usd[0].get("lastUpdated"), utcnow())
+        balance_clock_valid = True
+    except ReconciliationError:
+        # A real account response may omit the documented timestamp. Keep the
+        # inventory diagnostic available, but never certify its cash agreement.
+        balance_clock_valid = False
     raw_orders = _object(await client.open_orders(), "open orders").get("orders")
     if not isinstance(raw_orders, list):
         raise ReconciliationError("Missing complete open-order collection")
@@ -102,7 +108,7 @@ async def probe_polymarket_us_account(client, managed_orders=(), *, settled_orde
     observed = utcnow()
     owned = {order.venue_order_id: order for order in managed_orders
              if order.venue == "polymarket_us" and order.mode == "production" and order.id not in settled_order_ids}
-    inventory_reasons = []
+    inventory_reasons = [] if balance_clock_valid else ["Balance source clock is missing or invalid"]
     if any(not order.venue_order_id or not order.reconciliation_complete or order.status == OrderStatus.UNKNOWN for order in owned.values()):
         inventory_reasons.append("Managed order reconciliation is incomplete")
     if len(owned) != sum(1 for order in managed_orders

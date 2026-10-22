@@ -77,6 +77,12 @@ class NovigBook:
         self.statuses.clear()
 
     @staticmethod
+    def _quantity(value: object, *, zero_allowed: bool = False) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < (0 if zero_allowed else 1):
+            raise ValueError("Invalid Novig whole-contract quantity")
+        return value
+
+    @staticmethod
     def _identifier(row: dict, documented: str, observed: str) -> str:
         if not isinstance(row, dict):
             raise ValueError("Invalid Novig book row")
@@ -121,11 +127,15 @@ class NovigBook:
                     continue
                 if snapshot:
                     try:
-                        rebuilt = {
-                            self._identifier(row, "order", "orderId"): {
-                                "outcome": outcome, "price": decimal_value(row["price"]), "qty": int(row["qty"])}
-                            for outcome, rows in data["orders"].items() for row in rows
-                        }
+                        rebuilt = {}
+                        for outcome, rows in data["orders"].items():
+                            for row in rows:
+                                order_id = self._identifier(row, "order", "orderId")
+                                if order_id in rebuilt:
+                                    raise ValueError("Duplicate Novig snapshot order")
+                                rebuilt[order_id] = {
+                                    "outcome": outcome, "price": decimal_value(row["price"]),
+                                    "qty": self._quantity(row["qty"])}
                     except (KeyError, TypeError, ValueError):
                         self.sequences.invalid.add(subject)
                         raise
@@ -145,11 +155,27 @@ class NovigBook:
                                     raise SequenceGap(subject, None, int(data["seq"]))
                                 del updated[order_id]
                             elif delta["kind"] == "add":
-                                price, qty = decimal_value(delta["price"]), int(delta["qty"])
-                                if not 0 < price < 1 or qty <= 0:
+                                price, qty = decimal_value(delta["price"]), self._quantity(delta["qty"])
+                                if not 0 < price < 1 or order_id in updated:
                                     raise ValueError("Invalid Novig book level")
                                 outcome = self._identifier(delta, "outcome", "outcomeId")
                                 updated[order_id] = {"outcome": outcome, "price": price, "qty": qty}
+                            elif delta["kind"] == "update":
+                                # The live v3 stream also emits an observed
+                                # partial-fill form: orderId + remaining. The
+                                # published book example lists add/remove only.
+                                # Accept only a reduction of a known order;
+                                # price, outcome and queue identity are retained.
+                                if order_id not in updated or set(delta) != {"kind", "orderId", "remaining"}:
+                                    raise ValueError("Unverified Novig book update")
+                                remaining = self._quantity(delta["remaining"], zero_allowed=True)
+                                previous = updated[order_id]["qty"]
+                                if not 0 <= remaining <= previous:
+                                    raise ValueError("Novig book update increased or invalidated quantity")
+                                if remaining:
+                                    updated[order_id]["qty"] = remaining
+                                else:
+                                    del updated[order_id]
                             else:
                                 raise ValueError("Unknown Novig book delta")
                     except (KeyError, TypeError, ValueError):

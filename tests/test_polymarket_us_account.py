@@ -66,6 +66,21 @@ async def test_empty_inventory_and_rfq_participant_never_fabricate_account_or_wr
     assert report.api_key_scopes==() and report.private_connection_generation==2
 
 
+async def test_missing_balance_source_clock_returns_unverified_inventory_diagnostic():
+    client=ReadOnlyClient()
+    original=client.account_balances
+    async def no_clock():
+        result=await original()
+        result["balances"][0].pop("lastUpdated")
+        return result
+    client.account_balances=no_clock
+    report=await probe_polymarket_us_account(client,adapter=baseline())
+    assert report.balance_usd==D("10.29") and report.open_order_count==report.position_count==0
+    assert not report.inventory_quantities_agree and not report.inventory_cash_agrees
+    assert not report.cash_available_verified and not report.reconciled
+    assert "Balance source clock is missing or invalid" in report.reason
+
+
 @pytest.mark.parametrize("side,net",[("yes","3"),("no","-3")])
 async def test_exact_fractional_signed_position_quantity_is_used_not_deprecated_rounded_value(side,net):
     client=ReadOnlyClient(pages=[{"positions":{"sample-nba":position(net=net)},"eof":True}])

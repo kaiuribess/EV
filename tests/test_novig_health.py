@@ -416,6 +416,26 @@ def test_book_snapshot_rejects_conflicting_or_untyped_identifiers(identifier):
     assert book.asks("market-one", "opposing") == []
 
 
+@pytest.mark.parametrize("quantity", [True, 0, -1, 1.5, "8"])
+def test_book_snapshot_rejects_inexact_or_invalid_quantity(quantity):
+    book = NovigBook()
+    snapshot = book_snapshot({"orderId": "order-one"})
+    snapshot["snapshot"]["market-one"]["book"]["orders"]["opposing"][0]["qty"] = quantity
+    with pytest.raises(ValueError):
+        book.apply(snapshot)
+    assert "market-one:book" in book.sequences.invalid
+
+
+def test_book_snapshot_rejects_duplicate_order_ids_across_outcomes():
+    book = NovigBook()
+    snapshot = book_snapshot({"orderId": "order-one"})
+    snapshot["snapshot"]["market-one"]["book"]["orders"]["other"] = [
+        {"orderId": "order-one", "price": "0.685", "qty": 2}]
+    with pytest.raises(ValueError):
+        book.apply(snapshot)
+    assert "market-one:book" in book.sequences.invalid
+
+
 @pytest.mark.parametrize("order_key,outcome_key", [("order", "outcome"), ("orderId", "outcomeId"),
                                                     ("order", "outcomeId"), ("orderId", "outcome")])
 def test_book_delta_accepts_documented_and_observed_identifier_aliases(order_key, outcome_key):
@@ -426,6 +446,44 @@ def test_book_delta_accepts_documented_and_observed_identifier_aliases(order_key
         {"kind": "add", order_key: "order-one", outcome_key: "opposing", "price": "0.315", "qty": 3},
     ]}}}})
     assert book.asks("market-one", "opposing") == [(Decimal("0.685"), 3)]
+
+
+def test_observed_remaining_update_reduces_known_order_without_reconnecting():
+    book = NovigBook()
+    book.apply(book_snapshot({"orderId": "order-one"}))
+    book.apply({"delta": {"market-one": {"book": {"seq": 2, "deltas": [
+        {"kind": "update", "orderId": "order-one", "remaining": 3},
+    ]}}}})
+    assert book.asks("market-one", "opposing") == [(Decimal("0.685"), 3)]
+    assert book.books["market-one"]["order-one"]["price"] == Decimal("0.315")
+    book.apply({"delta": {"market-one": {"book": {"seq": 3, "deltas": [
+        {"kind": "update", "orderId": "order-one", "remaining": 0},
+    ]}}}})
+    assert book.books["market-one"] == {}
+    assert not book.sequences.invalid
+
+
+@pytest.mark.parametrize("update", [
+    {"kind": "update", "orderId": "unknown", "remaining": 3},
+    {"kind": "update", "orderId": "order-one", "remaining": 9},
+    {"kind": "update", "orderId": "order-one", "remaining": -1},
+    {"kind": "update", "orderId": "order-one", "remaining": 3.5},
+    {"kind": "update", "orderId": "order-one", "remaining": True},
+    {"kind": "update", "orderId": "order-one", "remaining": "3"},
+    {"kind": "update", "orderId": "order-one", "qty": 3},
+    {"kind": "update", "orderId": "order-one", "remaining": 3, "price": "0.315"},
+])
+def test_ambiguous_remaining_update_invalidates_book_atomically(update):
+    book = NovigBook()
+    book.apply(book_snapshot({"orderId": "order-one"}))
+    with pytest.raises(ValueError):
+        book.apply({"delta": {"market-one": {"book": {"seq": 2, "deltas": [
+            {"kind": "add", "orderId": "valid-first-row", "outcomeId": "opposing", "price": "0.315", "qty": 3},
+            update,
+        ]}}}})
+    assert set(book.books["market-one"]) == {"order-one"}
+    assert "market-one:book" in book.sequences.invalid
+    assert book.asks("market-one", "opposing") == []
 
 
 @pytest.mark.parametrize("delta", [
@@ -444,3 +502,17 @@ def test_book_delta_rejects_conflicting_aliases_without_publishing_partial_batch
     assert set(book.books["market-one"]) == {"order-one"}
     assert "market-one:book" in book.sequences.invalid
     assert book.asks("market-one", "opposing") == []
+
+
+@pytest.mark.parametrize("delta", [
+    {"kind": "add", "orderId": "order-one", "outcomeId": "opposing", "price": "0.315", "qty": 2},
+    {"kind": "add", "orderId": "order-two", "outcomeId": "opposing", "price": "0.315", "qty": True},
+    {"kind": "add", "orderId": "order-two", "outcomeId": "opposing", "price": "0.315", "qty": 1.5},
+])
+def test_book_delta_rejects_duplicate_or_inexact_add(delta):
+    book = NovigBook()
+    book.apply(book_snapshot({"orderId": "order-one"}))
+    with pytest.raises(ValueError):
+        book.apply({"delta": {"market-one": {"book": {"seq": 2, "deltas": [delta]}}}})
+    assert "market-one:book" in book.sequences.invalid
+    assert book.books["market-one"]["order-one"]["qty"] == 8
