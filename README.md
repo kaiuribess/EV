@@ -141,8 +141,10 @@ evidence, account preflight, and the live activation gates. A complete provider
 game board is only a scoped baseline; it does not verify each retained price is
 still offered or that an exchange contract has equivalent settlement rules.
 Both workspaces block overlapping events and players and display a $5 unit.
-Owls and OddsPapi are optional reference adapters; this setup uses the
-existing Parlay and Oddize credentials and does not require keys from either.
+Owls and OddsPapi are optional reference adapters. With a local
+`ODDSPAPI_API_KEY`, shared setup also enables a quota-capped, pregame NBA
+OddsPapi research feed. The current free account has no in-play entitlement;
+the real-order gate still requires verified market mappings and fresh quotes.
 The paper launcher omits a duplicate production ProphetX monitor so its API
 key is used by the paused native workspace only. ProphetX limits simultaneous
 sessions per key, and reconnecting the paper dashboard must not consume a

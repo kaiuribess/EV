@@ -550,6 +550,13 @@ def _owls_pinnacle_realtime_offers(envelope: ProviderEnvelope) -> list[SourceOff
 
 def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
     fixture = envelope.payload
+    discovered = envelope.metadata.get("fixture_discovery", {})
+    if not isinstance(discovered, dict) or (
+        discovered.get("fixtureId") != fixture.get("fixtureId")
+        or discovered.get("participant1Id") != fixture.get("participant1Id")
+        or discovered.get("participant2Id") != fixture.get("participant2Id")
+    ):
+        discovered = {}
     result = []
     for book_key, book in fixture.get("bookmakerOdds", {}).items():
         for market_id, market in book.get("markets", {}).items():
@@ -596,7 +603,12 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                     "active" if active else "suspended",
                     {"bookmaker_market_id": market.get("bookmakerMarketId"),
                      "native_outcomes": {key: row.get("bookmakerOutcomeId") for key, row in outcomes.items()},
-                     "participants": [fixture.get("participant1Id"), fixture.get("participant2Id")],
+                     "participants": [discovered.get("participant1Name") or fixture.get("participant1Id"),
+                                      discovered.get("participant2Name") or fixture.get("participant2Id")],
+                     "participant_ids": [fixture.get("participant1Id"), fixture.get("participant2Id")],
+                     "scheduled_start": discovered.get("startTime") or fixture.get("startTime"),
+                     "event_sport": fixture.get("sportId"),
+                     "event_league": discovered.get("tournamentName"),
                      "market_catalog": {key: catalog[key] for key in (
                          "marketType", "marketName", "playerProp", "period", "handicap",
                      ) if key in catalog}},

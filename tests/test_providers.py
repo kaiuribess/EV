@@ -231,6 +231,79 @@ async def test_oddspapi_transport_error_does_not_leak_query_key():
         await provider.disconnect()
 
 
+async def test_oddspapi_free_allowance_floor_blocks_before_next_billable_call():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.path == "/v4/account":
+            return httpx.Response(200, json={
+                "current_subscription_id": "active", "subscriptions": [{
+                    "subscription_id": "active", "is_active": True,
+                    "request_limit": 250, "request_count": 149,
+                }],
+            })
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = OddsPapiRest({"enabled": True, "provider_remaining_floor": 100,
+                                 "endpoint_cooldown_seconds": 2},
+                                client=client, credential="fixture-secret")
+        await provider.discover_sports()
+        assert provider.quota.provider_remaining == 100
+        with pytest.raises(QuotaExceeded, match="Reserved provider request allowance reached"):
+            await provider.discover_bookmakers()
+        assert paths == ["/v4/account", "/v4/sports"]
+        await provider.disconnect()
+
+
+async def test_oddspapi_stream_limits_discovered_fixture_requests_per_cycle():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.path == "/v4/account":
+            return httpx.Response(200, json={
+                "current_subscription_id": "active", "subscriptions": [{
+                    "subscription_id": "active", "is_active": True,
+                    "request_limit": 250, "request_count": 0,
+                    "bookmakers": {"pinnacle": {"has_live_odds": False, "has_player_props": True}},
+                    "sport_ids": [11],
+                }],
+            })
+        if request.url.path == "/v4/bookmakers":
+            return httpx.Response(200, json=[{"slug": "pinnacle", "liveOdds": False}])
+        if request.url.path == "/v4/fixtures":
+            assert request.url.params["sportId"] == "11"
+            assert request.url.params["tournamentId"] == "132"
+            return httpx.Response(200, json=[
+                {"fixtureId": "later", "statusId": 0, "startTime": "2026-10-23T01:30:00Z"},
+                {"fixtureId": "earlier", "statusId": 0, "startTime": "2026-10-22T23:00:00Z",
+                 "participant1Id": 1, "participant2Id": 2,
+                 "participant1Name": "Team A", "participant2Name": "Team B"},
+            ])
+        assert request.url.path == "/v4/odds"
+        assert request.url.params["fixtureId"] == "earlier"
+        return httpx.Response(200, json={"fixtureId": "earlier", "bookmakerOdds": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = OddsPapiRest({"enabled": True, "sports": ["11"],
+                                 "bookmakers": ["pinnacle"],
+                                 "tournament_id": 132,
+                                 "max_fixture_requests_per_cycle": 1,
+                                 "poll_interval_seconds": 60},
+                                client=client, credential="fixture-secret")
+        stream = provider.stream_updates()
+        frames = [await anext(stream) for _ in range(4)]
+        assert [frame.kind for frame in frames] == [
+            "account_capabilities", "bookmaker_discovery", "event_discovery", "snapshot",
+        ]
+        assert frames[-1].metadata["fixture_discovery"]["participant1Name"] == "Team A"
+        assert paths == ["/v4/account", "/v4/bookmakers", "/v4/fixtures", "/v4/odds"]
+        await stream.aclose()
+        await provider.disconnect()
+
+
 async def test_429_cooldown_blocks_another_http_request():
     calls = 0
 
@@ -599,6 +672,34 @@ def test_oddspapi_price_and_bookmaker_clocks_are_distinct():
     assert offer.observed_at is None
     assert offer.provider_time == NOW
     assert offer.prices == {"11": Decimal("1.91"), "12": Decimal("1.91")}
+
+
+def test_oddspapi_discovery_names_only_attach_to_matching_fixture_identity():
+    selection = {"price": 1.91, "active": True, "changedAt": NOW.isoformat()}
+    fixture = {"fixtureId": "fixture1", "participant1Id": 1, "participant2Id": 2,
+               "statusId": 0, "hasOdds": True, "bookmakerOdds": {"pinnacle": {
+                   "bookmakerIsActive": True, "suspended": False,
+                   "markets": {"10": {"marketActive": True, "outcomes": {
+                       "11": {"players": {"0": selection}},
+                       "12": {"players": {"0": selection}},
+                   }}},
+               }}}
+    discovery = {"fixtureId": "fixture1", "participant1Id": 1, "participant2Id": 2,
+                 "participant1Name": "Team A", "participant2Name": "Team B",
+                 "startTime": "2026-10-22T23:00:00Z", "tournamentName": "NBA"}
+    raw = replace(envelope(), provider_id="oddspapi_rest", kind="snapshot", payload=fixture,
+                  metadata={"fixture_discovery": discovery})
+    offer = extract_offers(raw)[0]
+    assert offer.context["participants"] == ["Team A", "Team B"]
+    assert offer.context["participant_ids"] == [1, 2]
+    assert offer.context["scheduled_start"] == discovery["startTime"]
+    assert offer.market_status_verified is True
+    assert offer.observation_verified is False
+
+    mismatched = extract_offers(replace(raw, metadata={"fixture_discovery": {
+        **discovery, "participant2Id": 3,
+    }}))[0]
+    assert mismatched.context["participants"] == [1, 2]
 
 
 def test_oddspapi_explicit_inactive_bookmaker_blocks_its_active_market():

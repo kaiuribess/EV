@@ -102,6 +102,28 @@ Configure-Input 'parlay_rest' @{
     account_tier = 'unknown'
 }
 
+# The free OddsPapi account is pregame-only and has a small shared monthly
+# allowance. Collect at most two upcoming NBA fixtures per day, stopping while
+# 150 provider requests remain. These quotes are research inputs until exact
+# market/settlement mappings and source freshness are independently verified.
+$oddspapiKeyConfigured = [bool]$env:ODDSPAPI_API_KEY -or
+    ((Test-Path -LiteralPath '.env') -and
+     (Select-String -LiteralPath '.env' -Pattern '^ODDSPAPI_API_KEY=\S+' -Quiet))
+if ($oddspapiKeyConfigured) {
+    Configure-Input 'oddspapi_rest' @{
+        sports = @('11'); bookmakers = @('pinnacle', 'fanduel', 'draftkings', 'circasports');
+        tournament_id = 132;
+        include_props = $true; include_live = $false;
+        poll_interval_seconds = [double]86400;
+        discovery_interval_seconds = [double]86400;
+        discovery_window_hours = 24;
+        max_fixture_requests_per_cycle = 2;
+        provider_remaining_floor = 150;
+        session_request_budget = 100;
+        max_requests_per_minute = 10
+    }
+}
+
 $current = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 if ($current.pricing.reference_profile_mode -ne 'strict') {
     if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
@@ -186,6 +208,9 @@ if ($EnablePaperAutomation) {
         -ContentType 'application/json' -Body '{"auto_trade":true}' -TimeoutSec 10
 }
 Write-Host 'Configured Parlay streaming/discovery and hourly Oddize NBA REST references.' -ForegroundColor Green
+if ($oddspapiKeyConfigured) {
+    Write-Host 'Configured quota-limited OddsPapi pregame NBA research snapshots; free-tier in-play access is not available.'
+}
 Write-Host 'The same research profiles and weights are configured for paper and native workspaces.'
 Write-Host "Workspace: $($result.mode). Automatic orders: $($result.auto_trade). Dashboard: $baseUrl"
 Write-Host 'Source feeds may need several seconds to authenticate and publish a snapshot. Check Provider Center.'

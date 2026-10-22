@@ -27,8 +27,9 @@ side is active and each book clock is no later than its provider recording clock
 or local receipt. The oldest side's **change** time is then checked against the
 market's live freshness limit. An unchanged price with an old change time does
 not get refreshed just because a REST request returned it again. Null, invalid,
-future or inconsistent clocks do not qualify. This transport has not been
-validated against a user's real OddsPapi key here; the local key is absent.
+future or inconsistent clocks do not qualify. The local free-tier key has now
+authenticated and returned actual pregame NBA fixture odds; that is not proof
+that any quote currently satisfies the live execution gate.
 
 Plugins are disabled by default. A missing credential returns `missing_credentials`
 without opening a network connection. No credential is part of a public
@@ -182,14 +183,20 @@ The odds response declares fixture `hasOdds` and `statusId`, bookmaker
 All must affirm availability before a quote receives verified market status;
 missing flags suspend it. This verifies status only. Neither
 `bookmakerChangedAt` nor `changedAt` is a repeated observation of an unchanged
-price, so source observation remains unverified for strict live references.
-The current installation has no OddsPapi API key; only mocked protocol tests
-pass. [Odds response fields](https://oddspapi.io/en/docs/get-odds)
+price. A complete two-sided quote with recent, ordered bookmaker and provider
+change clocks can qualify at that change instant; a later REST response cannot
+renew it. The authenticated free account currently reports no in-play odds for
+the selected books. Its NBA board is connected for pregame research, with no
+verified executable event/settlement mapping yet.
+[Odds response fields](https://oddspapi.io/en/docs/get-odds)
 
 Quota accounting reserves requests before transmission, because failure
 responses can consume the provider allowance. Account usage refresh is
 unmetered locally, while a local minute limit still protects against runaway
 loops. [Quota policy](https://oddspapi.io/en/docs/requests-and-quota)
+The local free-tier configuration limits discovery to NBA tournament 132,
+fetches at most two fixtures per daily cycle, and halts billable requests when
+150 monthly requests remain. The account endpoint can still refresh usage.
 
 Implementation limits: v5 B2B and native OddsPapi WebSocket are not implemented.
 Every returned bookmaker must be verified independently for live/prop coverage.

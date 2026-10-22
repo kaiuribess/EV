@@ -14,7 +14,7 @@ from pydantic import Field
 
 from .base import (
     Backoff, ProviderConfig, ProviderDisabled, ProviderEnvelope, ProviderError, ProviderState,
-    RestProvider, UnsupportedOperation, provider_manifest,
+    QuotaExceeded, RestProvider, UnsupportedOperation, provider_manifest,
 )
 
 
@@ -34,8 +34,11 @@ class _QueryCredentialFilter(logging.Filter):
 
 class OddsPapiConfig(ProviderConfig):
     fixture_ids: list[str] = Field(default_factory=list)
+    tournament_id: int | None = Field(default=None, gt=0)
     discovery_interval_seconds: float = Field(default=300, ge=60)
     discovery_window_hours: int = Field(default=24, ge=1, le=48)
+    max_fixture_requests_per_cycle: int = Field(default=20, ge=1, le=1000)
+    provider_remaining_floor: int = Field(default=0, ge=0)
     # There is no safe universal live permission; account and book must allow it.
     include_live: bool = False
     include_props: bool = False
@@ -58,6 +61,7 @@ class OddsPapiRest(RestProvider):
         self._discovered_at: dict[str, float] = {}
         self._last_endpoint: dict[str, float] = {}
         self._endpoint_locks: dict[str, asyncio.Lock] = {}
+        self._allowance_lock = asyncio.Lock()
         self._account_checked = False
         self._log_filter = _QueryCredentialFilter(self._credential)
         logging.getLogger("httpx").addFilter(self._log_filter)
@@ -66,14 +70,25 @@ class OddsPapiRest(RestProvider):
         return {}, {"apiKey": self._credential}
 
     async def request(self, path: str, **kwargs: Any) -> ProviderEnvelope:
-        # Per-endpoint cooldown applies even when callers invoke discovery directly.
-        lock = self._endpoint_locks.setdefault(path, asyncio.Lock())
-        async with lock:
-            delay = self._last_endpoint.get(path, 0) + self.config.endpoint_cooldown_seconds - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            self._last_endpoint[path] = time.monotonic()
-            return await super().request(path, **kwargs)
+        if path != "/v4/account" and self.config.provider_remaining_floor and not self._account_checked:
+            await self.fetch_account()
+        # A shared lock makes the allowance floor atomic across concurrent
+        # endpoint calls. Per-endpoint cooldown applies to direct discovery too.
+        async with self._allowance_lock:
+            if path != "/v4/account" and self.config.provider_remaining_floor:
+                remaining = self.quota.provider_remaining
+                cost = kwargs.get("cost", 1)
+                if remaining is None or remaining - cost < self.config.provider_remaining_floor:
+                    self.state = ProviderState.QUOTA_EXHAUSTED
+                    self.reason = "Reserved provider request allowance reached"
+                    raise QuotaExceeded(self.reason)
+            lock = self._endpoint_locks.setdefault(path, asyncio.Lock())
+            async with lock:
+                delay = self._last_endpoint.get(path, 0) + self.config.endpoint_cooldown_seconds - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self._last_endpoint[path] = time.monotonic()
+                return await super().request(path, **kwargs)
 
     async def fetch_account(self) -> ProviderEnvelope:
         result = await self.request("/v4/account", cost=0)
@@ -191,26 +206,55 @@ class OddsPapiRest(RestProvider):
         backoff = Backoff()
         while not self._closed:
             try:
-                if not self._account_checked:
-                    yield await self.fetch_account()
+                first_cycle = not self._account_checked
+                # /v4/account is unmetered. Refresh the provider's shared
+                # allowance before each polling cycle because another local
+                # workspace can spend from the same subscription.
+                yield await self.fetch_account()
+                if first_cycle:
                     yield await self.discover_bookmakers()
+                remaining_fixtures = self.config.max_fixture_requests_per_cycle
                 for fixture in self.config.fixture_ids:
+                    if remaining_fixtures <= 0:
+                        break
                     yield await self.fetch_fixture(fixture)
+                    remaining_fixtures -= 1
                 for sport in sorted(self._subscriptions):
+                    if remaining_fixtures <= 0:
+                        break
                     if time.monotonic() - self._discovered_at.get(sport, 0) >= self.config.discovery_interval_seconds:
-                        discovery = await self.discover_events(sport)
-                        self._fixture_cache[sport] = discovery.payload if isinstance(discovery.payload, list) else []
+                        filters = {"tournamentId": self.config.tournament_id} if self.config.tournament_id else {}
+                        discovery = await self.discover_events(sport, **filters)
+                        self._fixture_cache[sport] = sorted(
+                            discovery.payload if isinstance(discovery.payload, list) else [],
+                            key=lambda fixture: str(fixture.get("startTime", "")),
+                        )
                         self._discovered_at[sport] = time.monotonic()
                         yield replace(discovery, kind="event_discovery")
                     for fixture in self._fixture_cache.get(sport, []):
                         if self._closed:
                             return
+                        if remaining_fixtures <= 0:
+                            break
                         if fixture.get("statusId") in {2, 3}:
                             continue
+                        remaining_fixtures -= 1
                         try:
-                            yield await self.fetch_snapshot(
+                            snapshot = await self.fetch_snapshot(
                                 sport, fixture_id=fixture["fixtureId"], live=fixture.get("statusId") == 1,
                             )
+                            # Fixture discovery supplies participant names and
+                            # schedule; /v4/odds supplies numeric IDs. Keep
+                            # them together for human mapping review, never as
+                            # automatic settlement or quote verification.
+                            discovery_fields = (
+                                "fixtureId", "participant1Id", "participant2Id",
+                                "participant1Name", "participant2Name", "startTime",
+                                "sportId", "tournamentId", "tournamentName",
+                            )
+                            yield replace(snapshot, metadata={**snapshot.metadata,
+                                "fixture_discovery": {key: fixture[key] for key in discovery_fields
+                                                      if key in fixture}})
                         except UnsupportedOperation:
                             # Explicit unsupported coverage is observable, never replaced with mock odds.
                             yield ProviderEnvelope(self.provider_id, "coverage_blocked", {

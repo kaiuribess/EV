@@ -738,3 +738,33 @@ passed, but this installation has no OddsPapi key, so there is no authenticated
 live response proving its exact NBA coverage or whether its free account
 includes the required books. The available in-app browser reached the public
 sign-in form, with no signed-in account to use.
+
+### Authenticated free-tier OddsPapi check, October 22 at 17:30 UTC
+
+After the owner supplied a key, the authenticated, unmetered
+[`/v4/account`](https://oddspapi.io/en/docs/get-account) read reported 250
+monthly requests available, NBA sport 11 and access to Pinnacle, FanDuel,
+DraftKings, Circa and other named reference books. It reported
+`has_live_odds=false` for those books; this free account is not an in-play
+reference source. Its prop entitlement flags do not promise actual player or
+statistic coverage.
+
+A bounded, metered NBA pregame sample from tournament 132 returned two future
+fixtures. One fixture contained 1,459 normalized offers across the four named
+books. The actual response contained affirmative active-market fields for
+hundreds of two-sided prices, but **zero** offers met the current 120-second
+bookmaker-change and active-status test. FanDuel provided no complete
+`bookmakerChangedAt` pair in this fixture. DraftKings and Pinnacle had some
+bookmaker clocks, but their youngest complete pair was older than 120 seconds.
+These are observations of this fixture and time, not universal coverage facts.
+The provider's `changedAt` may be recent even when a bookmaker clock is absent;
+the adapter retains that distinction and does not relabel REST receipt as a new
+source observation. [Odds timestamp definitions](https://oddspapi.io/en/docs/get-odds)
+
+Both local workspaces now authenticate the OddsPapi feed with pregame NBA-only
+discovery, at most two fixture requests per daily cycle, a 100-request local
+session budget, and a stop when 150 provider requests remain. The production
+workspace remains `auto_trade=false`, kill switch on, zero native orders, zero
+reviewed launch profiles, zero verified native market mappings and zero
+qualifying real reference markets. The free source adds real research data and
+reviewable status evidence; it does not authorize a real bet.
