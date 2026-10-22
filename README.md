@@ -119,6 +119,15 @@ its settlement is equivalent to a prediction-market contract. These paper
 results must not be used as validated live-order evidence. Player props and
 exchange books remain excluded from this assumed-price paper route; unverified
 real quotes stay quarantined for native trading.
+The paper comparison uses the sportsbook's devigged percentage directly; it
+does not apply a guessed void or settlement haircut. Live Opportunities and
+Market Detail show the same percentage as American and decimal fair-odds
+equivalents (`decimal = 1 / probability`). For example, a 60% fair estimate
+displays about -150 / 1.67 decimal, while a 55-cent hypothetical offer displays
+about -122 / 1.82 decimal. The paper EV is 5 cents per $1 payout before any
+applicable fees; the displayed net EV/ROI uses the configured fee calculation.
+These odds labels are a change of units, not a new price model or a verified
+exchange comparison.
 Running the launcher again retains its separate order ledger and applies the
 shared feed/profile settings. `start_native.ps1 -Environment production`
 applies the same feed/profile setup to its own paused workspace. This does not

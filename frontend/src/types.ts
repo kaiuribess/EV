@@ -44,6 +44,19 @@ export const num = (v: any, fallback = 0) => Number.isFinite(Number(v)) ? Number
 export const text = (v: any, fallback = '—'): string => v === undefined || v === null ? fallback : typeof v === 'object' ? String(v.name ?? v.id ?? v.status ?? JSON.stringify(v)) : String(v)
 export const human = (v: any) => text(v).replaceAll('_', ' ').replaceAll('-', ' ')
 export const percent = (v: any, digits = 1) => `${(num(v) * 100).toFixed(digits)}%`
+// Display-only translation of a $1 binary payout fraction. Fees and contract
+// settlement are intentionally not inferred from the quoted percentage.
+export const probabilityOdds = (value: unknown): { decimal: string; american: string } | null => {
+  if (value === null || value === undefined || value === '') return null
+  const probability = Number(value)
+  if (!Number.isFinite(probability) || probability <= 0 || probability > 1) return null
+  const decimal = 1 / probability
+  if (!Number.isFinite(decimal)) return null
+  const american = probability === 1 ? '—' : probability <= 0.5
+    ? `+${Math.round(100 * (1 - probability) / probability)}`
+    : String(Math.round(-100 * probability / (1 - probability)))
+  return { decimal: decimal.toFixed(2), american }
+}
 export const money = (v: any, digits = 2) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }).format(num(v))
 export const duration = (v: any) => v === undefined || v === null ? '—' : num(v) < 1000 ? `${Math.round(num(v))} ms` : `${(num(v) / 1000).toFixed(1)} s`
 export const clockTime = (v: any) => !v ? '—' : new Date(v).toLocaleTimeString('en-US', { hour12: false })
