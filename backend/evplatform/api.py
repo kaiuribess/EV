@@ -67,7 +67,9 @@ class ProphetXDiscoveryBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tournament_id: int | None = Field(default=None, ge=1, le=1_000_000_000)
     event_id: str | None = Field(default=None, pattern=r"^[0-9]{1,20}$")
+    event_ids: list[str] | None = Field(default=None, min_length=1, max_length=10)
     limit: int = Field(default=20, ge=1, le=50)
+    market_sub_type: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class ManualPreviewBody(BaseModel):
@@ -222,11 +224,16 @@ def create_app(settings=None):
     @app.post("/api/native/discovery/prophetx")
     async def prophetx_catalog(body: ProphetXDiscoveryBody):
         """Inspect an exact native event using the monitor's existing session."""
-        from .integrations.prophetx_discovery import summarize_events, summarize_markets
+        from .integrations.prophetx_discovery import (
+            summarize_batched_markets, summarize_events, summarize_markets)
         from .venues.common import VenueHTTPError
 
-        if (body.tournament_id is None) == (body.event_id is None):
-            raise HTTPException(422, "Provide exactly one tournament_id or event_id")
+        if sum(value is not None for value in (body.tournament_id, body.event_id, body.event_ids)) != 1:
+            raise HTTPException(422, "Provide exactly one tournament_id, event_id or event_ids")
+        if body.event_ids is not None and (len(set(body.event_ids)) != len(body.event_ids)
+                or any(not value.isascii() or not value.isdigit() or len(value) > 20
+                       for value in body.event_ids)):
+            raise HTTPException(422, "Unique numeric event_ids are required")
         record = engine.registry.records.get("prophetx")
         plugin = record.plugin if record else None
         client = getattr(plugin, "client", None)
@@ -238,8 +245,12 @@ def create_app(settings=None):
             if body.tournament_id is not None:
                 payload = await asyncio.wait_for(client.discover_events(tournament_id=body.tournament_id), 15)
                 return summarize_events(payload, limit=body.limit)
+            if body.event_ids is not None:
+                payload = await asyncio.wait_for(client.discover_markets(body.event_ids), 15)
+                return summarize_batched_markets(payload, event_ids=body.event_ids,
+                    limit=body.limit, sub_type=body.market_sub_type)
             payload = await asyncio.wait_for(client.fetch_snapshot(body.event_id), 15)
-            return summarize_markets(payload, limit=body.limit)
+            return summarize_markets(payload, limit=body.limit, sub_type=body.market_sub_type)
         except VenueHTTPError as exc:
             # VenueHTTPError contains only status and a provider error code.
             raise HTTPException(502, {"provider_status": exc.status_code, "provider_code": exc.code}) from None

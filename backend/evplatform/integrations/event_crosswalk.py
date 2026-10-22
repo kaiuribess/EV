@@ -158,9 +158,27 @@ def moneyline_candidates(events: dict, source_snapshot: dict, market_catalog: di
         if not isinstance(identity, dict) or not isinstance(observation, dict):
             continue
         match = matched_events.get((identity.get("provider"), identity.get("event_id")))
-        if (match is None or identity.get("market_key") not in {"h2h", "ml"}
-                or identity.get("player_key") is not None or identity.get("line") is not None
-                or identity.get("period") is not None):
+        if match is None or identity.get("player_key") is not None:
+            continue
+        context = identity.get("context")
+        catalog = context.get("market_catalog") if isinstance(context, dict) else None
+        # OddsPapi's documented NBA full-game moneyline is market 111,
+        # outcome 111 = participant 1/home and 112 = participant 2/away.
+        # Require the live catalog fields too; quarter, half and regulation
+        # winners cannot borrow this mapping merely because they are two-sided.
+        odds_papi_nba = (identity.get("provider") == "oddspapi_rest"
+            and identity.get("market_key") == "111" and identity.get("period") == "result"
+            and identity.get("line") == "0" and isinstance(context, dict)
+            and context.get("event_sport") == 11 and context.get("tournament_id") == 132
+            and context.get("event_league") == "NBA" and isinstance(catalog, dict)
+            and catalog.get("marketType") == "moneyline"
+            and catalog.get("marketName") == "Winner (incl. overtime)"
+            and catalog.get("period") == "result" and catalog.get("playerProp") is False
+            and type(catalog.get("handicap")) in (int, float)
+            and catalog["handicap"] == 0)
+        ordinary = (identity.get("market_key") in {"h2h", "ml"}
+                    and identity.get("line") is None and identity.get("period") is None)
+        if not (odds_papi_nba or ordinary):
             continue
         teams = (match["home"], match["away"])
         prices = observation.get("decimal_odds")
@@ -169,7 +187,11 @@ def moneyline_candidates(events: dict, source_snapshot: dict, market_catalog: di
             continue
         if any(value is not None for value in points.values()) or len(prices) != 2:
             continue
-        if set(prices) == {"home", "away"}:
+        if odds_papi_nba:
+            if set(prices) != {"111", "112"}:
+                continue
+            source_outcomes = {"111": teams[0], "112": teams[1]}
+        elif set(prices) == {"home", "away"}:
             source_outcomes = {"home": teams[0], "away": teams[1]}
         else:
             source_outcomes = {key: NBA_TEAMS.get(key, key) for key in prices}

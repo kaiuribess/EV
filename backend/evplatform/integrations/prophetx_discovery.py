@@ -31,11 +31,19 @@ def summarize_events(payload: dict, *, limit: int) -> dict:
             "read_only": True, "mapping_verified": False}
 
 
-def summarize_markets(payload: dict, *, limit: int) -> dict:
+def summarize_markets(payload: dict, *, limit: int, sub_type: str | None = None) -> dict:
     data = payload.get("data") if isinstance(payload, dict) else None
     rows = data.get("markets") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         raise ValueError("Unexpected ProphetX market catalog shape")
+    unfiltered_total = len(rows)
+    if sub_type is not None:
+        if not isinstance(sub_type, str) or not sub_type or len(sub_type) > 64:
+            raise ValueError("Bounded ProphetX market subtype required")
+        # Filter the complete REST response before the review cap. A single
+        # moneyline found among hundreds of props can then be checked against
+        # every other moneyline without exporting the full board.
+        rows = [row for row in rows if isinstance(row, dict) and row.get("sub_type") == sub_type]
     markets = []
     for row in rows[:limit]:
         if not isinstance(row, dict):
@@ -83,7 +91,25 @@ def summarize_markets(payload: dict, *, limit: int) -> dict:
                         "selection_shape": ("nested" if isinstance(selections, list) and selections and isinstance(selections[0], list)
                                             else "flat" if isinstance(selections, list) and selections and isinstance(selections[0], dict)
                                             else "empty" if selections == [] else "unknown")})
-    return {"total": len(rows), "truncated": len(rows) > limit, "markets": markets,
+    return {"total": len(rows), "unfiltered_total": unfiltered_total,
+            "filter_sub_type": sub_type, "truncated": len(rows) > limit, "markets": markets,
+            "read_only": True, "mapping_verified": False}
+
+
+def summarize_batched_markets(payload: dict, *, event_ids: list[str], limit: int,
+                              sub_type: str | None = None) -> dict:
+    """Review the documented event-ID keyed batch as one complete API read."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if (not isinstance(data, dict) or not event_ids or len(event_ids) > 10
+            or len(set(event_ids)) != len(event_ids) or set(data) != set(event_ids)):
+        raise ValueError("Incomplete ProphetX batched market catalog")
+    by_event = {}
+    for event_id in event_ids:
+        if not isinstance(data[event_id], list):
+            raise ValueError("Invalid ProphetX batched market collection")
+        by_event[event_id] = summarize_markets({"data": {"markets": data[event_id]}},
+                                                 limit=limit, sub_type=sub_type)
+    return {"event_ids": event_ids, "by_event": by_event,
             "read_only": True, "mapping_verified": False}
 
 

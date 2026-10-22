@@ -8,7 +8,8 @@ import pytest
 
 from evplatform.api import create_app
 from evplatform.core.config import Settings
-from evplatform.integrations.prophetx_discovery import open_event_ids, summarize_events, summarize_markets
+from evplatform.integrations.prophetx_discovery import (
+    open_event_ids, summarize_batched_markets, summarize_events, summarize_markets)
 from evplatform.plugins.external import NativeMonitor, ProphetXMonitorConfig
 
 
@@ -49,6 +50,33 @@ def test_market_review_exposes_bounded_public_strike_fields_without_prices_or_pr
     many = {"data": {"markets": [{"id": 1, "selections": [{"strike_id": str(i)} for i in range(60)]}]}}
     bounded = summarize_markets(many, limit=1)["markets"][0]
     assert len(bounded["selection_review"]) == 20 and bounded["selection_review_truncated"] is True
+
+
+def test_moneyline_filter_runs_before_catalog_cap():
+    props = [{"id": index, "sub_type": "player_total_points", "secret": "private"}
+             for index in range(100)]
+    moneyline = {"id": 219, "type": "moneyline", "sub_type": "moneyline",
+                 "status": "active", "selections": []}
+    result = summarize_markets({"data": {"markets": props + [moneyline]}},
+                               limit=1, sub_type="moneyline")
+    assert result["unfiltered_total"] == 101
+    assert result["total"] == 1 and result["truncated"] is False
+    assert result["filter_sub_type"] == "moneyline"
+    assert [item["id"] for item in result["markets"]] == ["219"]
+    assert "private" not in str(result)
+
+
+def test_batch_market_review_requires_all_exact_event_ids():
+    row = {"id": 219, "type": "moneyline", "sub_type": "moneyline",
+           "selections": [], "private_token": "hidden"}
+    result = summarize_batched_markets({"data": {"1": [row], "2": [row]}},
+                                       event_ids=["1", "2"], limit=50,
+                                       sub_type="moneyline")
+    assert set(result["by_event"]) == {"1", "2"}
+    assert result["by_event"]["1"]["markets"][0]["id"] == "219"
+    assert "hidden" not in str(result) and result["mapping_verified"] is False
+    with pytest.raises(ValueError):
+        summarize_batched_markets({"data": {"1": [row]}}, event_ids=["1", "2"], limit=50)
 
 
 @pytest.mark.parametrize("payload", [{}, {"data": {}}, {"data": {"markets": None}}])
@@ -148,6 +176,8 @@ def test_catalog_endpoint_requires_one_scope_and_connected_monitor(tmp_path, mon
         assert client.post("/api/native/discovery/prophetx", json={}, headers=headers).status_code == 422
         assert client.post("/api/native/discovery/prophetx", json={"tournament_id": 132,
             "event_id": "123"}, headers=headers).status_code == 422
+        assert client.post("/api/native/discovery/prophetx", json={"event_ids": ["123", "123"]},
+                           headers=headers).status_code == 422
         assert client.post("/api/native/discovery/prophetx", json={"tournament_id": 132},
                            headers=headers).status_code == 409
 
@@ -167,8 +197,15 @@ def test_catalog_uses_existing_monitor_session_and_returns_only_allowlisted_fiel
 
         async def fetch_snapshot(self, event_id):
             assert event_id == "123"
-            return {"data": {"markets": [{"id": 45, "type": "moneyline", "status": "active",
+            return {"data": {"markets": [{"id": 45, "type": "moneyline", "sub_type": "moneyline",
+                "status": "active",
                 "selections": [{"strike_id": "public-strike"}], "private_token": "do-not-return"}]}}
+
+        async def discover_markets(self, event_ids):
+            assert event_ids == ["123", "124"]
+            return {"data": {event_id: [{"id": 45, "type": "moneyline",
+                "sub_type": "moneyline", "status": "active", "private_token": "do-not-return"}]
+                for event_id in event_ids}}
 
     with TestClient(app) as caller:
         record = app.state.engine.registry.records["prophetx"]
@@ -179,12 +216,17 @@ def test_catalog_uses_existing_monitor_session_and_returns_only_allowlisted_fiel
             headers = {"X-EV-Control": "local"}
             events = caller.post("/api/native/discovery/prophetx", json={"tournament_id": 132},
                                  headers=headers)
-            markets = caller.post("/api/native/discovery/prophetx", json={"event_id": "123"},
+            markets = caller.post("/api/native/discovery/prophetx", json={"event_id": "123",
+                "market_sub_type": "moneyline"},
                                   headers=headers)
-            assert events.status_code == markets.status_code == 200
+            batch = caller.post("/api/native/discovery/prophetx", json={"event_ids": ["123", "124"],
+                "market_sub_type": "moneyline"}, headers=headers)
+            assert events.status_code == markets.status_code == batch.status_code == 200
             assert events.json()["events"][0]["event_id"] == "123"
             assert markets.json()["markets"][0]["id"] == "45"
-            assert "do-not-return" not in events.text + markets.text
+            assert markets.json()["filter_sub_type"] == "moneyline"
+            assert batch.json()["by_event"]["124"]["markets"][0]["id"] == "45"
+            assert "do-not-return" not in events.text + markets.text + batch.text
             assert not events.json()["mapping_verified"] and not markets.json()["mapping_verified"]
         finally:
             record.enabled, record.health, plugin.client, plugin.task = original

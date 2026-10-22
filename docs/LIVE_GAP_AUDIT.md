@@ -779,3 +779,48 @@ ET while OddsPapi and Oddize list 9:30 p.m. ET, matching the
 Those are review leads, not approved market mappings; the report flags the
 conflicts and retains the distinct Kalshi expiration time. Its local artifact
 is `data/kalshi-nba-crosswalk-20261022-v5.json`.
+
+### ProphetX production NBA market review, October 22 at 17:55 UTC
+
+The existing authenticated ProphetX monitor was receiving native market frames.
+Its local read-only discovery endpoint returned two current NBA fixtures and,
+after filtering the complete market response to subtype `moneyline`, one active
+full-game moneyline market per event. Each had two distinct team strike IDs.
+The new `scripts/review_prophetx_nba.py` compares those public catalog identities
+with quarantined sportsbook event records through that existing session. It does
+not open another ProphetX login session or produce executable mappings.
+
+The review now uses ProphetX's documented batched `get_multiple_markets`
+request through the existing authenticated monitor. The bounded latest report
+`data/prophetx-nba-crosswalk-20261022-v6.json` has three fixture/strike
+leads and fourteen exact two-sided sportsbook moneyline leads. It rejects
+partial batched responses and marks any unread catalog incomplete. The
+OddsPapi-specific review accepts only its [documented NBA full-game market
+111 and home/away outcomes 111/112](https://oddspapi.io/blog/genius-sports-alternative/)
+along with the actual catalog's `result`, zero-handicap, overtime-inclusive
+fields. This mapping remains a review lead, never an execution mapping.
+
+Of those fourteen source leads, only two carried affirmative market-status
+evidence (OddsPapi FanDuel and Pinnacle). FanDuel had no verified complete
+quote observation; Pinnacle's last bookmaker change was about 65 minutes old
+at the check. The other twelve came through Oddize, which supplies a price
+observation clock but no verified active-market status; their observations
+were also old. There was no qualifying current independent reference set.
+The source quarantine filled to capacity for at least one provider, and a
+Parlay schedule conflict remains in the report, so the lead inventory is not
+a complete, approved game mapping.
+
+The [ProphetX NBA moneyline contract filing](https://www.cftc.gov/filings/ptc/ptc0710269372.pdf)
+provides a primary rule source: the ordinary full-event winner includes
+overtime, a tied result after overtime is voided, official NBA results are the
+primary settlement reference, and the exchange retains discretion when official
+results are unavailable. This family-level filing is not a market-specific
+settlement certificate. The catalog does not provide reviewed exception-rule
+equivalence to the sportsbook references, a validated source observation clock
+for every executable level, or funded-cash-only account history coverage.
+Read-only production account probes confirmed spendable cash and zero reported
+open orders/positions on Kalshi and Novig, but no reviewed launch profile or
+native market mapping exists. ProphetX authenticated without proving full
+funded-cash inventory; Polymarket US still lacks a documented stable cash
+account identity/scope for the current retail API. The live order switch
+remains off; zero real orders were submitted.
