@@ -1,5 +1,54 @@
 # Live readiness audit — October 21, 2026
 
+## October 22, 09:52 PDT live-input review
+
+The running paper monitor had synthetic data off, both Parlay and Oddize
+inputs connected, 95 markets and 277 quotes, and zero eligible opportunities.
+A bounded review of 2,998 quarantined observations found 55 within the
+five-second source-age limit but **zero** with the combined quote-observation,
+active-status, exact-settlement and identity evidence needed to authorize a
+native market mapping. The review counted 0 authorized mappings. It is a
+sample of the most recent 3,000 rows, not proof every future source row will
+fail. The production strategy was enabled for monitoring; automatic orders
+remain off and the emergency stop remains on. No real trade was submitted.
+The local review artifact is `data/review-market-20261022-0952.json`.
+
+Parlay's current [WebSocket contract](https://www.parlay-api.com/docs/websocket)
+explicitly says recent-row snapshots, heartbeats and per-book verification do
+not certify each DraftKings/FanDuel outcome's current status or reliable
+withdrawal. This is a provider-contract limit, not a missing API key or a
+reason to mark a retained price as actively offered.
+
+## October 22, 09:43–09:45 PDT ProphetX history backfill
+
+The authenticated ProphetX production collector now requests the documented
+maximum 1,000 order-history rows per page and a 60-day created-at window.
+Runtime full-history reconciliation uses contiguous 60-day windows rather
+than seven-day windows; the transport already enforces the published
+one-request/second account-key pace. The offline pagination/window tests pass.
+This improves backfill completeness and time to account verification, without
+turning a bounded report into a claim about account inception.
+
+A new protected, read-only 60-day capture at 16:44 UTC confirmed the signed
+production account identity, zero returned order and trade rows, one completed
+$50 deposit, and zero durable native orders in the production SQLite ledger.
+The deposit's own wallet fields show a $0.10 balance **before** that deposit;
+the sampled period does not explain that earlier amount or establish whether
+the account has any loss exposure credit, which ProphetX says is not reported
+by `get_balance`. The account's funded-cash-only and complete-history review
+therefore remains incomplete. No order, cancellation or transfer was sent.
+Protected capture: `data/prophetx-history-20261022-0948/`.
+[Official order-history guidance](https://docs.prophetx.co/docs/direct-link-order-lifecycle),
+[wallet and credit definitions](https://docs.prophetx.co/docs/wallets).
+
+An authenticated wallet-query diagnostic at 16:48 UTC confirmed that the
+60-day bounded transaction request accepts the documented 1,000-row page
+size and returns the same single deposit. An unfiltered request with a
+100-row page size returned HTTP 400; other rapid exploratory requests hit
+HTTP 429, so this does **not** establish that full wallet history is
+available unfiltered to this account. The protected capture remains bounded
+and does not certify the unexplained earlier $0.10.
+
 ## October 22, 09:35–09:39 PDT production recheck
 
 The running production monitor's authenticated, read-only account probes now

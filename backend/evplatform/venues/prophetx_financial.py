@@ -114,9 +114,13 @@ async def reporting_pages(client, endpoint: str, collection: str, *, params=None
     if "next_cursor" in params:
         raise ReconciliationError("Full reporting history must start on the first page")
     rows, cursors, clocks, cursor = [], set(), [], None
+    # The published order and wallet-history APIs accept 1,000 rows per page.
+    # Larger pages reduce backfill duration under the account-key request pace;
+    # other report families retain the conservative size.
+    page_size = 1000 if endpoint in {"/v4/mm/get_order_history", "/v4/mm/get_transactions"} else 100
     for _ in range(max_pages):
         raw = _object(await client.request("GET", endpoint,
-            params={**params, "limit": 100, **({"next_cursor": cursor} if cursor else {})}), "report")
+            params={**params, "limit": page_size, **({"next_cursor": cursor} if cursor else {})}), "report")
         now = observed_at or utcnow()
         if require_clock or endpoint == "/v4/mm/get_order_history":
             clocks.append(source_time(raw.get("last_synced_at"), observed_at=now,
@@ -143,11 +147,14 @@ async def complete_order_history(client, review: ProphetXAccountReview, *, obser
             review.history_created_from >= now or not review.funded_cash_only):
         raise ReconciliationError("Current account-specific funded-cash/history review is required")
     start, end = math.floor(review.history_created_from.timestamp()), math.ceil(now.timestamp())
-    if math.ceil((end-start)/(7*86400)) > max_windows:
+    # The current Trading API permits a 60-day created-at window. Keep exact
+    # contiguous boundaries so a boundary order is included and deduplicated.
+    window_seconds = 60 * 86400
+    if math.ceil((end-start)/window_seconds) > max_windows:
         raise ReconciliationError("Complete account history exceeds date-window bound")
     by_id, clocks = {}, []
     while start < end:
-        stop = min(end, start+7*86400)
+        stop = min(end, start+window_seconds)
         history = await reporting_pages(client, "/v4/mm/get_order_history", "orders",
             params={"from": start, "to": stop}, observed_at=observed_at, max_age=max_age)
         clocks.append(history.last_synced_at)

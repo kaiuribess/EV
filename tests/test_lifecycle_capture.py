@@ -86,6 +86,16 @@ async def test_prophetx_observed_null_only_accepts_empty_current_order_window(mo
     if accepted:
         assert result["pagination_end"] == "observed_empty_order_null"
     assert all(call[0] == "GET" for call in client.calls)
+    assert client.calls[0][2]["limit"] == 1000
+
+
+async def test_prophetx_wallet_history_uses_documented_page_limit():
+    client = Pages([{"data": {"transactions": []}}])
+    client.venue_id = "prophetx"
+    result = await _pages(client, "/v4/mm/get_transactions", "transactions", params={"from": 1, "to": 2}, envelope="data",
+                          cursor_key="next_cursor", cursor_param="next_cursor")
+    assert result["complete"]
+    assert client.calls[0][2] == {"limit": 1000, "from": 1, "to": 2}
 
 
 def test_auth_material_redacted_but_order_linkage_retained():

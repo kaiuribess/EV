@@ -103,8 +103,12 @@ def local_oms_snapshot(database: Path):
 async def _pages(client, path, collection, *, params=None, envelope=None, cursor_key, cursor_param,
                  missing_cursor_ends=True, max_pages=4):
     pages, cursors, cursor = [], set(), None
+    page_size = (1000 if getattr(client, "venue_id", None) == "prophetx"
+                 and (path, collection) in {("/v4/mm/get_order_history", "orders"),
+                                            ("/v4/mm/get_transactions", "transactions")}
+                 else 100)
     for _ in range(max_pages):
-        raw = await client.request("GET", path, params={"limit": 100, **(params or {}),
+        raw = await client.request("GET", path, params={"limit": page_size, **(params or {}),
             **({cursor_param: cursor} if cursor else {})})
         pages.append({"received_at": utcnow().isoformat(), "response": sanitize(raw)})
         body = raw.get(envelope) if envelope and isinstance(raw, dict) else raw
@@ -198,11 +202,13 @@ async def capture_venue(venue, environment, values, *, max_pages=4, managed_orde
                 result["history_scope"] = "Personal trading wallet; all five order statuses; served history only"
             else:
                 end = int(utcnow().timestamp())
-                window = {"from": end-7*86400, "to": end}
+                # A single read-only capture may cover the largest documented
+                # created-at span without claiming this is account inception.
+                window = {"from": end-60*86400, "to": end}
                 specs = [(name, "/v4/mm/get_"+endpoint, collection, window, "data", "next_cursor", "next_cursor", True)
                          for name, endpoint, collection in (("orders", "order_history", "orders"),
                              ("fills", "trades", "trades"), ("transactions", "transactions", "transactions"))]
-                result["history_scope"] = {"last_days": 7, "from": window["from"], "to": window["to"],
+                result["history_scope"] = {"last_days": 60, "from": window["from"], "to": window["to"],
                     "note": "Bounded reporting history; eventual consistency and older history are not certified"}
             for name, path, collection, params, envelope, cursor_key, cursor_param, missing_ends in specs:
                 try:

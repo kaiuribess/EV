@@ -147,6 +147,7 @@ async def test_observed_empty_order_null_cursor_ends_only_timestamped_window(cas
     result = await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
     assert result.rows == () and result.last_synced_at == NOW
     assert result.end_marker == "observed_empty_order_null"
+    assert client.calls[-1][1]["limit"] == 1000
 
 
 @pytest.mark.parametrize("clock", [None, iso(-11), iso(1), 12345])
@@ -310,15 +311,29 @@ async def test_incomplete_stale_looping_reporting_stays_blocked(case, response):
 
 async def test_complete_history_spans_creation_windows_and_all_pages(case):
     _, client, review = case
-    history = await complete_order_history(client, review, observed_at=NOW)
+    older = review.model_copy(update={"history_created_from": NOW-timedelta(days=61)})
+    history = await complete_order_history(client, older, observed_at=NOW)
     assert len(history.rows) == 1 and len(client.calls) == 2
     ranges = [params for _, params in client.calls]
     assert ranges[0]["to"] == ranges[1]["from"]
-    assert all(p["to"]-p["from"] <= 7*86400 for p in ranges)
+    assert all(p["to"]-p["from"] <= 60*86400 and p["limit"] == 1000 for p in ranges)
+
+
+async def test_recent_complete_history_uses_one_documented_window(case):
+    _, client, review = case
+    history = await complete_order_history(client, review, observed_at=NOW)
+    assert len(history.rows) == 1 and len(client.calls) == 1
+
+
+async def test_wallet_reporting_uses_documented_page_limit(case):
+    _, client, _ = case
+    await reporting_pages(client, "/v4/mm/get_transactions", "transactions",
+                          observed_at=NOW, require_clock=False)
+    assert client.calls[0][1]["limit"] == 1000
 
 
 @pytest.mark.parametrize("updates", [{"funded_cash_only": False}, {"account_fingerprint": "0"*64},
-    {"valid_until": NOW}, {"history_created_from": NOW}, {"history_created_from": NOW-timedelta(days=1000)}])
+    {"valid_until": NOW}, {"history_created_from": NOW}, {"history_created_from": NOW-timedelta(days=4000)}])
 async def test_history_review_is_account_specific_current_and_bounded(case, updates):
     _, client, review = case
     with pytest.raises(ReconciliationError):
