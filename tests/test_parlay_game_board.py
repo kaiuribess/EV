@@ -39,7 +39,9 @@ def test_baseline_is_independent_provider_with_exact_documented_filters():
     assert query["kinds"] == ["game"]
     assert query["markets"] == ["h2h,spreads,totals"]
     assert query["limit"] == ["1000"]
-    assert query["snapshot"] == ["complete"]
+    # snapshot=complete is a separately restricted native-prop scope. The
+    # complete game board is selected by these explicit book/market filters.
+    assert "snapshot" not in query
 
 
 @pytest.mark.parametrize("limit", [0, 10001])
