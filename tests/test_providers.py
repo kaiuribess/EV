@@ -617,7 +617,7 @@ def test_oddspapi_explicit_inactive_bookmaker_blocks_its_active_market():
     assert offer.market_status_verified is False
 
 
-def test_oddspapi_explicit_availability_verifies_status_but_not_quote_observation():
+def test_oddspapi_recent_book_change_and_active_selection_verify_both_sides():
     selection = {"price": 1.91, "active": True,
                  "bookmakerChangedAt": NOW.isoformat(), "changedAt": NOW.isoformat()}
     fixture = {"fixtureId": "fixture1", "statusId": 0, "hasOdds": True,
@@ -633,9 +633,11 @@ def test_oddspapi_explicit_availability_verifies_status_but_not_quote_observatio
     assert offer.status == "active"
     assert offer.market_status_verified is True
     assert offer.observed_at == NOW
-    assert offer.observation_verified is False
-    assert offer.source_observed_at is None
-    assert offer.verification_reason == "current_availability_flags_only_no_quote_observation"
+    assert offer.observation_verified is True
+    assert offer.observation_complete is True
+    assert offer.source_observed_at == NOW
+    assert offer.source_price_changed_at == NOW
+    assert offer.verification_reason == "bookmaker_price_change_with_active_market"
 
     # Missing, inactive, or suspended fields cannot be interpreted as a
     # verified current quote, even when price-change timestamps are recent.
@@ -659,6 +661,38 @@ def test_oddspapi_explicit_availability_verifies_status_but_not_quote_observatio
     result = extract_offers(replace(raw, payload=changed))[0]
     assert result.status == "suspended"
     assert result.market_status_verified is False
+
+
+def test_oddspapi_book_change_is_not_replaced_by_rest_arrival_or_one_recent_side():
+    def make_fixture(left, right):
+        return {"fixtureId": "fixture1", "statusId": 0, "hasOdds": True,
+                "bookmakerOdds": {"pinnacle": {"bookmakerIsActive": True,
+                    "suspended": False, "markets": {"10": {"marketActive": True,
+                        "outcomes": {"11": {"players": {"0": left}},
+                                     "12": {"players": {"0": right}}}}}}}}
+
+    recent = {"price": 1.91, "active": True,
+              "bookmakerChangedAt": NOW.isoformat(), "changedAt": NOW.isoformat()}
+    missing = {**recent, "bookmakerChangedAt": None}
+    raw = replace(envelope(), provider_id="oddspapi_rest", kind="snapshot",
+                  payload=make_fixture(recent, missing))
+    offer = extract_offers(raw)[0]
+    assert offer.market_status_verified is True
+    assert offer.observation_verified is False
+    assert offer.observation_complete is False
+    assert offer.source_observed_at is None
+
+    old = {**recent, "bookmakerChangedAt": (NOW - timedelta(minutes=5)).isoformat(),
+           "changedAt": (NOW - timedelta(minutes=5)).isoformat()}
+    offer = extract_offers(replace(raw, payload=make_fixture(recent, old)))[0]
+    assert offer.source_observed_at == NOW - timedelta(minutes=5)
+    assert offer.observation_verified is True
+    assert (raw.received_at - offer.source_observed_at).total_seconds() == 300
+
+    impossible = {**recent, "bookmakerChangedAt": (NOW + timedelta(seconds=1)).isoformat()}
+    offer = extract_offers(replace(raw, payload=make_fixture(impossible, recent)))[0]
+    assert offer.observation_verified is False
+    assert offer.source_observed_at is None
 
 
 async def test_sse_multiline_comments_and_truncated_event():

@@ -575,8 +575,19 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                           and book.get("suspended") is False and market.get("marketActive") is True
                           and bool(outcomes) and all(row.get("active") is True for row in outcomes.values()))
                 # Provider recorded-change time and bookmaker clock are kept separate.
-                source_time = _oldest([parse_timestamp(row.get("bookmakerChangedAt")) for row in outcomes.values()])
-                provider_time = _oldest([parse_timestamp(row.get("changedAt")) for row in outcomes.values()])
+                clock_pairs = [(parse_timestamp(row.get("bookmakerChangedAt")),
+                                parse_timestamp(row.get("changedAt"))) for row in outcomes.values()]
+                source_time = _oldest([book_clock for book_clock, _ in clock_pairs])
+                provider_time = _oldest([recorded_clock for _, recorded_clock in clock_pairs])
+                # A bookmaker-reported *change* is a quote-bound observation at
+                # that instant. It is not proof that an unchanged price was
+                # observed again at REST receipt. Require both sides and the
+                # provider's recording clocks; downstream TTLs reject old
+                # changes even while the active flags remain affirmative.
+                change_observed = (active and len(outcomes) >= 2
+                                   and all(book_clock is not None and recorded_clock is not None
+                                           and book_clock <= recorded_clock <= envelope.received_at
+                                           for book_clock, recorded_clock in clock_pairs))
                 result.append(SourceOffer(
                     envelope.provider_id, book_key, str(fixture.get("fixtureId", "")), str(market_id),
                     None if player_id == "0" else str(player_id),
@@ -589,8 +600,14 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                      "market_catalog": {key: catalog[key] for key in (
                          "marketType", "marketName", "playerProp", "period", "handicap",
                      ) if key in catalog}},
+                    source_observed_at=source_time if change_observed else None,
+                    observation_verified=change_observed,
+                    observation_complete=change_observed,
+                    source_price_changed_at=source_time,
                     market_status_verified=active,
-                    verification_reason=("current_availability_flags_only_no_quote_observation"
+                    verification_reason=("bookmaker_price_change_with_active_market"
+                                         if change_observed else
+                                         "current_availability_flags_only_no_quote_observation"
                                          if active else "odds_papi_availability_missing_or_inactive"),
                 ))
     return result

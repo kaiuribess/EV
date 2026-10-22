@@ -713,3 +713,28 @@ therefore close only the status half of the evidence check, not the independent
 quote-clock half. Production still reports zero approved native markets, zero
 qualifying real reference markets and no launch profile; automatic real orders
 remain off with the kill switch on.
+
+### NBA settlement and alternate feed review, October 22
+
+The current [Kalshi basketball winner terms](https://assets.kalshi.com/contract_terms/BASKETBALLGAMEWIN.pdf)
+count overtime for an unspecified full-game period, but can resolve a canceled,
+abandoned or substantially delayed game to an exchange-determined last fair
+price. The [Pinnacle basketball rules](https://www.pinnacle.com/en/future/betting-rules/)
+also count overtime on the game period, yet void an NBA game-period bet if fewer
+than 43 minutes are completed; its general rules additionally void a fixture
+not started within 12 hours and handle forfeits differently. Thus a normal
+final-winner probability is a useful comparison, but the two instruments do
+**not** have identical cash outcomes in those contingencies. No reviewed
+settlement transformation or tail-risk estimate exists for this series.
+
+The current [Oddize OpenAPI](https://oddize.com/api/v1/openapi.json) lists
+per-price timestamps but no per-market or per-selection active-status field.
+The existing Oddize feed cannot by itself close the source-status gate.
+[OddsPapi v4](https://oddspapi.io/en/docs/get-odds) documents the missing
+market/selection flags and separate bookmaker/provider change clocks. Its
+adapter now admits a recently **changed**, fully timed and active two-sided
+quote; it never renews an unchanged price from REST arrival. Offline tests
+passed, but this installation has no OddsPapi key, so there is no authenticated
+live response proving its exact NBA coverage or whether its free account
+includes the required books. The available in-app browser reached the public
+sign-in form, with no signed-in account to use.

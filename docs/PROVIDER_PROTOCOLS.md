@@ -19,6 +19,17 @@ Synthetic demo data comes from the separate demo plugin, never these adapters.
 | `owls_pinnacle_realtime` | REST polling of Pinnacle realtime | Same backend key | e.g. `nba` |
 | `oddspapi_rest` | v4 REST polling | Backend `ODDSPAPI_API_KEY`, documented query auth | Numeric sport ID as a string |
 
+OddsPapi v4's [fixture odds contract](https://oddspapi.io/en/docs/get-odds)
+reports `marketActive` and per-selection `active` separately from
+`bookmakerChangedAt` and provider `changedAt`. For a two-sided reference, the
+normalizer accepts a bookmaker-reported change clock only when every selected
+side is active and each book clock is no later than its provider recording clock
+or local receipt. The oldest side's **change** time is then checked against the
+market's live freshness limit. An unchanged price with an old change time does
+not get refreshed just because a REST request returned it again. Null, invalid,
+future or inconsistent clocks do not qualify. This transport has not been
+validated against a user's real OddsPapi key here; the local key is absent.
+
 Plugins are disabled by default. A missing credential returns `missing_credentials`
 without opening a network connection. No credential is part of a public
 configuration model. Authentication refusals stop automatic requests; local
