@@ -91,6 +91,9 @@ def test_kalshi_no_buy_maps_to_yes_ask():
     assert body["price"] == "0.5800"
     assert body["count"] == "3.00"
     assert body["cancel_order_on_pause"] is True
+    # V2 auto-routes by ticker when exchange_index is omitted; NBA is not shard 0.
+    assert "exchange_index" not in body
+    assert body["time_in_force"] == "immediate_or_cancel"
 
 
 @pytest.mark.parametrize("price", [".667", "0", "1", ".0001", "NaN"])
