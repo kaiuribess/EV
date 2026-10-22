@@ -11,7 +11,7 @@ import pytest
 from evplatform.core.native_accounting import NativeInstrument, NativeOrderIntent, NativePriceBand
 from evplatform.core.risk import RiskAuthority
 from evplatform.venues.bridge import NativeExecutionVenue, NativePreflight, VerifiedVenueMapping
-from evplatform.venues.common import NativeSettings, NativeTransport, UnknownOrderOutcome, VenueHTTPError
+from evplatform.venues.common import NativeSettings, NativeTransport, PreflightRequired, UnknownOrderOutcome, VenueHTTPError
 from evplatform.venues.kalshi import KalshiClient
 from evplatform.venues.novig import NovigClient
 from evplatform.venues.prophetx import ProphetXClient, decode_talaria
@@ -51,6 +51,7 @@ def mapping(order):
     i = order.instrument
     return VerifiedVenueMapping(canonical_market_id=i.canonical_market_id, canonical_outcome=i.outcome,
                                 native_instrument_id=i.instrument_id, native_outcome=i.native_outcome,
+                                native_exchange_index=i.exchange_index,
                                 settlement_fingerprint=i.settlement_rules_fingerprint, mapping_evidence="fixture",
                                 verified=True, fee_schedule_verified=True, native_quantity_unit=i.quantity_unit,
                                 native_payout_usd=i.payout_per_unit_usd)
@@ -114,6 +115,75 @@ def test_kalshi_fractional_partial_and_cancel_keep_exact_filled_money():
     cancelled = normalize_kalshi_order(order, raw, expected_order_id="native", observed_at=NOW)
     assert cancelled.terminal and cancelled.status == "cancelled"
     assert cancelled.snapshot.cumulative_quantity == D("2.50")
+
+
+async def test_kalshi_index_three_intent_survives_recovery_and_scopes_each_supported_route():
+    original = intent()
+    order = original.model_copy(update={"mode": "production", "instrument":
+        original.instrument.model_copy(update={"exchange_index": 3})})
+    order = NativeOrderIntent.model_validate_json(order.model_dump_json())
+    assert order.instrument.exchange_index == 3
+    calls = []
+    raw = kalshi_order()
+    raw["order"].update(exchange_index=3, subaccount_number=0)
+    async with httpx.AsyncClient() as http:
+        client = KalshiClient(client=http)
+        client.settings.environment = "production"
+        async def request(method, path, **kwargs):
+            assert method != "POST"  # No fixture path may place an order.
+            calls.append((method, path, kwargs.get("params")))
+            if method == "DELETE":
+                return {"order_id": "native", "client_order_id": CLIENT, "reduced_by": "7.50"}
+            if path == "/portfolio/orders":
+                return {"orders": [raw["order"]], "cursor": ""}
+            if path == "/portfolio/fills":
+                return {"fills": [], "cursor": ""}
+            return raw
+        client.request = request
+        bridge = NativeExecutionVenue(client, RiskAuthority(), mappings=[mapping(order)])
+        body = bridge.build_native_request(order)
+        assert body["ticker"] == "instrument" and "exchange_index" not in body
+        assert await bridge.resolve_client_order(order) == "native"
+        assert (await bridge.reconcile_native("native", order)).status == "partial"
+        await bridge.cancel_native("native", order)
+        await client.fetch_fills(ticker="instrument", subaccount=0, exchange_index=3)
+        assert calls == [
+            ("GET", "/portfolio/orders", {"limit": 200, "ticker": "instrument", "subaccount": 0,
+                                           "exchange_index": 3}),
+            ("GET", "/portfolio/orders/native", None),
+            ("DELETE", "/portfolio/events/orders/native", {"market_ticker": "instrument",
+                                                            "exchange_index": 3}),
+            ("GET", "/portfolio/fills", {"ticker": "instrument", "subaccount": 0,
+                                         "exchange_index": 3}),
+        ]
+        bridge.preflight = NativePreflight(environment="production", account_authorized=True,
+            geographic_eligibility_verified=True, native_trading_enabled=True,
+            evidence="fixture", valid_until=time.time()+60)
+        bridge.bound_exchange_index = 0
+        with pytest.raises(PreflightRequired, match="shard"):
+            bridge._native_preflight(order)
+        bridge.bound_exchange_index = 3
+        bridge._native_preflight(order)
+
+
+async def test_kalshi_index_three_wrong_shard_or_404_stays_unknown():
+    original = intent()
+    order = original.model_copy(update={"mode": "production", "instrument":
+        original.instrument.model_copy(update={"exchange_index": 3})})
+    raw = kalshi_order()
+    raw["order"].update(exchange_index=0, subaccount_number=0)
+    with pytest.raises(ReconciliationError, match="shard"):
+        normalize_kalshi_order(order, raw, expected_order_id="native", observed_at=NOW)
+    with pytest.raises(ReconciliationError, match="shard"):
+        match_client_order("kalshi", order, [raw["order"]])
+    async with httpx.AsyncClient() as http:
+        client = KalshiClient(client=http)
+        async def missing(order_id):
+            raise VenueHTTPError("kalshi", 404)
+        client.reconcile_order = missing
+        bridge = NativeExecutionVenue(client, RiskAuthority(), mappings=[mapping(order)])
+        report = await bridge.reconcile_native("native", order)
+        assert report.status == "unknown" and not report.financial_complete
 
 
 @pytest.mark.parametrize("field,value", [("client_order_id", "other"), ("ticker", "wrong"), ("action", "sell"),

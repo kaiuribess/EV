@@ -1,10 +1,15 @@
 """Kalshi documented V2 REST / WebSocket transport (no default live writes)."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
 import json
+import math
+import os
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -223,6 +228,77 @@ class KalshiClient(NativeTransport):
         self.authenticated = False
         self.health_reason = "Kalshi is disconnected"
 
+    @staticmethod
+    def _balance_gate_directory() -> Path:
+        from ..core.execution_lease import lease_directory
+        return lease_directory()
+
+    @asynccontextmanager
+    async def _balance_slot(self):
+        """Coordinate the non-burst Basic-tier balance bucket across local processes."""
+        digest = hashlib.sha256(
+            f"kalshi-balance:v1:{self.settings.environment}:local-user".encode()
+        ).hexdigest()
+        path = self._balance_gate_directory() / f"{digest}.lock"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise VenueError("Kalshi balance coordination unavailable") from exc
+        deadline = time.monotonic() + 10
+        stream = None
+        while stream is None:
+            candidate = None
+            try:
+                path.touch(exist_ok=True)
+                candidate = path.open("r+b")
+                candidate.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(candidate.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(candidate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                stream = candidate
+            except OSError as exc:
+                if candidate is not None:
+                    candidate.close()
+                if time.monotonic() >= deadline:
+                    raise VenueError("Kalshi balance coordination busy") from exc
+                await asyncio.sleep(.025)
+        try:
+            stream.seek(0)
+            raw = stream.read(40).decode("ascii").strip("\0 \r\n")
+            next_allowed = float(raw) if raw else 0.0
+            if not math.isfinite(next_allowed) or next_allowed < 0:
+                raise VenueError("Kalshi balance coordination state invalid")
+            wait = next_allowed - time.time()
+            if wait > deadline - time.monotonic():
+                raise VenueError("Kalshi balance cooldown active")
+            if wait > 0:
+                await asyncio.sleep(wait)
+            cooldown = 1.0
+            try:
+                yield
+            except VenueHTTPError as exc:
+                if exc.status_code == 429:
+                    cooldown = max(cooldown, min(300.0, self._next_request - time.monotonic()))
+                raise
+            finally:
+                stream.seek(0)
+                stream.write(f"{time.time() + cooldown:020.6f}".encode("ascii"))
+                stream.truncate()
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            stream.close()
+
     def _load_key(self):
         if not self.settings.api_key_id or not self.settings.private_key_path:
             self.health = "credentials_missing"
@@ -258,8 +334,13 @@ class KalshiClient(NativeTransport):
             request.headers.update(self.headers(method, urlsplit(url).path))
 
         try:
-            result = await self._request(request, mutation_id=mutation_id,
-                                         before_send=dispatch if guard is not None else None)
+            if method == "GET" and path == "/portfolio/balance":
+                async with self._balance_slot():
+                    result = await self._request(request, mutation_id=mutation_id,
+                                                 before_send=dispatch if guard is not None else None)
+            else:
+                result = await self._request(request, mutation_id=mutation_id,
+                                             before_send=dispatch if guard is not None else None)
         except VenueHTTPError as exc:
             if authenticated and exc.status_code in {401, 403, 451}:
                 self.authenticated = False
@@ -340,10 +421,15 @@ class KalshiClient(NativeTransport):
         return await self.request("POST", "/portfolio/events/orders", body=body, mutation_id=client_id,
                                   before_send=guard)
 
-    async def cancel_order(self, order_id: str, *, market_ticker: str) -> dict:
+    async def cancel_order(self, order_id: str, *, market_ticker: str,
+                           exchange_index: int | None = None) -> dict:
         # Cancellation reduces risk, so remains usable after the placement gate closes.
+        if exchange_index is not None and (type(exchange_index) is not int or exchange_index < 0):
+            raise ValueError("Invalid Kalshi exchange shard")
         return await self.request("DELETE", f"/portfolio/events/orders/{quote(order_id, safe='')}",
-                                  params={"market_ticker": market_ticker}, mutation_id=order_id)
+                                  params={"market_ticker": market_ticker,
+                                          **({"exchange_index": exchange_index}
+                                             if exchange_index is not None else {})}, mutation_id=order_id)
 
     async def subscribe(self, market_ids: list[str]) -> None:
         self.tickers = list(dict.fromkeys(market_ids))

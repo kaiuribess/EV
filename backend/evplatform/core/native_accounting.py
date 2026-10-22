@@ -69,6 +69,9 @@ class NativeInstrument(NativeContract):
     schema_version: Literal[1] = 1
     venue: str = Field(min_length=1)
     instrument_id: str = Field(min_length=1)
+    # Older persisted instruments can omit this, but production Kalshi routing
+    # must bind the exchange shard reviewed from the native market listing.
+    exchange_index: int | None = Field(default=None, ge=0)
     canonical_market_id: str = Field(min_length=1)
     outcome: str = Field(min_length=1)
     native_outcome: str = Field(min_length=1)
@@ -115,6 +118,8 @@ class NativeInstrument(NativeContract):
             raise ValueError("ProphetX quantity is USD stake")
         if self.venue == "kalshi" and (self.quantity_unit != "contracts" or self.payout_per_unit_usd != 1):
             raise ValueError("This Kalshi schema supports $1 binary contracts")
+        if self.venue != "kalshi" and self.exchange_index is not None:
+            raise ValueError("Exchange shard identity is only defined for Kalshi instruments")
         for index, band in enumerate(self.price_bands):
             if index and band.minimum <= self.price_bands[index - 1].maximum:
                 raise ValueError("Price bands must be ordered and non-overlapping")

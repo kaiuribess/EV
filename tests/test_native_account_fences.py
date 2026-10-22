@@ -71,6 +71,17 @@ async def test_kalshi_runtime_read_only_snapshot_loads_without_executable_mappin
     runtime._last_account_probes["kalshi"] = 0
     await runtime.refresh_account()
     assert calls.count(f"/markets/{ticker}") == 1
+    from evplatform.venues.common import VenueHTTPError
+    async def limited(method, path, **kwargs):
+        if path == "/portfolio/balance":
+            raise VenueHTTPError("kalshi", 429)
+        return await request(method, path, **kwargs)
+    client.request = limited
+    runtime._last_account_probes["kalshi"] = 0
+    runtime.last_account_probe = 0
+    await runtime.refresh_account()
+    assert "kalshi" not in runtime.account_snapshots
+    assert risk.kill_switch and not risk.auto_trade
     await client.disconnect()
 
 

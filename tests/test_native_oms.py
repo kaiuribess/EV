@@ -34,6 +34,31 @@ def order(market, *, venue="novig", outcome="home", identifier=None):
         risk_family_id=risk_family(market), reviewed_correlation_groups=reviewed_correlations(market))
 
 
+async def test_kalshi_shard_three_persists_with_unknown_intent_across_restart(system, market):
+    manager, _, storage, _ = system
+    base = order(market)
+    instrument = base.intent.instrument.model_copy(update={
+        "venue": "kalshi", "instrument_id": "OFFLINE-NBA-TICKER", "native_outcome": "yes",
+        "exchange_index": 3, "quantity_unit": "contracts", "payout_per_unit_usd": D(1),
+        "quantity_step": D(".01"), "minimum_quantity": D(".01"), "cash_quantum_usd": D(".0001"),
+        "price_bands": (NativePriceBand(minimum=".0001", maximum=".9999", step=".0001"),)})
+    intent = base.intent.model_copy(update={"instrument": instrument, "quantity": D(1),
+                                     "mode": "production"})
+    uncertain = NativeOrder.model_validate({**base.model_dump(mode="json"),
+        "intent": intent.model_dump(mode="json"), "status": "submitting"})
+    await manager._save(uncertain)
+    recovered_risk = RiskEngine(RiskConfig(live_max_order_stake=D("1")))
+    recovered = NativeOrderManager(recovered_risk, storage, manager.bus, Metrics(), lock=asyncio.Lock(),
+        revalidate=lambda o: None, preflight=lambda o: None)
+    await recovered.start()
+    saved = recovered_risk.native_orders[uncertain.id]
+    assert saved.intent.instrument.exchange_index == 3
+    assert saved.intent.instrument.instrument_id == "OFFLINE-NBA-TICKER"
+    assert saved.account_fingerprint == uncertain.account_fingerprint
+    assert saved.status == OrderStatus.UNKNOWN and recovered_risk.kill_switch
+    assert not recovered_risk.auto_trade
+
+
 class Adapter:
     def __init__(self, risk):
         self.risk, self.submissions, self.cancellations = risk, [], []

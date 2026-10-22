@@ -308,6 +308,11 @@ class NativeRuntime:
         required = reserved + (0 if order.id in self.engine.risk.native_orders else order.reserved_cost)
         if snapshot is None or snapshot.balance_usd is None or snapshot.balance_usd < required:
             raise RiskRejected("Authenticated native cash balance cannot cover reserved exposure")
+        if order.venue == "kalshi" and (
+                order.intent.instrument.exchange_index is None
+                or snapshot.exchange_index != order.intent.instrument.exchange_index
+                or self._account_exchange_indexes.get("kalshi") != order.intent.instrument.exchange_index):
+            raise RiskRejected("Kalshi order and spendable cash must share the reviewed exchange shard")
         from ..venues.bridge import NativePreflight
         if not preview_only:
             adapter = self.manager.adapters[order.venue]
@@ -489,6 +494,7 @@ class NativeRuntime:
         if adapter is None:
             mappings = [VerifiedVenueMapping(canonical_market_id=m.market.id, canonical_outcome=m.instrument.outcome,
                 native_instrument_id=m.instrument.instrument_id, native_outcome=m.instrument.native_outcome,
+                native_exchange_index=m.instrument.exchange_index,
                 settlement_fingerprint=m.market.identity(), mapping_evidence=m.instrument.source,
                 verified=True, fee_schedule_verified=m.fee_bound.verified,
                 native_payout_usd=m.instrument.payout_per_unit_usd, native_quantity_unit=m.instrument.quantity_unit)
@@ -1000,6 +1006,8 @@ class NativeRuntime:
                 self._account_snapshot_fences[p.venue] = token[1]
                 if adapter is not None:
                     adapter.bound_account_fingerprint = snapshot.account_fingerprint if snapshot.identity_verified else ""
+                    if p.venue == "kalshi":
+                        adapter.bound_exchange_index = snapshot.exchange_index if snapshot.identity_verified else None
                 pending = any(o.venue == p.venue and (not o.reconciliation_complete or o.status == OrderStatus.UNKNOWN)
                               for o in self.engine.risk.native_orders.values())
                 if self.engine.risk.auto_trade and (not snapshot.identity_verified or (not snapshot.reconciled and not pending)):
