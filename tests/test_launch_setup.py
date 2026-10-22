@@ -58,6 +58,19 @@ def test_future_native_monitor_registration_needs_no_dashboard_name_change(engin
     assert account(launch_setup(engine), "future_venue")["venue"] == "future_venue"
 
 
+def test_input_review_counts_keep_source_clock_separate_from_market_status(engine):
+    record = engine.registry.records["parlay_game_ws"]
+    record.plugin.mapper = SimpleNamespace(mapped_count=0, quarantine_limit=2, quarantine={
+        "one": {"observation": {"observation_verified": True, "market_status_verified": False}},
+        "two": {"observation": {"observation_verified": False, "market_status_verified": False}},
+    })
+    row = next(item for item in launch_setup(engine)["inputs"] if item["provider"] == "parlay_game_ws")
+    assert row["quarantined"] == 2 and row["review_window_capped"] is True
+    assert row["quote_clock_verified_in_review_window"] == 1
+    assert row["market_status_verified_in_review_window"] == 0
+    assert row["mapped_quotes"] == 0
+
+
 def test_review_scope_uses_only_profile_whitelist_and_nonsecret_identity(engine, market):
     profile, *_ = ready_fixture("production")
     engine.native.profile = profile.model_copy(update={"venue": "novig",

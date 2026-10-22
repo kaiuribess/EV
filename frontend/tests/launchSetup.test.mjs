@@ -27,7 +27,8 @@ function report() {
       provider_ids: ['example_feed'], settlement_policy: 'reviewed_policy' }],
     requirements: [{ code: 'runtime.gate', status: 'passed', title: 'Current checks', detail: 'Verified fixture only', external_evidence_required: false }],
     pricing: { devig_method: 'proportional', eligible_books: null, required_books: [], min_references: 2, weights: {}, max_quote_age_ms: 5000, max_book_age_ms: 2500, max_disagreement: '.08', market_overrides: {} },
-    inputs: [{ provider: 'example_feed', enabled: true, authenticated: true, mapped_quotes: 10, quarantined: 3 }], software_blockers: [],
+    inputs: [{ provider: 'example_feed', enabled: true, authenticated: true, mapped_quotes: 10, quarantined: 3,
+      quote_clock_verified_in_review_window: 2, market_status_verified_in_review_window: 0, review_window_capped: false }], software_blockers: [],
   }
 }
 test('well-formed blocked setup preserves all accounts without profiles and no cash claim', () => {
@@ -90,6 +91,9 @@ for (const [name, mutate] of [
   ['unparseable weight', r => r.pricing.weights.pinnacle = 'bad'], ['blank weight', r => r.pricing.weights.pinnacle = ''],
   ['missing eligibility distinction', r => delete r.pricing.eligible_books], ['missing limits', r => delete r.risk_policy.values.max_order_stake_usd],
   ['missing software blocker fields', r => r.software_blockers = [{}]],
+  ['string quote-clock count', r => r.inputs[0].quote_clock_verified_in_review_window = '2'],
+  ['string status count', r => r.inputs[0].market_status_verified_in_review_window = '0'],
+  ['string window cap', r => r.inputs[0].review_window_capped = 'false'],
   ['missing scope list', r => delete r.launch_scope], ['missing account fingerprint', r => delete r.launch_scope[0].account_fingerprint],
   ['missing market identity', r => delete r.launch_scope[0].markets[0].id],
   ['duplicate scoped market', r => r.launch_scope[0].markets.push(structuredClone(r.launch_scope[0].markets[0]))],

@@ -52,12 +52,24 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         return bool(book.synchronized and not book.synthetic and book.status == "active"
                     and book.asks and age is not None and 0 <= age <= engine.settings.pricing.max_book_age_ms)
 
-    inputs = [{"provider": name, "enabled": record.enabled,
-        "authenticated": bool(record.enabled and _running(record.plugin.task)
-                              and record.health.get("authenticated") is True),
-        "mapped_quotes": record.plugin.mapper.mapped_count if record.plugin.mapper else 0,
-        "quarantined": len(record.plugin.mapper.quarantine) if record.plugin.mapper else 0}
-        for name, record in engine.registry.records.items() if isinstance(record.plugin, ProviderBridge)]
+    inputs = []
+    for name, record in engine.registry.records.items():
+        if not isinstance(record.plugin, ProviderBridge):
+            continue
+        source_mapper = record.plugin.mapper
+        pending = source_mapper.quarantine.values() if source_mapper else ()
+        observations = [item.get("observation", {}) for item in pending if isinstance(item, dict)]
+        inputs.append({"provider": name, "enabled": record.enabled,
+            "authenticated": bool(record.enabled and _running(record.plugin.task)
+                                  and record.health.get("authenticated") is True),
+            "mapped_quotes": source_mapper.mapped_count if source_mapper else 0,
+            "quarantined": len(source_mapper.quarantine) if source_mapper else 0,
+            "quote_clock_verified_in_review_window": sum(
+                isinstance(item, dict) and item.get("observation_verified") is True for item in observations),
+            "market_status_verified_in_review_window": sum(
+                isinstance(item, dict) and item.get("market_status_verified") is True for item in observations),
+            "review_window_capped": bool(source_mapper and
+                len(source_mapper.quarantine) >= source_mapper.quarantine_limit)})
     for venue, record in engine.registry.records.items():
         plugin = record.plugin
         # NativeMonitor carries the provider-specific secret/config boundary.

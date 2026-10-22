@@ -40,7 +40,9 @@ export type SetupReport = {
     max_disagreement: string | number; market_overrides: RecordValue;
     reference_profile_mode?: 'legacy' | 'strict'; reference_profiles?: Record<string, ReferenceProfile>;
     enabled_reference_profiles?: string[]; profile_freshness_rules?: ReferenceFreshnessRule[] };
-  inputs: { provider: string; enabled: boolean; authenticated: boolean; mapped_quotes: number; quarantined: number }[];
+  inputs: { provider: string; enabled: boolean; authenticated: boolean; mapped_quotes: number; quarantined: number;
+    quote_clock_verified_in_review_window?: number; market_status_verified_in_review_window?: number;
+    review_window_capped?: boolean }[];
 }
 const record = (v: unknown): v is RecordValue => !!v && typeof v === 'object' && !Array.isArray(v)
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string' && x.trim().length > 0)
@@ -157,7 +159,10 @@ export function parseSetupReport(value: unknown): SetupReport {
   if (!Array.isArray(value.requirements) || value.requirements.some(r => !record(r) || !words(r, ['code', 'title', 'detail'])
       || !['passed', 'pending'].includes(String(r.status)) || typeof r.external_evidence_required !== 'boolean')) return fail()
   if (!Array.isArray(value.inputs) || value.inputs.some(p => !record(p) || typeof p.provider !== 'string'
-      || !bools(p, ['enabled', 'authenticated']) || !count(p.mapped_quotes) || !count(p.quarantined))) return fail()
+      || !bools(p, ['enabled', 'authenticated']) || !count(p.mapped_quotes) || !count(p.quarantined)
+      || p.quote_clock_verified_in_review_window !== undefined && !count(p.quote_clock_verified_in_review_window)
+      || p.market_status_verified_in_review_window !== undefined && !count(p.market_status_verified_in_review_window)
+      || p.review_window_capped !== undefined && typeof p.review_window_capped !== 'boolean')) return fail()
   return value as unknown as SetupReport
 }
 
