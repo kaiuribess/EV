@@ -137,7 +137,7 @@ if ($oddspapiKeyConfigured) {
 # so native monitors are changed only in the stopped production workspace.
 if ($isNative -and $state.mode -eq 'production') {
     Configure-Input 'kalshi' @{
-        discovery_series = @('KXNBAGAME', 'KXNFLGAME', 'KXMLBGAME', 'KXNHLGAME');
+        discovery_series = @('KXNBAGAME', 'KXNFLGAME', 'KXMLBGAME', 'KXNHLGAME', 'KXMLBTOTAL');
         max_discovered_markets = 16
     }
     Configure-Input 'novig' @{

@@ -148,6 +148,39 @@ class NativeRuntime:
         profiles = self.profiles_by_venue()
         return profiles.get(venue) if venue is not None else next(iter(profiles.values()), None)
 
+    def research_discovery_status(self, market, comparisons):
+        """Explain the first observed research-stage stop without asserting unseen depth."""
+        from decimal import Decimal
+        from .native_research import expected_kalshi_mlb_event
+
+        if comparisons:
+            priced = [item for item in comparisons if item.get("net_estimated_profit_usd") is not None]
+            if priced:
+                if any(Decimal(item["net_estimated_profit_usd"]) > 0 for item in priced):
+                    return "provisional_positive", "Current native depth has a positive research estimate after fees and the configured uncertainty allowance; mapping and execution remain unapproved"
+                return "nonpositive_net_ev", "Valid simultaneous references and native depth were compared; no direction has positive net estimated EV after fees and the configured uncertainty allowance"
+            if any(item.get("rejection") == "No synchronized executable opposing bid depth" for item in comparisons):
+                return "matched_no_depth", "An exact native discovery lead exists, but its monitored book has no synchronized executable opposing bid depth"
+            if any(item.get("price") is not None for item in comparisons):
+                return "economics_unavailable", "An exact native discovery lead has depth, but fees or the source-uncertainty allowance are unavailable"
+            return "matched_no_depth", "An exact native discovery lead exists, but current executable depth or fee evidence is unavailable"
+
+        kalshi_record = self.engine.registry.records.get("kalshi")
+        kalshi = kalshi_record.plugin if kalshi_record and kalshi_record.enabled else None
+        if kalshi is not None:
+            if getattr(kalshi, "research_matches", {}).get(market.id):
+                return "matched_no_depth", "An exact Kalshi discovery lead exists, but the native stream or executable depth is unavailable"
+            expected = expected_kalshi_mlb_event(market)
+            if expected:
+                series = expected.split("-", 1)[0]
+                configured = kalshi.context.config.get("discovery_series", [])
+                if series not in configured:
+                    return "not_discovered", f"Kalshi {series} is outside the configured discovery series; public existence does not imply monitored depth"
+                if any(row.get("event_ticker") == expected for row in getattr(kalshi, "research_catalog_rows", [])):
+                    return "discovered_unmatched", "The exact Kalshi event is in the catalog, but its outcome, threshold, timing or rule identity did not pass exact research matching"
+                return "not_discovered", "The expected Kalshi event is absent from the current monitored catalog; no native depth was tested"
+        return "not_discovered", "No exact native market was found in the currently monitored catalogs; public existence and executable depth are separate checks"
+
     def research_comparisons(self, market, fair):
         """Compare research fair values with existing read-only native streams.
 

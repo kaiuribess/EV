@@ -540,6 +540,8 @@ class Engine:
             return
         self.research_history.append({**previous, "historical": True,
             "status": "EXPIRED RESEARCH", "expiration_reason": reason,
+            "native_research_stage": "references_expired",
+            "native_discovery_reason": "Sportsbook references expired; any earlier native depth and estimated EV are historical only",
             "expired_at": utcnow().isoformat(), "execution_eligible": False,
             "native_market_matched": False,
             "native_research_estimates": [{**offer, "historical": True,
@@ -557,17 +559,23 @@ class Engine:
                     self._archive_research(market_id, str(exc))
                     continue  # Keep the historical audit record, not a stale live card.
             comparisons = self.native.research_comparisons(market, fair) if market and fair else []
-            all_estimates = [*row.get("native_research_estimates", []), *comparisons]
-            displayed = {**row, "native_market_matched": bool(comparisons) or row["native_market_matched"],
+            # A discovery lead's prior calculation can outlive its native
+            # stream. Keep reviewed native mappings on their existing path.
+            research_lead = bool(market and market.extensions.get("research_only"))
+            all_estimates = (comparisons if research_lead else
+                             [*row.get("native_research_estimates", []), *comparisons])
+            stage, discovery_reason = self.native.research_discovery_status(market, all_estimates)
+            displayed = {**row, "native_market_matched": bool(comparisons) if research_lead else
+                           bool(comparisons) or row["native_market_matched"],
                            "native_research_estimates": all_estimates,
-                           "native_discovery_reason": (None if all_estimates else
-                               "No exact native catalog match for this sport, market family and current event; "
-                               "or monitored executable depth is unavailable"),
+                           "native_research_stage": stage,
+                           "native_discovery_reason": discovery_reason,
                            "native_match_count": len({(item["venue"], item["native_market_id"])
                                                       for item in comparisons}),
                            "status": ("PROVISIONAL POSITIVE EV" if any(
                                item.get("positive_after_costs") or item.get("positive_estimate")
-                               for item in all_estimates) else row["status"])}
+                               for item in all_estimates) else
+                               "REFERENCE ESTIMATE" if research_lead else row["status"])}
             if row["quality_mode"] == "trusted_provider":
                 self._last_current_research[market_id] = displayed
             result.append(displayed)

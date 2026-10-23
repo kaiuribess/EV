@@ -7,6 +7,7 @@ native identities, fees, or source uncertainty remain explicit missing values.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -29,6 +30,29 @@ NOVIG_PROP_TYPES = {
     "batter_total_bases": "TOTAL_BASES", "batter_rbi": "RBIS",
     "batter_runs": "RUNS", "shots_on_goal": "SHOTS_ON_GOAL",
 }
+
+# Only aliases checked against the current public MLB listings are admitted.
+# A new team code needs its own observed listing and rule-label review.
+_KALSHI_MLB_TEAMS = {
+    "TB": ("Tampa Bay Rays", "Tampa Bay"),
+    "MIL": ("Milwaukee Brewers", "Milwaukee"),
+}
+_MLB_EVENT = re.compile(
+    r"^KXMLB(?P<family>GAME|TOTAL)-(?P<year>\d{2})(?P<month>[A-Z]{3})"
+    r"(?P<day>\d{2})(?P<hour>\d{2})(?P<minute>\d{2})"
+    r"(?P<away>TB|MIL)(?P<home>TB|MIL)$")
+_MLB_WIN_RULE = re.compile(
+    r"^If (?P<winner>.+?) wins the (?P<away>.+?) vs (?P<home>.+?) "
+    r"professional baseball game originally scheduled for "
+    r"(?P<month>[A-Z][a-z]{2}) (?P<day>\d{1,2}), (?P<year>\d{4}), "
+    r"then the market resolves to Yes\.$")
+_MLB_TOTAL_RULE = re.compile(
+    r"^If (?P<away>.+?) and (?P<home>.+?) collectively score more "
+    r"(?P<line>\d+(?:\.\d+)?) runs in the (?P=away) vs (?P=home) "
+    r"professional baseball game originally scheduled for "
+    r"(?P<month>[A-Z][a-z]{2}) (?P<day>\d{1,2}), (?P<year>\d{4}) "
+    r"at (?P<hour>\d{1,2}):(?P<minute>\d{2}) PM E(?:D|S)T, "
+    r"then the market resolves to Yes\.$")
 
 
 @dataclass(frozen=True)
@@ -124,6 +148,128 @@ def kalshi_moneyline_matches(market: Market, rows: list[dict], *, observed_at: d
                 normal_win_condition=f"{outcome} wins; provider overtime scope requires review",
                 price_denomination_usd="1", catalog_observed_at=observed_at))
     return result
+
+
+def _mlb_listing_event(market: Market, event_ticker: str, family: str) -> tuple[datetime, str, str] | None:
+    """Cross-check the listing ticker's Eastern game clock and reviewed team codes."""
+    match = _MLB_EVENT.fullmatch(event_ticker)
+    if match is None or match["family"] != family:
+        return None
+    away, home = _KALSHI_MLB_TEAMS.get(match["away"]), _KALSHI_MLB_TEAMS.get(match["home"])
+    if away is None or home is None or away == home:
+        return None
+    try:
+        local_start = datetime.strptime(
+            f"20{match['year']}{match['month']}{match['day']}{match['hour']}{match['minute']}",
+            "%Y%b%d%H%M").replace(tzinfo=ZoneInfo("America/New_York"))
+    except ValueError:
+        return None
+    if (local_start.astimezone(timezone.utc) != market.start_time.astimezone(timezone.utc)
+            or market.participants != (home[0], away[0])):
+        return None
+    return local_start.astimezone(timezone.utc), away[1], home[1]
+
+
+def expected_kalshi_mlb_event(market: Market) -> str | None:
+    """Diagnostic ticker lead for the narrowly reviewed MLB team aliases."""
+    if market.league != "MLB" or market.market_type not in {"moneyline", "total"}:
+        return None
+    codes = {full: code for code, (full, _) in _KALSHI_MLB_TEAMS.items()}
+    if len(market.participants) != 2 or any(team not in codes for team in market.participants):
+        return None
+    local = market.start_time.astimezone(ZoneInfo("America/New_York"))
+    family = "GAME" if market.market_type == "moneyline" else "TOTAL"
+    return f"KXMLB{family}-{local.strftime('%y%b%d%H%M').upper()}{codes[market.participants[1]]}{codes[market.participants[0]]}"
+
+
+def kalshi_mlb_matches(market: Market, rows: list[dict], *, observed_at: datetime) -> list[ResearchNativeMatch]:
+    """Read-only MLB game-winner or exact half-run total discovery leads.
+
+    The observed rule text establishes the ordinary YES condition only. It does
+    not approve source settlement, exceptional payouts, or an execution mapping.
+    """
+    if (market.sport != "baseball" or market.league != "MLB"
+            or market.market_type not in {"moneyline", "total"}
+            or market.status != "scheduled" or market.start_time <= observed_at
+            or market.settlement.period != "FULL" or market.settlement.scope != "event"):
+        return []
+    family = "GAME" if market.market_type == "moneyline" else "TOTAL"
+    if family == "GAME" and (market.line is not None or set(market.outcomes) != set(market.participants)):
+        return []
+    if family == "TOTAL" and (market.line is None or market.line % 1 != D("0.5")
+                              or set(market.outcomes) != {"over", "under"}):
+        return []
+    grouped: dict[str, list[tuple[dict, str | None, datetime]]] = {}
+    for row in rows:
+        if (not isinstance(row, dict) or row.get("status") not in {"active", "open"}
+                or row.get("market_type") != "binary"
+                or type(row.get("exchange_index")) is not int or row["exchange_index"] < 0
+                or not isinstance(row.get("rules_primary"), str)
+                or not isinstance(row.get("rules_secondary"), str)
+                or not row["rules_secondary"].strip()):
+            continue
+        event, ticker = row.get("event_ticker"), row.get("ticker")
+        if not isinstance(event, str) or not isinstance(ticker, str) or not ticker.startswith(event + "-"):
+            continue
+        fixture = _mlb_listing_event(market, event, family)
+        if fixture is None:
+            continue
+        game_start, away_label, home_label = fixture
+        rule = (_MLB_WIN_RULE if family == "GAME" else _MLB_TOTAL_RULE).fullmatch(row["rules_primary"])
+        if (rule is None or rule["away"] != away_label or rule["home"] != home_label
+                or rule["month"].upper() != game_start.astimezone(ZoneInfo("America/New_York")).strftime("%b").upper()
+                or int(rule["day"]) != game_start.astimezone(ZoneInfo("America/New_York")).day
+                or int(rule["year"]) != game_start.astimezone(ZoneInfo("America/New_York")).year):
+            continue
+        winner = None
+        if family == "GAME":
+            code = ticker.removeprefix(event + "-")
+            team = _KALSHI_MLB_TEAMS.get(code)
+            if team is None or rule["winner"] != team[1] or team[0] not in market.outcomes:
+                continue
+            winner = team[0]
+        else:
+            try:
+                strike = D(str(row.get("floor_strike")))
+                rule_line = D(rule["line"])
+            except (ValueError, TypeError):
+                continue
+            local_start = game_start.astimezone(ZoneInfo("America/New_York"))
+            if (strike != market.line or rule_line != market.line
+                    or int(rule["hour"]) != (local_start.hour % 12 or 12)
+                    or int(rule["minute"]) != local_start.minute
+                    or local_start.hour < 12):
+                continue
+        grouped.setdefault(event, []).append((row, winner, game_start))
+    valid = []
+    for event, found in grouped.items():
+        if family == "GAME":
+            if (len(found) != 2 or {winner for _, winner, _ in found} != set(market.outcomes)
+                    or len({row["exchange_index"] for row, _, _ in found}) != 1):
+                continue
+            valid.append((event, found))
+        elif len(found) == 1:
+            valid.append((event, found))
+    if len(valid) != 1:
+        return []
+    event, found = valid[0]
+    output = []
+    for row, winner, game_start in found:
+        rule_text = row["rules_primary"] + "\n" + row["rules_secondary"]
+        for side in ("yes", "no"):
+            outcome = (winner if side == "yes" else next(x for x in market.outcomes if x != winner)) if family == "GAME" else ("over" if side == "yes" else "under")
+            condition = (f"{outcome} wins the scheduled full game" if family == "GAME" else
+                         f"full-game total {'over' if side == 'yes' else 'under'} {market.line} runs")
+            output.append(ResearchNativeMatch(
+                venue="kalshi", source_market_id=market.id, source_event_id=market.event_id,
+                source_market_fingerprint=market.identity(), native_market_id=row["ticker"],
+                native_event_id=event, native_outcome_id=side, side=side, outcome=outcome,
+                opposing_outcome_id=None, exchange_index=row["exchange_index"],
+                source_start=market.start_time, native_start=game_start,
+                rules_sha256=hashlib.sha256(rule_text.encode()).hexdigest(),
+                rules_excerpt=row["rules_primary"], normal_win_condition=condition,
+                price_denomination_usd="1", catalog_observed_at=observed_at))
+    return output
 
 
 def novig_moneyline_matches(market: Market, rows: list[dict], events: dict[str, dict], *,

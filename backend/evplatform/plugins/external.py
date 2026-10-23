@@ -187,7 +187,7 @@ class NativeMonitorConfig(BaseModel):
 class KalshiMonitorConfig(NativeMonitorConfig):
     credential_profile: Literal["legacy", "environment"] = Field(default="environment",
         description="Environment selects the separate Kalshi demo key for sandbox and the production key for production. Legacy preserves older configuration explicitly.")
-    discovery_series: list[str] = Field(default_factory=list, max_length=4,
+    discovery_series: list[str] = Field(default_factory=list, max_length=5,
         description="Documented public Kalshi sports series tickers for bounded current-book discovery")
     discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
     max_discovered_markets: int = Field(default=8, ge=1, le=100)
@@ -486,7 +486,7 @@ class NativeMonitor(Plugin):
 
     async def _refresh_research_matches(self):
         """Use already-fetched catalogs; only exact candidate metadata adds reads."""
-        from ..core.native_research import (NOVIG_PROP_TYPES, kalshi_moneyline_matches,
+        from ..core.native_research import (NOVIG_PROP_TYPES, kalshi_moneyline_matches, kalshi_mlb_matches,
             novig_moneyline_matches, novig_prop_matches)
         if self.manifest.name not in {"kalshi", "novig"} or self.research_catalog_at is None:
             return []
@@ -523,8 +523,10 @@ class NativeMonitor(Plugin):
                     continue
         result, priority = {}, []
         for market in markets:
-            matches = (kalshi_moneyline_matches(market, self.research_catalog_rows,
-                       observed_at=self.research_catalog_at) if self.manifest.name == "kalshi" else
+            matches = ((kalshi_moneyline_matches(market, self.research_catalog_rows,
+                        observed_at=self.research_catalog_at) if market.league == "NBA" else
+                        kalshi_mlb_matches(market, self.research_catalog_rows,
+                        observed_at=self.research_catalog_at)) if self.manifest.name == "kalshi" else
                        (novig_moneyline_matches(market, self.research_catalog_rows,
                         self.research_events, observed_at=self.research_catalog_at)
                         if market.market_type == "moneyline" else
@@ -775,7 +777,12 @@ class NativeMonitor(Plugin):
                 "frames": self.frames,
                 "discovery_status": self.discovery_status,
                 "discovered_event_count": len(self.discovered_event_ids),
-                "discovered_market_count": len(self.discovered_market_ids)}
+                "discovered_market_count": len(self.discovered_market_ids),
+                **({"discovered_market_ids": list(self.discovered_market_ids),
+                    "subscribed_market_ids": list(self._subscribed_market_ids),
+                    "research_matched_market_ids": sorted({item.native_market_id
+                        for matches in self.research_matches.values() for item in matches})}
+                   if self.manifest.name == "kalshi" else {})}
 
 
 def register_external(registry, engine):

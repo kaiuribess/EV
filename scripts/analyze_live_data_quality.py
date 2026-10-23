@@ -13,6 +13,7 @@ from itertools import combinations
 from pathlib import Path
 
 TARGET_BOOKS = ("pinnacle", "fanduel", "draftkings", "circa", "betonline")
+ALTERNATIVE_BOOKS = frozenset(("fanduel", "draftkings", "betonline"))
 SCENARIOS = (Decimal("0"), Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))
 
 
@@ -55,6 +56,11 @@ def analyze(path: Path) -> dict:
     book_markets = defaultdict(set)
     pair_snapshots = Counter()
     pair_markets = defaultdict(set)
+    alternative_markets = set()
+    alternative_all_three = set()
+    alternative_snapshots = Counter()
+    alternative_categories = defaultdict(lambda: {"two_book": set(), "all_three": set()})
+    alternative_price_tracks = {}
     target_market_snapshots = 0
     all_five_snapshots = 0
     all_five_markets = set()
@@ -135,6 +141,7 @@ def analyze(path: Path) -> dict:
             per_provider_seen = set()
             per_provider_complete = set()
             per_provider_eligible = set()
+            alternative_sample_prices = defaultdict(lambda: defaultdict(set))
             for quote in sample["quotes"]:
                 market_id = quote.get("market_id")
                 market = markets.get(market_id)
@@ -165,6 +172,9 @@ def analyze(path: Path) -> dict:
                                                   else "unknown"] += 1
                     per_provider_eligible.add((row_key, market_id))
                     per_market_eligible[market_id].add(book)
+                    if book in ALTERNATIVE_BOOKS:
+                        alternative_sample_prices[market_id][book].add(tuple(
+                            sorted((outcome, str(price)) for outcome, price in quote["decimal_odds"].items())))
                 else:
                     quote_reasons[(provider, quote.get("verification_reason") or "unspecified",
                                    quote.get("status") or "missing_status")] += 1
@@ -224,6 +234,31 @@ def analyze(path: Path) -> dict:
                 market = markets[market_id]
                 category = (market.get("sport") or "unknown", _family(market))
                 category_row = category_rows[category]
+                alternative = per_market_eligible.get(market_id, set()) & ALTERNATIVE_BOOKS
+                if len(alternative) >= 2:
+                    alternative_markets.add(market_id)
+                    alternative_snapshots["two_book"] += 1
+                    alternative_categories[category]["two_book"].add(market_id)
+                if len(alternative) == 3:
+                    alternative_all_three.add(market_id)
+                    alternative_snapshots["all_three"] += 1
+                    alternative_categories[category]["all_three"].add(market_id)
+                for book, observed_prices in alternative_sample_prices.get(market_id, {}).items():
+                    # Conflicting copies of one bookmaker in the same snapshot
+                    # cannot define an unambiguous historical price movement.
+                    if len(observed_prices) != 1:
+                        continue
+                    prices = next(iter(observed_prices))
+                    key = (market_id, book)
+                    track = alternative_price_tracks.get(key)
+                    if track is None:
+                        alternative_price_tracks[key] = {"first_at": now.isoformat(),
+                            "last_at": now.isoformat(), "first_prices": prices,
+                            "last_prices": prices, "price_changes": 0}
+                    else:
+                        track["price_changes"] += int(prices != track["last_prices"])
+                        track["last_prices"] = prices
+                        track["last_at"] = now.isoformat()
                 category_row["market_snapshots"] += 1
                 category_row["markets_seen"].add(market_id)
                 books = per_market_eligible.get(market_id, set())
@@ -353,6 +388,23 @@ def analyze(path: Path) -> dict:
                                           for key, value in sorted(pair_markets.items())},
             "all_five": all_five_snapshots,
             "distinct_markets_all_five": len(all_five_markets)},
+        "research_only_alternative": {
+            "books": sorted(ALTERNATIVE_BOOKS),
+            "two_book_market_snapshots": alternative_snapshots["two_book"],
+            "distinct_two_book_markets": len(alternative_markets),
+            "all_three_market_snapshots": alternative_snapshots["all_three"],
+            "distinct_all_three_markets": len(alternative_all_three),
+            "by_category": [{"sport": sport, "market_family": family,
+                             "distinct_two_book_markets": len(counts["two_book"]),
+                             "distinct_all_three_markets": len(counts["all_three"])}
+                            for (sport, family), counts in sorted(alternative_categories.items())],
+            "historical_quote_movements": [{"market_id": market_id, "book": book,
+                **{key: ([list(pair) for pair in value] if key.endswith("prices") else value)
+                   for key, value in track.items()},
+                "outcome_result": None, "outcome_result_status": "not_in_read_only_archive"}
+                for (market_id, book), track in sorted(alternative_price_tracks.items())
+                if market_id in alternative_markets],
+            "policy": "research_only; original sharp-book gates and live weights unchanged"},
         "reference_book_sets": {"+".join(key): value for key, value in reference_sets.most_common()},
         "selected_reference_sources": {"/".join(str(part) for part in key): value
                                        for key, value in reference_sources.most_common()},

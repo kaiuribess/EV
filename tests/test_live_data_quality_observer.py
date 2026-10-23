@@ -86,10 +86,39 @@ def _check_analysis(path):
     assert report["native"]["scenario_margin_probability"]["0.02"]["distinct_directions"] == 0
     assert report["simultaneous_target_books"]["per_book"] == {"fanduel": 2, "pinnacle": 2}
     assert report["new_receipt_evidence"]["parlay_ws/fanduel/unverified_observation_clock"] == 1
+    alternative = report["research_only_alternative"]
+    assert alternative["distinct_two_book_markets"] == 0  # FanDuel plus Pinnacle is not this fallback.
+    assert alternative["policy"].startswith("research_only")
     archive = path.with_suffix(".jsonl.gz")
     with path.open("rb") as original, gzip.open(archive, "wb") as compressed:
         compressed.write(original.read())
     assert analyze(archive)["grains"] == report["grains"]
+
+
+def test_alternative_study_deduplicates_books_and_preserves_movements_without_results():
+    with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+        path = Path(folder) / "samples.jsonl"
+        first = _state()
+        first["quotes"] = [_quote("parlay_ws", "fanduel"),
+                           _quote("oddize_rest", "fanduel"),
+                           _quote("parlay_ws", "draftkings")]
+        second = json.loads(json.dumps(first))
+        second["quotes"][0]["decimal_odds"]["A"] = "1.90"
+        second["quotes"][1]["decimal_odds"]["A"] = "1.90"
+        rows = [compact_state(first, "2026-10-23T00:00:00Z"),
+                compact_state(second, "2026-10-23T00:00:30Z")]
+        path.write_text("".join(json.dumps({"sample": sample}) + "\n" for sample in rows),
+                        encoding="utf-8")
+        alternative = analyze(path)["research_only_alternative"]
+        assert alternative["distinct_two_book_markets"] == 1
+        assert alternative["two_book_market_snapshots"] == 2
+        assert alternative["distinct_all_three_markets"] == 0
+        fd = next(row for row in alternative["historical_quote_movements"]
+                  if row["book"] == "fanduel")
+        assert fd["price_changes"] == 1
+        assert fd["first_at"] == "2026-10-23T00:00:00+00:00"
+        assert fd["last_at"] == "2026-10-23T00:00:30+00:00"
+        assert fd["outcome_result"] is None
 
 
 def test_reconnecting_venue_or_old_comparison_is_not_current_depth():
