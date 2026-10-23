@@ -279,6 +279,19 @@ class ProphetXClient(NativeTransport):
             raise ValueError("Invalid ProphetX price ladder")
         self.price_ladder = set(prices)
 
+    async def refresh_verified_price_ladder(self):
+        """Read the account's current v4 ladder; never fall back to guessed odds."""
+        self.price_ladder.clear()
+        response = await self.fetch_price_ladder()
+        if (not isinstance(response, dict) or response.get("success") is False
+                or not isinstance(response.get("data"), list)):
+            raise VenueError("ProphetX price ladder response is not a price list")
+        try:
+            self.set_verified_price_ladder(response["data"])
+        except ValueError as exc:
+            raise VenueError("ProphetX price ladder response is invalid") from exc
+        return self.price_ladder
+
     async def reconcile_order(self, order_id: str) -> dict:
         return await self.request("GET", f"/v4/mm/get_order/{quote(order_id, safe='')}")
 

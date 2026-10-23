@@ -19,6 +19,32 @@ from evplatform.core.pricing import NoSignal, fair_value
 from evplatform.core.risk import RiskEngine, RiskRejected
 from evplatform.core.config import RiskConfig
 from evplatform.plugins.native_positive_ev import NativePositiveEV
+from evplatform.venues.common import PreflightRequired
+
+
+async def test_manual_prophetx_order_terms_use_fresh_ladder_without_dispatch():
+    refresh = AsyncMock(return_value={-164, 160})
+    encoded = []
+    adapter = SimpleNamespace(client=SimpleNamespace(refresh_verified_price_ladder=refresh),
+                              build_native_request=lambda intent: encoded.append(intent))
+    service = ManualNativeService(SimpleNamespace(native=SimpleNamespace(
+        manager=SimpleNamespace(adapters={"prophetx": adapter}))))
+    intent = object()
+    await service._verify_prophetx_request("prophetx", SimpleNamespace(intent=intent))
+    refresh.assert_awaited_once()
+    assert encoded == [intent]
+
+
+async def test_manual_prophetx_unverified_request_blocks_review():
+    refresh = AsyncMock(return_value={-164, 160})
+    adapter = SimpleNamespace(client=SimpleNamespace(refresh_verified_price_ladder=refresh),
+                              build_native_request=lambda _: (_ for _ in ()).throw(
+                                  PreflightRequired("Limit is absent from current ladder")))
+    service = ManualNativeService(SimpleNamespace(native=SimpleNamespace(
+        manager=SimpleNamespace(adapters={"prophetx": adapter}))))
+    with pytest.raises(RiskRejected, match="order terms cannot be verified"):
+        await service._verify_prophetx_request("prophetx", SimpleNamespace(intent=object()))
+    refresh.assert_awaited_once()
 
 
 def setup_native(market, quotes, *, venue="novig", price="0.450", quantity="100", **fees):

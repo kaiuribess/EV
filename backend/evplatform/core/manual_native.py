@@ -155,6 +155,20 @@ class ManualNativeService:
                 raise RiskRejected("The selected maximum cost does not leave a qualifying native EV order")
         return candidate
 
+    async def _verify_prophetx_request(self, venue, order):
+        if venue != "prophetx":
+            return
+        from ..venues.common import VenueError
+
+        adapter = self.engine.native.manager.adapters.get("prophetx")
+        if adapter is None:
+            raise RiskRejected("ProphetX execution adapter is unavailable")
+        try:
+            await adapter.client.refresh_verified_price_ladder()
+            adapter.build_native_request(order.intent)
+        except (VenueError, ValueError) as exc:
+            raise RiskRejected(f"ProphetX order terms cannot be verified: {exc}") from exc
+
     async def preview(self, market_id: str, venue: str, outcome: str, max_cost_usd: Decimal):
         async with self.lock:
             if not max_cost_usd.is_finite() or max_cost_usd <= 0:
@@ -162,6 +176,7 @@ class ManualNativeService:
             profile_digest = self._gate()
             candidate = await self._fresh_candidate(market_id, venue, outcome, max_cost_usd)
             order = self.engine.native.build_order(candidate, execution_origin="manual")
+            await self._verify_prophetx_request(candidate.venue, order)
             # Preserve the kill switch while checking all non-arming limits.
             # The submit path repeats the full armed check under the OMS lock.
             async with self.engine.oms.lock:
@@ -232,6 +247,7 @@ class ManualNativeService:
                     raise RiskRejected("Native launch scope changed; review the trade again")
                 candidate = await self._fresh_candidate(review.market_id, review.venue, review.outcome, review.max_cost_usd)
                 order = self.engine.native.build_order(candidate, execution_origin="manual")
+                await self._verify_prophetx_request(candidate.venue, order)
                 if self._scope_digest(candidate, order, profile_digest) != review.scope_digest:
                     raise RiskRejected("Account, market, mapping, model or configuration changed")
                 instrument = candidate.intent.instrument
