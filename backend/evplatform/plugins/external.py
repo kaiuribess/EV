@@ -941,7 +941,8 @@ class NativeMonitor(Plugin):
             raise
         except Exception as exc:
             self.discovery_status = "read_failed"
-            self.discovery_error_type = type(exc).__name__
+            self.discovery_error_type = (f"{type(exc).__name__}:{exc.status_code}"
+                if isinstance(getattr(exc, "status_code", None), int) else type(exc).__name__)
             # Retain the last validated subscription set until an explicit
             # future catalog proves a replacement; stream invalidation is
             # handled independently by the native client.

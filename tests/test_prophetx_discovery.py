@@ -13,6 +13,8 @@ from evplatform.integrations.prophetx_discovery import (
     active_tournament_ids, open_event_ids, summarize_batched_markets,
     summarize_events, summarize_markets, summarize_tournaments)
 from evplatform.plugins.external import NativeMonitor, ProphetXMonitorConfig
+from evplatform.venues.common import VenueHTTPError
+from evplatform.venues.prophetx import ProphetXSettings
 
 
 def test_catalog_summaries_are_bounded_allowlists():
@@ -127,7 +129,7 @@ async def test_native_monitor_discovery_uses_existing_client_and_keeps_last_good
         async def discover_events(self, **kwargs):
             assert kwargs == {"tournament_id": 132}
             if self.fail:
-                raise RuntimeError("read failed")
+                raise VenueHTTPError("prophetx", 429)
             return {"data": {"sport_events": [{"event_id": 123, "name": "A at B",
                 "status": "not_started", "scheduled": "2026-10-22T02:00:00Z"}]}}
 
@@ -144,6 +146,11 @@ async def test_native_monitor_discovery_uses_existing_client_and_keeps_last_good
     client.fail = True
     await NativeMonitor._refresh_discovery(monitor)
     assert monitor.discovered_event_ids == ["123"] and monitor.discovery_status == "read_failed"
+    assert monitor.discovery_error_type == "VenueHTTPError:429"
+
+
+def test_prophetx_catalog_pacing_keeps_headroom_below_published_one_rps_tier():
+    assert ProphetXSettings().requests_per_second == 0.5
 
 
 @pytest.mark.asyncio

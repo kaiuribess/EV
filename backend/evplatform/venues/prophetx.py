@@ -28,7 +28,9 @@ from .dispatch import authenticated_request_guard, placement_guard
 
 
 class ProphetXSettings(NativeSettings):
-    requests_per_second: float = Field(default=1, gt=0, le=100)
+    # The documented default tier is 1 request/second. Production returned
+    # 429 on adjacent catalog reads at that boundary, so leave headroom.
+    requests_per_second: float = Field(default=0.5, gt=0, le=100)
     api_key: str = Field(default="", repr=False)
     secret_key: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
 
@@ -524,7 +526,7 @@ class ProphetXClient(NativeTransport):
                              "all_or_none": False, "asynchronous_matching": True, "native_live_tested": False,
                              "supported_settlement_policies": ["prophetx_funded_cash_win_loss_halt_on_exception"]},
             "permissions": ["network", "secret:prophetx", "orders:conditional"],
-            "health_check": True, "rate_limits": {"local_default_rps": 1, "read_poll_min_seconds": 1},
+            "health_check": True, "rate_limits": {"local_default_rps": 0.5, "read_poll_min_seconds": 2},
             "config_schema": {"environment": {"type": "string", "enum": ["sandbox", "production"], "default": "sandbox"}},
             "docs": "https://docs.prophetx.co/docs/integrate-with-websockets",
         }
