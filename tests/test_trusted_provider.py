@@ -112,12 +112,15 @@ def test_trusted_rejects_suspension_incomplete_pair_and_stale_poll():
             fair_value(market, [q for _, q in updates], config(), NOW)
 
 
-@pytest.mark.parametrize("scope", ["paginated_response_not_atomic", "incomplete_snapshot"])
+@pytest.mark.parametrize("scope", ["paginated_response_not_atomic", "incomplete_snapshot",
+    "truncated_response"])
 def test_complete_parlay_pair_from_bounded_board_is_labeled_research(scope):
     envelope = frame()
-    if scope == "paginated_response_not_atomic":
+    if scope in {"paginated_response_not_atomic", "truncated_response"}:
         envelope = replace(envelope, metadata={**envelope.metadata,
-            "headers": {"x-result-has-more": "true", "x-next-offset": "500"}})
+            "headers": ({"x-result-has-more": "true", "x-next-offset": "500"}
+                        if scope == "paginated_response_not_atomic" else
+                        {"x-result-truncated": "true"})})
     else:
         rows = [{"kind": "game", "bookmaker": book, "market_key": "h2h",
             "event_id": "event-1", "home_team": "Home", "away_team": "Away",
@@ -138,8 +141,9 @@ def test_complete_parlay_pair_from_bounded_board_is_labeled_research(scope):
         fair_value(market, [q for _, q in updates], config("strict_verified"), NOW)
 
 
-def test_degraded_or_truncated_parlay_board_remains_unusable_for_trusted_research():
-    for headers in ({"x-result-degraded": "pinnacle"}, {"x-result-truncated": "true"}):
+def test_truncation_never_masks_degraded_or_cached_parlay_board():
+    for headers in ({"x-result-degraded": "pinnacle", "x-result-truncated": "true"},
+                    {"x-parlay-stale": "props_scan_busy", "x-result-truncated": "true"}):
         envelope = replace(frame(), metadata={"sport": "basketball_nba", "headers": headers})
         _, updates = projected(envelope)
         with pytest.raises(NoSignal):

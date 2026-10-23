@@ -6,7 +6,7 @@ The two clock limits in trusted mode are **30 seconds by default**: `trusted_max
 
 For the documented complete Parlay game-board stream, a one-sided `odds_update` can be combined with the unchanged opposing side from the current baseline for **research only**. The pair's delivery age is measured from the older side, and the dashboard calls out that the sides came from separate frames. Another update to the same side does not renew the opposing side's age. A reconnect replaces the baseline; explicit suspension or withdrawal removes the research pair. Strict verification and native execution never treat this merge as a new observation.
 
-Parlay's broad prop stream and paginated REST views can contribute a self-contained, exact two-sided row to **research** even when the overall board is not complete. The dashboard labels the incomplete coverage. Explicitly truncated, partially failed, degraded, cached, or topped-up responses remain ineligible. A complete price pair from a bounded board does not establish that other players, lines, books, or removals were delivered.
+Parlay's broad prop stream and paginated or truncated REST views can contribute a self-contained, exact two-sided row to **research** even when the overall board is not complete. The dashboard labels the incomplete coverage. Partially failed, degraded, cached, or topped-up responses remain ineligible, including when they are also marked truncated. A complete price pair from a bounded board does not establish that other players, lines, books, or removals were delivered.
 
 Changing a pricing setting refreshes the existing source-only reference display without evaluating a native order strategy or arming execution. The dashboard still removes a reference when its bounded clock expires.
 

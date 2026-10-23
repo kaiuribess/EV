@@ -229,28 +229,32 @@ def _parlay_unavailability_reason(row: dict) -> str | None:
 def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | None:
     """Retain adverse completeness evidence without making it market identity."""
     body = envelope.payload if isinstance(envelope.payload, dict) else {}
-    for scope in (body, *scopes):
-        if scope.get("topped_up") is True:
-            return "retained_top_up"
-        if scope.get("truncated") is True or scope.get("truncated_books"):
-            return "truncated_response"
-        if (scope.get("partial") is True or scope.get("missing_books")
-                or scope.get("snapshot_partial_reasons") or scope.get("snapshot_in_progress") is True):
-            return "partial_response"
-        if scope.get("snapshot_complete") is False:
-            return "incomplete_snapshot"
     headers = envelope.metadata.get("headers", {})
+    all_scopes = (body, *scopes)
+    # Choose the strongest adverse fact across response, book, market and row.
+    # A broad truncation must not hide a topped-up row, a failed collection,
+    # or a stale/degraded response when research accepts a complete row.
+    if any(scope.get("topped_up") is True for scope in all_scopes):
+        return "retained_top_up"
     # Parlay can return a previously built props board when its scan is busy.
     # A fresh HTTP receipt and a row's old collector clock do not establish
     # that the cached board still represents currently offered outcomes.
     if headers.get("x-parlay-stale"):
         return "stale_cached_board"
-    if str(headers.get("x-result-truncated", "")).lower() == "true":
-        return "truncated_response"
-    if str(headers.get("x-result-has-more", "")).lower() == "true" or headers.get("x-next-offset"):
-        return "paginated_response_not_atomic"
     if headers.get("x-result-degraded") or headers.get("x-result-degraded-sources"):
         return "degraded_source"
+    if any(scope.get("partial") is True or scope.get("missing_books")
+           or scope.get("snapshot_partial_reasons") or scope.get("snapshot_in_progress") is True
+           for scope in all_scopes):
+        return "partial_response"
+    if any(scope.get("truncated") is True or scope.get("truncated_books") for scope in all_scopes):
+        return "truncated_response"
+    if str(headers.get("x-result-truncated", "")).lower() == "true":
+        return "truncated_response"
+    if any(scope.get("snapshot_complete") is False for scope in all_scopes):
+        return "incomplete_snapshot"
+    if str(headers.get("x-result-has-more", "")).lower() == "true" or headers.get("x-next-offset"):
+        return "paginated_response_not_atomic"
     return None
 
 

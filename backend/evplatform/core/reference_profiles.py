@@ -167,13 +167,13 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
     # but a self-contained, exact two-sided Parlay row can still support a
     # labeled source-only research estimate. It cannot authorize an order.
     limited_board = quote.verification_reason in {
-        "incomplete_snapshot", "paginated_response_not_atomic"}
+        "truncated_response", "incomplete_snapshot", "paginated_response_not_atomic"}
     if limited_board and not (market.extensions.get("research_only") is True
             and quote.provider in {"parlay_rest", "parlay_ws", "parlay_game_ws"}
             and len(market.outcomes) == 2 and set(quote.decimal_odds) == set(market.outcomes)):
         return False, ("Bounded provider board has no complete exact price pair",), None
     if quote.verification_reason in {
-        "retained_top_up", "truncated_response", "partial_response", "stale_cached_board",
+        "retained_top_up", "partial_response", "stale_cached_board",
         "degraded_source", "future_observation_clock",
         "incomplete_or_cross_frame_outcomes", "unsynchronized_outcomes",
     }:
