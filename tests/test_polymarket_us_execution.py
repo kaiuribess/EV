@@ -11,13 +11,16 @@ import httpx
 import pytest
 
 from evplatform.core.models import utcnow
+from evplatform.core.manual_native import ManualNativeService
 from evplatform.core.native_accounting import NativeInstrument, NativeOrderIntent, NativePriceBand
+from evplatform.core.risk import RiskRejected
 from evplatform.venues.bridge import NativePreflight, VerifiedVenueMapping
 from evplatform.venues.common import PreflightRequired, UnknownOrderOutcome
 from evplatform.venues.polymarket_us import PolymarketUSClient, PolymarketUSSettings
 from evplatform.venues.polymarket_us_execution import (
     PolymarketUSExecutionVenue, conservative_taker_fee_bound, encode_exact_json,
-    normalize_execution, normalize_order, order_body, standard_taker_fee,
+    normalize_execution, normalize_order, order_body, sdk_preview_request,
+    standard_taker_fee, validate_preview,
 )
 from evplatform.venues.reconciliation import ReconciliationError
 
@@ -83,6 +86,84 @@ def test_cash_json_never_silently_accepts_binary_float():
         encode_exact_json({"quantity": 0.29})
 
 
+@pytest.mark.parametrize("side,expected_side,expected_price", [
+    ("yes", "ORDER_SIDE_BUY", "0.45"), ("no", "ORDER_SIDE_SELL", "0.55")])
+def test_sdk_241_preview_shape_preserves_fractional_long_and_short(side, expected_side, expected_price):
+    original = intent(side, quantity="0.29")
+    request = sdk_preview_request(original)
+    assert request["quantity"] == 0.29
+    assert request["price"] == {"value": expected_price, "currency": "USD"}
+    assert request["tif"] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+    response = {"order": {"marketSlug": "nba-example", "intent": request["intent"],
+        "side": expected_side, "outcomeSide": f"OUTCOME_SIDE_{side.upper()}",
+        "type": "ORDER_TYPE_LIMIT", "price": request["price"], "quantity": 0.29,
+        "tif": request["tif"], "state": "ORDER_STATE_PENDING_NEW"}}
+    checked = validate_preview(original, response)
+    assert checked["parameter_check_only"] and checked["market_slug"] == "nba-example"
+    assert not hasattr(original, "order_id")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("marketSlug", "other-market"), ("intent", "ORDER_INTENT_SELL_LONG"),
+    ("quantity", 0.3), ("state", "ORDER_STATE_REJECTED")])
+def test_preview_never_accepts_changed_identity_size_or_rejection(field, value):
+    original = intent(quantity="0.29")
+    row = {"marketSlug": "nba-example", "intent": "ORDER_INTENT_BUY_LONG",
+        "side": "ORDER_SIDE_BUY", "outcomeSide": "OUTCOME_SIDE_YES",
+        "type": "ORDER_TYPE_LIMIT", "price": {"value": "0.45", "currency": "USD"},
+        "quantity": 0.29, "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+        "state": "ORDER_STATE_PENDING_NEW"}
+    row[field] = value
+    with pytest.raises(PreflightRequired):
+        validate_preview(original, {"order": row})
+
+
+async def test_sdk_preview_invocation_is_preview_only_and_never_places():
+    original = intent(quantity="0.29")
+    calls = []
+    adapter = adapter_for(original, lambda request: calls.append(request) or httpx.Response(500))
+    class Orders:
+        async def preview(self, params):
+            calls.append(("preview", params))
+            request = params["request"]
+            return {"order": {**request, "side": "ORDER_SIDE_BUY",
+                "outcomeSide": "OUTCOME_SIDE_YES", "state": "ORDER_STATE_PENDING_NEW"}}
+        async def create(self, params):
+            raise AssertionError("production placement must never occur in preview")
+    class SDK:
+        orders = Orders()
+        async def close(self):
+            pass
+    adapter.client._private_sdk = SDK()
+    adapter.client.authenticated = True
+    try:
+        result = await adapter.preview_native_request(original)
+        assert result["parameter_check_only"]
+        assert calls == [("preview", {"request": sdk_preview_request(original)})]
+        assert not adapter._transmitted
+    finally:
+        await adapter.client.disconnect()
+
+
+async def test_owner_preview_uses_existing_native_adapter_without_dispatch():
+    calls = []
+    class Adapter:
+        async def preview_native_request(self, native_intent):
+            calls.append(native_intent.client_order_id)
+            return {"parameter_check_only": True}
+        async def submit_intent(self, *args):
+            raise AssertionError("owner preview cannot dispatch")
+    service = ManualNativeService(SimpleNamespace(native=SimpleNamespace(
+        manager=SimpleNamespace(adapters={"polymarket_us": Adapter()}))))
+    order = SimpleNamespace(intent=intent())
+    assert await service._verify_polymarket_us_request("polymarket_us", order) == {"parameter_check_only": True}
+    assert calls == [order.intent.client_order_id]
+    assert await service._verify_polymarket_us_request("kalshi", order) is None
+    service.engine.native.manager.adapters.clear()
+    with pytest.raises(RiskRejected):
+        await service._verify_polymarket_us_request("polymarket_us", order)
+
+
 @pytest.mark.parametrize("quantity,price,theta,fee", [("1000","0.1","0.0695","6.26"),
     ("1000","0.65","0.0695","15.81"),("1000","0.5","0.1","25.00")])
 def test_current_official_fee_examples(quantity,price,theta,fee):
@@ -94,6 +175,29 @@ def test_fee_bound_includes_improvement_toward_half_and_excludes_weekly_rebate()
     assert bound==D("1.74")
     assert bound>=standard_taker_fee("100","0.5",theta="0.0695")
     assert conservative_taker_fee_bound("100","0.1",theta="0.0695")==D("0.63")
+
+
+@pytest.mark.parametrize("side,wire_intent,wire_price", [
+    ("yes", "ORDER_INTENT_BUY_LONG", "0.45"),
+    ("no", "ORDER_INTENT_BUY_SHORT", "0.55")])
+def test_one_dollar_long_and_short_collateral_boundary(side, wire_intent, wire_price):
+    template = intent(side, quantity="1")
+    fee = conservative_taker_fee_bound("1", "0.45", theta="0.0695")
+    bounded = NativeOrderIntent(id=template.id, client_order_id=template.client_order_id,
+        instrument=template.instrument, quantity="1", limit_price="0.45",
+        max_fee_usd=fee, fee_source="OFFLINE standard taker fee fixture",
+        fees_verified=True, mode="production")
+    assert fee == D("0.02")
+    assert bounded.reserved_cost_usd == D("0.47") <= D("1")
+    request = order_body(bounded)
+    assert request["intent"] == wire_intent and request["price"]["value"] == wire_price
+    if side == "no":
+        assert D("1")-D(wire_price) == D("0.45")  # full $1 collateral less YES proceeds
+    too_large = NativeOrderIntent(id=template.id, client_order_id=template.client_order_id,
+        instrument=template.instrument, quantity="3", limit_price="0.45",
+        max_fee_usd=conservative_taker_fee_bound("3", "0.45", theta="0.0695"),
+        fee_source="OFFLINE standard taker fee fixture", fees_verified=True, mode="production")
+    assert too_large.reserved_cost_usd > D("1")
 
 
 @pytest.mark.parametrize("side", ["yes","no"])

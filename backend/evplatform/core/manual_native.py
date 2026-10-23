@@ -169,6 +169,22 @@ class ManualNativeService:
         except (VenueError, ValueError) as exc:
             raise RiskRejected(f"ProphetX order terms cannot be verified: {exc}") from exc
 
+    async def _verify_polymarket_us_request(self, venue, order):
+        if venue != "polymarket_us":
+            return None
+        from ..venues.common import VenueError
+
+        adapter = self.engine.native.manager.adapters.get("polymarket_us")
+        if adapter is None:
+            raise RiskRejected("Polymarket US execution adapter is unavailable")
+        try:
+            # The installed US SDK's preview endpoint does not insert an order.
+            # Local fee/debit bounds remain authoritative: a preview may show
+            # zero commission when the order has not matched yet.
+            return await adapter.preview_native_request(order.intent)
+        except (VenueError, ValueError) as exc:
+            raise RiskRejected(f"Polymarket US order terms cannot be verified: {exc}") from exc
+
     async def preview(self, market_id: str, venue: str, outcome: str, max_cost_usd: Decimal):
         async with self.lock:
             if not max_cost_usd.is_finite() or max_cost_usd <= 0:
@@ -177,6 +193,7 @@ class ManualNativeService:
             candidate = await self._fresh_candidate(market_id, venue, outcome, max_cost_usd)
             order = self.engine.native.build_order(candidate, execution_origin="manual")
             await self._verify_prophetx_request(candidate.venue, order)
+            exchange_preview = await self._verify_polymarket_us_request(candidate.venue, order)
             # Preserve the kill switch while checking all non-arming limits.
             # The submit path repeats the full armed check under the OMS lock.
             async with self.engine.oms.lock:
@@ -228,6 +245,7 @@ class ManualNativeService:
                                        "automatic_orders_off": True,
                                        "kill_switch_on": self.engine.risk.kill_switch,
                                        "submit_requires_kill_switch_off": True},
+                    "exchange_preview": exchange_preview,
                     "unsigned": True,
                     "candidate": candidate.model_dump(mode="json"),
                     "note": "Review only. No order sent. Fresh final evidence must meet these same approved limits and scope."}
@@ -248,6 +266,7 @@ class ManualNativeService:
                 candidate = await self._fresh_candidate(review.market_id, review.venue, review.outcome, review.max_cost_usd)
                 order = self.engine.native.build_order(candidate, execution_origin="manual")
                 await self._verify_prophetx_request(candidate.venue, order)
+                await self._verify_polymarket_us_request(candidate.venue, order)
                 if self._scope_digest(candidate, order, profile_digest) != review.scope_digest:
                     raise RiskRejected("Account, market, mapping, model or configuration changed")
                 instrument = candidate.intent.instrument

@@ -98,6 +98,7 @@ class PolymarketUSClient(NativeTransport):
         self.rest_books: dict[str, dict] = {}
         self.rest_book_received_at: dict[str, float] = {}
         self._public_sdk = None
+        self._private_sdk = None
         self.market_messages = 0
         self.private_messages = 0
         self.heartbeat_messages = 0
@@ -174,6 +175,30 @@ class PolymarketUSClient(NativeTransport):
         # This documented participant identifier may require RFQ read access.
         # Failure never falls back to treating a configured key as account proof.
         return await self._get("/v1/rfqs/user-id", private=True)
+
+    async def preview_order(self, request: dict) -> dict:
+        """Use the official retail SDK's non-placement preview endpoint only.
+
+        The central executor owns order creation. Keeping this method on the
+        monitor's allowlisted surface makes a preview incapable of falling
+        through to placement or cancellation.
+        """
+        if not self.authenticated or not isinstance(request, dict):
+            raise VenueError("Authenticated Polymarket US order preview required")
+        if self._private_sdk is None:
+            from polymarket_us import AsyncPolymarketUS
+            self._private_sdk = AsyncPolymarketUS(
+                key_id=self.settings.api_key_id, secret_key=self.settings.secret_key,
+                max_retries=0)
+        from polymarket_us.errors import PolymarketUSError
+        try:
+            result = await self._private_sdk.orders.preview({"request": request})
+        except PolymarketUSError as exc:
+            status = getattr(exc, "status_code", None)
+            raise VenueError(f"Polymarket US order preview failed ({status or type(exc).__name__})") from None
+        if not isinstance(result, dict) or not isinstance(result.get("order"), dict):
+            raise VenueError("Invalid Polymarket US order preview response")
+        return result
 
     async def connect(self):
         self._closed = False
@@ -508,6 +533,9 @@ class PolymarketUSClient(NativeTransport):
         if self._public_sdk is not None:
             await self._public_sdk.close()
             self._public_sdk = None
+        if self._private_sdk is not None:
+            await self._private_sdk.close()
+            self._private_sdk = None
         await super().disconnect()
 
     def health_check(self):

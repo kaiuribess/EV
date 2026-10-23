@@ -682,6 +682,8 @@ class NativeRuntime:
                     client, managed_orders=tuple(self.engine.risk.native_orders.values()),
                     settled_order_ids=frozenset(self.engine.risk.settled),
                     **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
+                    **({"adapter": self.manager.adapters.get(venue)} if venue == "polymarket_us"
+                       and getattr(self.manager.adapters.get(venue), "client", None) is client else {}),
                     **({"management_client": record.plugin.management_client}
                        if venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
             except asyncio.CancelledError:

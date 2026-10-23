@@ -91,9 +91,11 @@ async def probe_polymarket_us_account(client, managed_orders=(), *, settled_orde
     usd = [row for row in balances if _object(row, "currency balance").get("currency") == "USD"]
     if len(usd) != 1:
         raise ReconciliationError("Exactly one USD balance is required")
-    cash = number(usd[0].get("currentBalance"), "current USD balance")
-    # Buying power is reported separately by the venue; currentBalance is not
-    # certified available cash and never used as such by this account probe.
+    number(usd[0].get("currentBalance"), "current USD balance")
+    # The retail contract calls buyingPower capital available for trading;
+    # currentBalance is only the fiat balance. Keep this reported capacity
+    # unverified until account identity, clock and inventory can be certified.
+    buying_power = number(usd[0].get("buyingPower"), "USD buying power")
     try:
         source_time(usd[0].get("lastUpdated"), utcnow())
         balance_clock_valid = True
@@ -193,7 +195,7 @@ async def probe_polymarket_us_account(client, managed_orders=(), *, settled_orde
             private_current = False
             cash_agrees = False
             inventory_reasons.append("Private inventory changed during participant lookup")
-    return PolymarketUSAccountSnapshot(**{**base, "observed_at": observed}, balance_usd=cash,
+    return PolymarketUSAccountSnapshot(**{**base, "observed_at": observed}, balance_usd=buying_power,
         open_order_count=len(raw_orders), position_count=len(actual_positions),
         participant_fingerprint=participant, inventory_quantities_agree=not inventory_reasons,
         inventory_cash_agrees=cash_agrees, identity_verified=False, cash_available_verified=False,

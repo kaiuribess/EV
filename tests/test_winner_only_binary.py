@@ -264,3 +264,58 @@ async def test_winner_only_candidate_reaches_unsigned_manual_preview_without_ord
     preview_check.assert_called_once()
     execute.assert_not_awaited()
     assert not risk.auto_trade and risk.kill_switch
+
+
+@pytest.mark.asyncio
+async def test_polymarket_us_fractional_fixture_reaches_unsigned_owner_review_only():
+    from evplatform.venues.polymarket_us_execution import order_body, sdk_preview_request
+
+    market = market_case()
+    quotes, config = strict_case(market)
+    instrument = NativeInstrument(venue="polymarket_us", instrument_id="nba-fixture",
+        canonical_market_id=market.id, outcome="home", native_outcome="yes",
+        quantity_unit="contracts", price_format="probability", payout_per_unit_usd="1",
+        quantity_step="0.01", minimum_quantity="0.01", cash_quantum_usd="0.00001",
+        minimum_order_cost_usd="0.01", order_minimum_verified=True,
+        order_minimum_source="OFFLINE fixture market metadata", verified=True,
+        source="OFFLINE reviewed identity fixture",
+        settlement_rules_fingerprint=settlement_fingerprint(market),
+        price_bands=(NativePriceBand(minimum="0.005", maximum="0.995", step="0.005"),))
+    fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
+        per_unit_usd="0.02", per_fill_usd="0", fixed_order_usd="0",
+        verified=True, source="OFFLINE conservative fee fixture",
+        observed_at=NOW-timedelta(minutes=1), valid_until=NOW+timedelta(hours=1))
+    book = NativeBook(instrument=instrument, market_fingerprint=market.identity(),
+        asks=(NativeLevel(price="0.40", quantity="20"),), fee_bound=fee,
+        source_time=NOW-timedelta(milliseconds=100), received_at=NOW,
+        revision=1, synchronized=True)
+    candidate = native_opportunity(market, fair_value(market, quotes, config, NOW), book,
+        config, max_stake_usd=D("1"), mode="production", now=NOW,
+        stake_sizing="quarter_kelly", available_cash_usd=D("25"))
+    assert candidate.qualified and candidate.intent.reserved_cost_usd <= D("1")
+    assert candidate.intent.quantity % D("0.01") == 0
+    assert order_body(candidate.intent)["intent"] == "ORDER_INTENT_BUY_LONG"
+    assert D(str(sdk_preview_request(candidate.intent)["quantity"])) == candidate.intent.quantity
+    risk = RiskEngine(RiskConfig())
+    risk.kill_switch = True
+    dispatch = AsyncMock()
+    class PreviewAdapter:
+        async def preview_native_request(self, native_intent):
+            assert native_intent == candidate.intent
+            return {"parameter_check_only": True, "market_slug": "nba-fixture"}
+    native = SimpleNamespace(books={(market.id, "polymarket_us", "home"): book},
+        build_id="OFFLINE-build", preview_check=Mock(),
+        manager=SimpleNamespace(adapters={"polymarket_us": PreviewAdapter()}),
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id,
+            intent=found.intent, account_fingerprint="a"*64), execute=dispatch)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={market.id: market}, settings=SimpleNamespace(mode="production", pricing=config))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "OFFLINE-profile"
+    service._fresh_candidate = AsyncMock(return_value=candidate)
+    proposal = await service.preview(market.id, "polymarket_us", "home", D("1"))
+    assert proposal["unsigned"] and proposal["exchange_preview"]["parameter_check_only"]
+    assert proposal["risk_decisions"]["kill_switch_on"]
+    native.preview_check.assert_called_once()
+    dispatch.assert_not_awaited()
+    assert not risk.auto_trade and risk.kill_switch
