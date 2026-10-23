@@ -267,3 +267,4 @@ async def test_paper_input_cannot_start_in_live_mode(tmp_path):
     record = engine.registry.records["parlay_paper_input"]
     assert not record.enabled
     assert record.health["status"] == "error"
+    assert "parlay-paper-input" not in {sub.name for sub in engine.bus.subscribers}

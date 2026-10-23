@@ -204,8 +204,11 @@ async def test_oddize_circa_joins_paper_blend_without_double_counting_pinnacle(t
 async def test_oddize_paper_plugin_rejects_production_mode(tmp_path):
     engine = Engine(Settings(database_path=str(tmp_path / "live.db"), mode="production",
         sample_feed_enabled=False, live_enabled=True))
+    assert not {"oddize-paper-input", "parlay-paper-input"} & {
+        sub.name for sub in engine.bus.subscribers}
     await engine.registry.start("oddize_paper_input", engine.context("oddize_paper_input"))
     assert engine.registry.records["oddize_paper_input"].health["status"] == "error"
+    assert "oddize-paper-input" not in {sub.name for sub in engine.bus.subscribers}
 
 
 async def test_cached_oddize_snapshot_joins_later_parlay_board_on_event_bus(tmp_path):

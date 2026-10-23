@@ -74,6 +74,9 @@ class SourceOffer:
     # quote-bound observation eligibility.
     source_scope_poll_at: datetime | None = None
     source_scope_is_current: bool | None = None
+    # Transport receipt of this particular source row. A merged WebSocket
+    # pair must retain the *older* side's delivery age, not the update frame's.
+    received_at: datetime | None = None
 
     def identity(self) -> dict[str, Any]:
         context = dict(self.context)
@@ -458,6 +461,7 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
              **({"event_sport": envelope.metadata["sport"]} if envelope.metadata.get("sport") else {})},
             **observation,
             market_status_verified=status_verified,
+            received_at=envelope.received_at,
         ))
     return result
 
@@ -895,7 +899,7 @@ class TrustedSourceProjector:
             source_scope_is_current=offer.source_scope_is_current,
             verification_reason=offer.verification_reason,
             settlement_equivalence_verified=False, normal_outcome_verified=False,
-            received_at=envelope.received_at, provider_time=offer.provider_time,
+            received_at=offer.received_at or envelope.received_at, provider_time=offer.provider_time,
             synthetic=envelope.synthetic, original_market_id=offer.market_key)
         return market, quote
 
@@ -1078,6 +1082,30 @@ class VerifiedProviderMapper:
             streaming_pair = offer.provider in {"parlay_ws", "parlay_game_ws"} and (moneyline or paired_prop)
             snapshot_pair = offer.provider == "parlay_rest" and paired_prop
             if len(offer.prices) != 1 or not (streaming_pair or snapshot_pair):
+                # A complete current game-board baseline may use home/away
+                # keys while later change frames use named teams. Seed the
+                # exact market identity with both sides so a one-sided delta
+                # can update the board without inventing a new receipt time
+                # for the unchanged opposing price. The stored side clocks
+                # remain separate and the merge is research-only.
+                participants = offer.context.get("participants")
+                if (offer.provider == "parlay_game_ws" and offer.market_key == "h2h"
+                        and moneyline and len(offer.prices) == 2
+                        and isinstance(participants, list) and len(participants) == 2):
+                    if set(offer.prices) == {"home", "away"}:
+                        names = {"home": participants[0], "away": participants[1]}
+                    elif set(offer.prices) == set(participants):
+                        names = {name: name for name in participants}
+                    else:
+                        names = {}
+                    if len(names) == 2:
+                        identity = offer.identity()
+                        identity.pop("outcome_points")
+                        key = json.dumps(identity, sort_keys=True, default=str)
+                        self._partial[key] = {names[side]: replace(offer,
+                            prices={names[side]: price},
+                            outcome_points={names[side]: offer.outcome_points.get(side)})
+                            for side, price in offer.prices.items()}
                 complete.append(offer)
                 continue
             identity = offer.identity()
@@ -1106,6 +1134,12 @@ class VerifiedProviderMapper:
             acceptable = all(part.verification_reason == "quote_bound_collector_observation" for part in sides.values())
             adverse_reason = next((part.verification_reason for part in sides.values()
                                    if part.verification_reason != "quote_bound_collector_observation"), None)
+            # The documented complete game board is a replacement baseline;
+            # later odds_update frames contain only changed rows. Preserve the
+            # oldest side's receipt for a research-only cross-frame pair. It
+            # is not a current observation or an active-status attestation.
+            research_game_pair = (offer.provider == "parlay_game_ws" and offer.market_key == "h2h"
+                                  and len(sides) == 2 and not current_pair)
             complete.append(replace(
                 offer,
                 prices={side: part.prices[side] for side, part in sides.items()},
@@ -1113,10 +1147,12 @@ class VerifiedProviderMapper:
                 observed_at=_oldest([part.observed_at for part in sides.values()]),
                 source_observed_at=_oldest(timestamps),
                 source_price_changed_at=_oldest([part.source_price_changed_at for part in sides.values()]),
+                received_at=_oldest([part.received_at for part in sides.values()]),
                 observation_verified=verified,
                 observation_complete=verified and current_pair and same_observation and acceptable,
                 market_status_verified=all(part.market_status_verified for part in sides.values()),
-                verification_reason=("incomplete_or_cross_frame_outcomes" if not current_pair else
+                verification_reason=("trusted_game_cross_frame_pair" if research_game_pair else
+                                     "incomplete_or_cross_frame_outcomes" if not current_pair else
                                      "unsynchronized_outcomes" if verified and not same_observation else
                                      adverse_reason or offer.verification_reason),
                 status="active" if all(part.status == "active" for part in sides.values()) else "suspended",

@@ -190,8 +190,7 @@ class OddizePaperInput(InputPlugin):
 
     def __init__(self, engine):
         self.engine = engine
-        self.queue = engine.bus.subscribe("oddize-paper-input",
-            ["provider.frame", "sports.market"], critical=True)
+        self.queue = None
         self.normalizer = OddizePaperNormalizer()
         self.task = None
         self.expiry_task = None
@@ -204,6 +203,8 @@ class OddizePaperInput(InputPlugin):
                 or self.engine.settings.live_enabled):
             raise PermissionError("Oddize comparison runs only in sample-free, native-disabled paper mode")
         self.normalizer = OddizePaperNormalizer(OddizePaperConfig.model_validate(context.config))
+        self.queue = self.engine.bus.subscribe("oddize-paper-input",
+            ["provider.frame", "sports.market"], critical=True)
         self.task = asyncio.create_task(self._run(), name="oddize-paper-input")
         self.expiry_task = asyncio.create_task(self._expire(), name="oddize-paper-expiry")
 
@@ -249,14 +250,18 @@ class OddizePaperInput(InputPlugin):
             await self._publish(self.normalizer.expire())
 
     async def stop(self):
+        if self.queue is not None:
+            self.engine.bus.unsubscribe(self.queue)
         for task in (self.task, self.expiry_task):
             if task:
                 task.cancel()
         await asyncio.gather(*(task for task in (self.task, self.expiry_task) if task), return_exceptions=True)
         self.task = self.expiry_task = None
-        while not self.queue.empty():
-            self.queue.get_nowait()
-            self.queue.task_done()
+        if self.queue is not None:
+            while not self.queue.empty():
+                self.queue.get_nowait()
+                self.queue.task_done()
+            self.queue = None
         if hasattr(self, "context"):
             self.normalizer.offers = []
             await self._publish(self.normalizer.reconcile())

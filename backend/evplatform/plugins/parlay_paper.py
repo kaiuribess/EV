@@ -283,7 +283,7 @@ class ParlayPaperInput(InputPlugin):
 
     def __init__(self, engine):
         self.engine = engine
-        self.queue = engine.bus.subscribe("parlay-paper-input", ["provider.frame"], critical=True)
+        self.queue = None
         self.normalizer = ParlayPaperNormalizer()
         self.allowed_sports: set[str] = set()
         self.allowed_bookmakers: set[str] = set()
@@ -302,6 +302,7 @@ class ParlayPaperInput(InputPlugin):
             raise ValueError("Paper Parlay requires named supported sports and bookmakers")
         self.normalizer = ParlayPaperNormalizer(max_age_seconds=context.config["max_age_seconds"],
             max_poll_age_seconds=context.config["max_poll_age_seconds"])
+        self.queue = self.engine.bus.subscribe("parlay-paper-input", ["provider.frame"], critical=True)
         self.task = asyncio.create_task(self._run(), name="parlay-paper-input")
         self.expiry_task = asyncio.create_task(self._expire(), name="parlay-paper-expiry")
 
@@ -347,14 +348,18 @@ class ParlayPaperInput(InputPlugin):
             await self._publish(self.normalizer.expire())
 
     async def stop(self):
+        if self.queue is not None:
+            self.engine.bus.unsubscribe(self.queue)
         for task in (self.task, self.expiry_task):
             if task:
                 task.cancel()
         await asyncio.gather(*(task for task in (self.task, self.expiry_task) if task), return_exceptions=True)
         self.task = self.expiry_task = None
-        while not self.queue.empty():
-            self.queue.get_nowait()
-            self.queue.task_done()
+        if self.queue is not None:
+            while not self.queue.empty():
+                self.queue.get_nowait()
+                self.queue.task_done()
+            self.queue = None
         if hasattr(self, "context"):
             for sport in list(self.normalizer.baselines):
                 await self._publish(self.normalizer._invalidate_sport(sport))

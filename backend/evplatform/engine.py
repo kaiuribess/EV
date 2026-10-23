@@ -398,7 +398,14 @@ class Engine:
             # Only a documented outcome observation may replace the legacy
             # source clock. Transport receipt never promotes an old quote.
             old_clock = (old.source_observed_at if old.observation_verified else old.source_time) if old else None
-            strict = self.settings.pricing.reference_profile_mode == "strict"
+            # Source-only trusted estimates have no quote-bound observation
+            # clock. Their carried oldest-side price-change time is not a
+            # same-observation watermark for a later one-sided stream delta.
+            # Keep these latches unchanged for reviewed production markets.
+            market = self.markets[market_id]
+            trusted_research = (market.extensions.get("research_only") is True
+                and market_config(self.settings.pricing, market).reference_quality_mode == "trusted_provider")
+            strict = self.settings.pricing.reference_profile_mode == "strict" and not trusted_research
             source_key = (market_id, *key)
             watermark = self.quote_observation_watermarks.get(source_key)
             if strict and watermark is not None:

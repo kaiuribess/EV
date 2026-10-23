@@ -111,9 +111,15 @@ class ProviderBridge(InputPlugin):
                 ):
                     await self._invalidate()
                 mapped = self.mapper(raw)
-                for market, quote in [*mapped, *getattr(self.mapper, "research_updates", ())]:
+                for index, (market, quote) in enumerate([*mapped, *getattr(self.mapper, "research_updates", ())]):
                     await self.context.bus.publish(Envelope(schema_name="sports.market", source=self.manifest.name, payload=market))
                     await self.context.bus.publish(Envelope(schema_name="odds.quote", source=self.manifest.name, payload=quote))
+                    if index % 64 == 63:
+                        # A complete source board can contain thousands of
+                        # rows. Give active critical consumers a chance to
+                        # drain between batches without dropping events or
+                        # relaxing their overflow safety check.
+                        await asyncio.sleep(0)
                 self.engine.metrics.counters[f"provider_messages:{self.manifest.name}"] += 1
         except asyncio.CancelledError:
             raise

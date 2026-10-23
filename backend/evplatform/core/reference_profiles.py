@@ -185,6 +185,8 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
         caveats.append("Book/fixture poll age unknown")
     if quote.source_scope_is_current is False:
         caveats.append("Provider did not mark book/fixture poll current")
+    if quote.verification_reason == "trusted_game_cross_frame_pair":
+        caveats.append("Opposing game prices came from separate WebSocket frames; delivery age uses the older side")
     if not quote.normal_outcome_verified:
         caveats.append("Source-to-native normal WIN/LOSS condition not reviewed")
     if market.extensions.get("research_only"):

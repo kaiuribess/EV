@@ -209,6 +209,71 @@ def test_complete_game_websocket_frame_pairs_current_sides_without_quote_clock()
     assert not fair.execution_eligible
 
 
+def test_game_websocket_one_sided_delta_preserves_older_side_age_for_research():
+    start = (NOW + timedelta(hours=1)).isoformat()
+    base = {"kind": "game", "market_key": "h2h", "event_id": "event-1",
+        "home_team": "Home", "away_team": "Away", "period": "FULL",
+        "commence_time": start, "last_update": int((NOW-timedelta(minutes=2)).timestamp()*1000)}
+    baseline = ProviderEnvelope("parlay_game_ws", "initial_state", {
+        "data": [{**base, "bookmaker": book, "home_ml": -110, "away_ml": -110}
+                 for book in ("pinnacle", "fanduel")],
+        "snapshot_scope": "current_game_board", "snapshot_complete": True,
+        "truncated": False}, NOW, 1, published_at=NOW,
+        snapshot_complete=True, metadata={"sport": "basketball_nba"})
+    mapper = VerifiedProviderMapper()
+    mapper.research_projector = TrustedSourceProjector(config)
+    mapper(baseline)
+    market = mapper.research_updates[0][0]
+    assert len(mapper.research_updates) == 2
+    later = NOW + timedelta(seconds=10)
+    changed = {**base, "bookmaker": "pinnacle", "team": "Home",
+        "outcome": "Home", "price": -125,
+        "last_update": int(later.timestamp()*1000)}
+    update = ProviderEnvelope("parlay_game_ws", "odds_update", {"data": [changed]},
+        later, 2, published_at=later, metadata={"sport": "basketball_nba"})
+    mapper(update)
+    _, quote = mapper.research_updates[0]
+    assert quote.decimal_odds["Home"] != quote.decimal_odds["Away"]
+    assert quote.received_at == NOW  # The opposing side was not redelivered.
+    assert quote.source_observed_at is None
+    assert quote.verification_reason == "trusted_game_cross_frame_pair"
+    quotes = [quote, next(q for m, q in mapper.research_projector.active.values()
+                          if m.id == market.id and q.bookmaker == "fanduel")]
+    fair = fair_value(market, quotes, config(), later)
+    assert not fair.execution_eligible
+    assert any("separate WebSocket frames" in text for text in fair.ineligibility_reasons)
+    with pytest.raises(NoSignal, match="Insufficient"):
+        fair_value(market, quotes, config(), NOW + timedelta(seconds=31))
+    with pytest.raises(NoSignal):
+        fair_value(market, quotes, config("strict_verified"), later)
+
+    suspended = ProviderEnvelope("parlay_game_ws", "odds_update", {"data": [
+        {**base, "bookmaker": "pinnacle", "team": "Away", "outcome": "Away",
+         "price": -110, "suspended": True}]},
+        later + timedelta(seconds=1), 3, metadata={"sport": "basketball_nba"})
+    mapper(suspended)
+    assert mapper.research_updates[0][1].status == "withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_research_delta_does_not_trigger_strict_same_observation_latch(tmp_path):
+    now = utcnow()
+    _, updates = projected(frame(received=now, start=now + timedelta(hours=1)))
+    market, first = updates[0]
+    engine = Engine(Settings(_env_file=None, mode="production", live_enabled=False,
+        auto_trade=False, sample_feed_enabled=False,
+        database_path=str(tmp_path / "research-delta.db"), pricing=config()))
+    engine.risk.kill_switch = True
+    await engine.process_event(Envelope(schema_name="sports.market", source="test", payload=market))
+    await engine.process_event(Envelope(schema_name="odds.quote", source="test", payload=first))
+    updated = first.model_copy(update={"decimal_odds": {**first.decimal_odds, "Home": Decimal("1.7")},
+        "verification_reason": "trusted_game_cross_frame_pair"})
+    await engine.process_event(Envelope(schema_name="odds.quote", source="test", payload=updated))
+    stored = engine.quotes[market.id][(first.provider, first.bookmaker)]
+    assert stored.verification_reason == "trusted_game_cross_frame_pair"
+    assert not engine.risk.orders and engine.risk.kill_switch
+
+
 def test_trusted_pilot_policy_is_disabled_and_requires_scoped_owner_review():
     assert not PricingConfig().trusted_pilot_policy.enabled
     with pytest.raises(ValueError):
