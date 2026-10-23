@@ -21,6 +21,8 @@ pluggy==1.7.0
 pycparser==3.11
 pydantic==2.14.1
 pydantic-settings==2.16.1
+polymarket-us==2.4.1
+PyNaCl==1.6.2
 pydantic_core==2.50.1
 Pygments==2.21.0
 pytest==9.1.1

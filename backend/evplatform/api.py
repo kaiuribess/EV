@@ -180,6 +180,10 @@ def create_app(settings=None):
     async def prophetx_market_data(limit: int = Query(20, ge=1, le=100)):
         return engine.native.prophetx_research_books(limit=limit)
 
+    @app.get("/api/native/market-data/polymarket-us")
+    async def polymarket_us_market_data(limit: int = Query(20, ge=1, le=50)):
+        return engine.native.polymarket_us_research_books(limit=limit)
+
     @app.get("/api/signals")
     async def signal_history(limit: int = Query(25, ge=1, le=200),
                              offset: int = Query(0, ge=0), synthetic: bool = True):

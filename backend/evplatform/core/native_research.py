@@ -415,8 +415,10 @@ def compare_minimum_lot(match: ResearchNativeMatch, probability: Decimal, levels
                           "Account, quarter-Kelly, risk and owner approval are not established"]}
     if not levels:
         return {**result, "rejection": "No synchronized executable opposing bid depth"}
-    quantity = D("1") if match.venue == "kalshi" else D("100")
-    payout_per_contract = D("1") if match.venue == "kalshi" else D("0.01")
+    payout_per_contract = D(match.price_denomination_usd)
+    if not payout_per_contract.is_finite() or payout_per_contract <= 0:
+        return {**result, "rejection": "Unknown native payout denomination"}
+    quantity = D("1") / payout_per_contract
     if not D(0) <= probability <= D(1):
         return {**result, "rejection": "Invalid fair probability"}
     remaining, cost, fee = quantity, D(0), D(0)
@@ -464,7 +466,7 @@ def compare_minimum_lot(match: ResearchNativeMatch, probability: Decimal, levels
     result.update({"price": str(price), "limit_price": str(worst_price),
                    "available_depth_contracts": str(total_depth),
                    "available_at_best_price": str(first_depth),
-                   "comparison_quantity": str(quantity), "normal_payout_usd": str(payout),
+                   "comparison_quantity": format(quantity, "f"), "normal_payout_usd": f"{payout:.2f}",
                    "cash_cost_usd": str(cost), "gross_estimated_profit_usd": str(gross),
                    "gross_edge_probability": str(probability-price), "taker_fee_usd": str(fee),
                    "fee_adjusted_estimated_profit_usd": str(after_fee),

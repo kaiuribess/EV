@@ -14,6 +14,7 @@ import { candidateCounts, candidateIsResearch, candidateCanQualify, candidateDis
 import { NativeOrders } from './NativeOrders'
 import { ManualNativeTrade } from './ManualNativeTrade'
 import { NativeResearchReview, ResearchHistory } from './NativeResearchReview'
+import { PolymarketUSMarkets } from './PolymarketUSMarkets'
 import { providerFacts, verifiedObservationAge } from './providerTelemetry'
 import { clockTime, duration, eventName, human, isNegative, isPositive, marketName, money, num, percent, probabilityOdds, qualifies as priceQualifies, text, type Json, type Page, type State } from './types'
 
@@ -104,7 +105,7 @@ function App() {
         {!freshState && <div className="notice connection-notice"><Unplug size={17} /><span><strong>{updatedAt ? 'Connection interrupted.' : 'Waiting for the local engine.'}</strong> {updatedAt ? 'Displayed data is the last received snapshot. Actions are disabled until it reconnects.' : 'Start the backend with start_demo.ps1 to stream the deterministic sample markets.'}</span>{error && <span className="technical-error">{error}</span>}</div>}
         {livePaperInputs && <div className="notice connection-notice"><Radio size={17} /><span><strong>Live Parlay input, hypothetical paper bets.</strong> Parlay prices feed the paper-only sportsbook comparison. Quote status, settlement rules, and offered stake are assumed; fills and capacity are simulated. Native trading remains off.</span></div>}
         {page === 'opportunities' && <Opportunities state={state} history={history} selectMarket={setSelectedMarket} setPage={setPage} />}
-        {page === 'markets' && <><Markets state={state} selectMarket={setSelectedMarket} /><ResearchHistory entries={state.research_history ?? []} /></>}
+        {page === 'markets' && <><Markets state={state} selectMarket={setSelectedMarket} /><PolymarketUSMarkets /><ResearchHistory entries={state.research_history ?? []} /></>}
         {page === 'providers' && <Providers state={state} mutate={mutate} notify={notify} connected={freshState} />}
         {page === 'trading' && <Trading state={state} control={control} busy={busy || !freshState} mutate={mutate} notify={notify} />}
         {page === 'performance' && <Performance state={state} history={history} />}

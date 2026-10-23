@@ -354,12 +354,15 @@ class NativeMonitor(Plugin):
             self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
             return
         credentials = self.credential_names(context.config)
-        if not all(os.getenv(env) for env in credentials.values()):
+        has_credentials = all(os.getenv(env) for env in credentials.values())
+        public_polymarket = (self.manifest.name == "polymarket_us"
+                             and bool(context.config.get("discovery_leagues")))
+        if not has_credentials and not public_polymarket:
             self.config_error = "Complete the selected backend credential pair; credentials from another profile are not substituted"
             return
         self.client = self.factory(self.settings_factory(
             environment=context.config.get("environment", "sandbox"),
-            **{key: os.environ[env] for key, env in credentials.items()}))
+            **{key: os.environ[env] for key, env in credentials.items() if has_credentials}))
         if self.manifest.name == "novig":
             # Management metadata is a read-only permission witness. It is
             # never used as the execution signer or substituted for a missing
@@ -376,15 +379,20 @@ class NativeMonitor(Plugin):
         if self.manifest.name == "prophetx":
             review = context.config.get("account_review")
             self.client.account_review = ProphetXAccountReview.model_validate(review) if review else None
-        try:
-            await self.client.connect()
-        except Exception:
-            if self.client.health_check()["state"] in {
-                "credentials_missing", "unauthorized", "access_denied", "geolocation_required",
-                "session_limit", "auth_outcome_unknown", "auth_refresh_failed",
-            }:
-                return
-            raise
+        if has_credentials:
+            try:
+                await self.client.connect()
+            except Exception:
+                if self.client.health_check()["state"] in {
+                    "credentials_missing", "unauthorized", "access_denied", "geolocation_required",
+                    "session_limit", "auth_outcome_unknown", "auth_refresh_failed",
+                }:
+                    if not public_polymarket:
+                        return
+                else:
+                    raise
+        elif public_polymarket:
+            self.client.health = "public_research"
         if self.manifest.name == "prophetx" and context.config.get("discovery_tournament_ids"):
             await self._refresh_discovery()
         if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
@@ -393,6 +401,12 @@ class NativeMonitor(Plugin):
             await self._refresh_kalshi_discovery()
         if self.manifest.name == "polymarket_us" and context.config.get("discovery_leagues"):
             await self._refresh_polymarket_discovery()
+        if public_polymarket and not self.client.authenticated:
+            # Public SDK catalog and REST books do not require a retail key.
+            # No private or market WebSocket is opened without authentication.
+            self.discovery_task = asyncio.create_task(self._discover_polymarket_periodically(),
+                                                      name="polymarket-us-public-discovery")
+            return
         configure = getattr(self.client, "configure_subscriptions", None)
         if configure is not None:
             if self.manifest.name == "prophetx":
@@ -498,7 +512,7 @@ class NativeMonitor(Plugin):
         """Use already-fetched catalogs; only exact candidate metadata adds reads."""
         from ..core.native_research import (NOVIG_PROP_TYPES, kalshi_moneyline_matches, kalshi_mlb_matches,
             novig_moneyline_matches, novig_prop_matches)
-        if self.manifest.name not in {"kalshi", "novig"} or self.research_catalog_at is None:
+        if self.manifest.name not in {"kalshi", "novig", "polymarket_us"} or self.research_catalog_at is None:
             return []
         markets = [self.engine.markets[market_id] for market_id in self.engine.reference_estimates
                    if market_id in self.engine.markets]
@@ -543,7 +557,12 @@ class NativeMonitor(Plugin):
                     continue
         result, priority = {}, []
         for market in markets:
-            matches = ((kalshi_moneyline_matches(market, self.research_catalog_rows,
+            if self.manifest.name == "polymarket_us":
+                from ..integrations.polymarket_us_research import moneyline_matches
+                matches = moneyline_matches(market, self.research_catalog_rows,
+                                            observed_at=self.research_catalog_at)
+            else:
+                matches = ((kalshi_moneyline_matches(market, self.research_catalog_rows,
                         observed_at=self.research_catalog_at) if market.league == "NBA" else
                         kalshi_mlb_matches(market, self.research_catalog_rows,
                         observed_at=self.research_catalog_at)) if self.manifest.name == "kalshi" else
@@ -651,6 +670,7 @@ class NativeMonitor(Plugin):
 
     async def _refresh_polymarket_discovery(self):
         from ..integrations.polymarket_us_discovery import balanced_open_moneylines
+        from ..integrations.polymarket_us_research import catalog_record
 
         config = self.context.config
         try:
@@ -659,23 +679,51 @@ class NativeMonitor(Plugin):
             selected, truncated = balanced_open_moneylines(pages,
                 leagues=config["discovery_leagues"], now=utcnow(),
                 max_markets=config.get("max_discovered_markets", 8))
+            catalog = []
+            for slug in selected:
+                found = [(league, event, market)
+                         for league, league_pages in zip(config["discovery_leagues"], pages)
+                         for page in league_pages for event in page["events"]
+                         for market in event.get("markets", []) if market.get("slug") == slug]
+                if len(found) != 1:
+                    raise ValueError("Ambiguous Polymarket US event/market catalog")
+                league, event, listed = found[0]
+                current = await self.client.public_market_metadata(slug)
+                if (current.get("id") != listed.get("id")
+                        or current.get("gameStartTime") != listed.get("gameStartTime")):
+                    raise ValueError("Polymarket US SDK market identity changed during discovery")
+                catalog.append(catalog_record(league, event, current, observed_at=utcnow()))
+                await self.client.fetch_snapshot(slug)
         except asyncio.CancelledError:
             raise
         except Exception:
             self.discovery_status = "read_failed"
             return
-        self.discovered_market_ids = selected
+        self.research_catalog_rows = catalog
+        self.research_catalog_at = utcnow()
+        priority = await self._refresh_research_matches()
+        self.discovered_market_ids = list(dict.fromkeys([*priority, *selected]))[:config.get("max_discovered_markets", 8)]
         self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
 
     async def _discover_polymarket_periodically(self):
         from ..venues.polymarket_us import PolymarketUSMonitorConfig
 
         try:
+            elapsed = 0
+            interval = self.context.config.get("discovery_interval_seconds", 300)
             while True:
-                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
-                await self._refresh_polymarket_discovery()
+                step = min(5, interval - elapsed)
+                await asyncio.sleep(step)
+                elapsed += step
+                if elapsed >= interval:
+                    await self._refresh_polymarket_discovery()
+                    elapsed = 0
+                elif NativeMonitor._research_match_refresh_due(self, elapsed):
+                    await self._refresh_research_matches()
                 if self.discovery_status == "read_failed":
                     continue
+                if not self.client.authenticated:
+                    continue  # public REST research stays available without keys
                 selected = list(dict.fromkeys([*self.context.config.get("market_slugs", []),
                                                *self.discovered_market_ids]))
                 if selected == self._subscribed_market_ids:

@@ -99,10 +99,21 @@ async def test_monitor_keeps_previous_scope_on_discovery_failure(monkeypatch):
                 raise RuntimeError("provider unavailable")
             return [page(league, [event(f"{league}-next", NOW + timedelta(hours=2))])]
 
+        async def public_market_metadata(self, slug):
+            league = slug.split("-")[1]
+            return event(f"{league}-next", NOW + timedelta(hours=2))["markets"][0]
+
+        async def fetch_snapshot(self, slug):
+            return {"marketData": {"marketSlug": slug}}
+
+    async def no_matches():
+        return []
+
     client = Client()
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_leagues": ["nba", "nhl"], "max_discovered_markets": 2}),
-        discovery_status="disabled", discovered_market_ids=[])
+        discovery_status="disabled", discovered_market_ids=[],
+        _refresh_research_matches=no_matches)
     await NativeMonitor._refresh_polymarket_discovery(monitor)
     assert monitor.discovered_market_ids == ["aec-nba-next", "aec-nhl-next"]
     client.fail = True
@@ -118,13 +129,14 @@ async def test_rotation_restarts_read_only_stream_with_new_baseline(monkeypatch)
     async def one_cycle(_):
         nonlocal cycles
         cycles += 1
-        if cycles > 1:
+        if cycles > 12:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
 
     class Client:
         configured = []
+        authenticated = True
 
         async def configure_subscriptions(self, config):
             self.configured.append(config["market_slugs"])
@@ -136,12 +148,16 @@ async def test_rotation_restarts_read_only_stream_with_new_baseline(monkeypatch)
         monitor.discovered_market_ids = ["aec-nhl-next"]
         monitor.discovery_status = "current"
 
+    async def no_matches():
+        return []
+
     monitor = SimpleNamespace(client=Client(), context=SimpleNamespace(config={
         "environment": "production", "market_slugs": [], "private_updates": True,
         "discovery_leagues": ["nhl"], "max_discovered_markets": 8,
         "discovery_interval_seconds": 60}), discovery_status="current",
         discovered_market_ids=["aec-nba-old"], _subscribed_market_ids=["aec-nba-old"],
-        _refresh_polymarket_discovery=refresh, _run=run, task=asyncio.create_task(run()))
+        _refresh_polymarket_discovery=refresh, _refresh_research_matches=no_matches,
+        _last_research_source_ids=frozenset(), _run=run, task=asyncio.create_task(run()))
     try:
         with pytest.raises(asyncio.CancelledError):
             await NativeMonitor._discover_polymarket_periodically(monitor)

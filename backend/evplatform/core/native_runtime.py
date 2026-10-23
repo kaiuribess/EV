@@ -203,14 +203,17 @@ class NativeRuntime:
         market_margins = scoped.trusted_research_market_margins
         margin = market_margins.get(market.id, scoped.trusted_research_margin_probability)
         output = []
-        for venue in ("kalshi", "novig"):
+        for venue in ("kalshi", "novig", "polymarket_us"):
             record = self.engine.registry.records.get(venue)
             monitor = record.plugin if record else None
             client = getattr(monitor, "client", None)
+            stream_ok = bool(getattr(monitor, "task", None) and not monitor.task.done()
+                             and client is not None and client.health_check().get("streaming"))
+            public_poly = (venue == "polymarket_us" and client is not None
+                           and bool(getattr(client, "rest_books", {})))
             if (not record or not record.enabled or client is None
                     or client.settings.environment != self.engine.settings.mode
-                    or not getattr(monitor, "task", None) or monitor.task.done()
-                    or not client.health_check().get("streaming")
+                    or not (stream_ok or public_poly)
                     or getattr(monitor, "research_catalog_at", None) is None
                     or (now-monitor.research_catalog_at).total_seconds() > 2 * monitor.context.config.get(
                         "discovery_interval_seconds", 300)):
@@ -243,6 +246,22 @@ class NativeRuntime:
                             metadata["event_changes"], price, qty, now=now)
                     else:
                         fee_for = lambda price, qty: (_ for _ in ()).throw(ValueError("Kalshi fee metadata missing"))
+                elif venue == "polymarket_us":
+                    from ..integrations.polymarket_us_research import current_book, direction_levels, taker_fee
+                    native = next((row for row in monitor.research_catalog_rows
+                                   if row.get("slug") == match.native_market_id), None)
+                    if native is None:
+                        continue
+                    book = current_book(native, client, now=now,
+                                        stream_connected=client.health_check().get("market_streaming") is True)
+                    levels = direction_levels(book, match.side)
+                    fee_evidence = {"source": "Polymarket US market feeCoefficient and current fee schedule",
+                        "observed_at": monitor.research_catalog_at.isoformat(),
+                        "coefficient": native.get("fee_coefficient"), "book_source": book.get("source"),
+                        "book_source_time": book.get("source_time"),
+                        "book_rejection": book.get("rejection"),
+                        "fee_rounding": "nearest cent, half even; one-fill research estimate"}
+                    fee_for = lambda price, qty, native=native: taker_fee(native, price, qty)
                 else:
                     levels = client.book.asks(match.native_market_id, match.opposing_outcome_id)
                     native = next((row for row in monitor.research_catalog_rows
@@ -260,6 +279,27 @@ class NativeRuntime:
                         native, event, price, qty)
                 result = compare_minimum_lot(match, fair.probabilities[match.outcome], levels,
                     fee_for=fee_for, uncertainty_margin_probability=margin, now=now)
+                if venue == "polymarket_us":
+                    result["native_order_direction"] = "BUY_LONG" if match.side == "long" else "SELL_SHORT"
+                    result["instrument_outcome"] = next((s["description"] for s in native["sides"]
+                        if s["long"]), None)
+                    result["short_collateral_note"] = ("Short posts $1 margin per contract; YES sale proceeds offset "
+                        "buying-power use. No separate NO instrument or book exists.") if match.side == "short" else None
+                    if result.get("comparison_quantity") and result.get("cash_cost_usd"):
+                        quantity = Decimal(result["comparison_quantity"])
+                        result["margin_locked_usd"] = str(quantity) if match.side == "short" else "0"
+                        result["sale_proceeds_usd"] = str(quantity-Decimal(result["cash_cost_usd"])) if match.side == "short" else "0"
+                        result["buying_power_required_usd"] = str(Decimal(result["cash_cost_usd"])
+                            + Decimal(result["taker_fee_usd"]))
+                    try:
+                        if Decimal(native["minimum_quantity"]) > Decimal(1):
+                            result["positive_after_costs"] = False
+                            result["net_estimated_profit_usd"] = None
+                            result["rejection"] = "Native minimum quantity exceeds the one-contract research lot"
+                    except (ValueError, TypeError, ArithmeticError):
+                        result["positive_after_costs"] = False
+                        result["net_estimated_profit_usd"] = None
+                        result["rejection"] = "Native minimum quantity is unknown"
                 result["fee_evidence"] = fee_evidence
                 result["fair_probability"] = str(fair.probabilities[match.outcome])
                 result["reference_profile_id"] = fair.reference_profile_id
@@ -758,6 +798,66 @@ class NativeRuntime:
         return {"available": True, "environment": client.settings.environment,
                 "streaming": connected,
                 **client.public_market_data.snapshot(now=utcnow(), connected=connected, limit=limit)}
+
+    def polymarket_us_research_books(self, *, limit: int = 20) -> dict:
+        """Current public/streamed US instrument depth, before mapping approval."""
+        from ..integrations.polymarket_us_research import current_book, direction_levels, taker_fee
+        from decimal import Decimal
+
+        record = self.engine.registry.records.get("polymarket_us")
+        monitor = record.plugin if record and record.enabled else None
+        client = getattr(monitor, "client", None)
+        if client is None:
+            return {"available": False, "markets": [], "read_only": True,
+                    "reason": "Polymarket US public discovery is not enabled"}
+        now = utcnow()
+        catalog_at = getattr(monitor, "research_catalog_at", None)
+        catalog_current = bool(catalog_at and 0 <= (now-catalog_at).total_seconds()
+                               <= 2*monitor.context.config.get("discovery_interval_seconds", 300))
+        stream_connected = client.health_check().get("market_streaming") is True
+        rows = []
+        for native in getattr(monitor, "research_catalog_rows", [])[:limit]:
+            book = current_book(native, client, now=now, stream_connected=stream_connected)
+            if not catalog_current:
+                book = {**book, "current": False, "bids": [], "offers": [],
+                        "rejection": "Native catalog has expired"}
+            directions = []
+            for direction in ("long", "short"):
+                levels = direction_levels(book, direction)
+                first_price, first_qty = levels[0] if levels else (None, None)
+                fee = None
+                if first_price is not None:
+                    try:
+                        fee = str(taker_fee(native, first_price, min(Decimal(1), first_qty)))
+                    except (ValueError, TypeError, ArithmeticError):
+                        pass
+                directions.append({"direction": direction, "outcome": next((s["description"] for s in native["sides"]
+                    if s["long"] == (direction == "long")), None),
+                    "native_price": str(first_price if direction == "long" else 1-first_price) if first_price is not None else None,
+                    "effective_win_cost_usd": str(first_price) if first_price is not None else None,
+                    "available_contracts": str(first_qty) if first_qty is not None else "0",
+                    "one_contract_taker_fee_usd": fee,
+                    "margin_locked_per_contract_usd": "1" if direction == "short" else "0",
+                    "sale_proceeds_per_contract_usd": str(1-first_price) if direction == "short" and first_price is not None else None})
+            rows.append({"slug": native["slug"], "event_slug": native["event_slug"],
+                         "league": native["league"], "event": native["event_title"],
+                         "question": native["question"], "market_type": native["market_type"],
+                         "market_status": native["status"], "book_state": book.get("state"),
+                         "book_source": book.get("source"), "source_time": book.get("source_time"),
+                         "source_age_seconds": book.get("source_age_seconds"),
+                         "current": book.get("current", False), "rejection": book.get("rejection"),
+                         "fee_coefficient": native.get("fee_coefficient"),
+                         "minimum_quantity": native.get("minimum_quantity"),
+                         "bid_levels": book.get("bids", [])[:5], "offer_levels": book.get("offers", [])[:5],
+                         "directions": directions, "mapping_reviewed": False,
+                         "execution_eligible": False})
+        return {"available": True, "environment": client.settings.environment,
+                "authenticated": client.authenticated, "market_streaming": stream_connected,
+                "catalog_at": catalog_at.isoformat() if catalog_at else None,
+                "catalog_current": catalog_current, "discovered_count": len(getattr(monitor, "research_catalog_rows", [])),
+                "subscribed_count": len(client.market_slugs),
+                "current_market_count": sum(row["current"] for row in rows),
+                "markets": rows, "read_only": True, "execution_eligible": False}
 
     def runtime_facts(self, venue=None):
         from decimal import Decimal
