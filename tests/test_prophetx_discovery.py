@@ -337,8 +337,41 @@ async def test_recovered_catalog_reconnects_with_events_after_startup_read_failu
         discovery_status="read_failed", discovered_event_ids=[], discovered_prop_subtypes={},
         _subscribed_event_ids=[], _subscribed_prop_subtypes={}, _refresh_discovery=refresh, frames=0)
     await NativeMonitor._run(monitor)
+    await monitor.recovery_task
     assert client.calls == [(["123"], {"123": ["player_total_points"]})]
     assert monitor._subscribed_event_ids == ["123"]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_catalog_refresh_does_not_block_talaria_message_loop():
+    refresh_started, release_refresh = asyncio.Event(), asyncio.Event()
+
+    class Client:
+        public_market_data = SimpleNamespace(catalog_at=None)
+
+        async def stream_updates(self):
+            yield {"type": "snapshot_required"}
+            await refresh_started.wait()
+            yield {"event": "pusher:ping"}
+
+    async def refresh():
+        refresh_started.set()
+        await release_refresh.wait()
+        monitor.discovery_status = "read_failed"
+
+    async def observe(*args):
+        return None
+
+    monitor = SimpleNamespace(client=Client(), manifest=SimpleNamespace(name="prophetx",
+        capabilities={"native_event_forwarding": True}), context=SimpleNamespace(config={
+        "event_ids": [], "prop_subtypes": {}, "discovery_tournament_ids": [132]}),
+        engine=SimpleNamespace(native=SimpleNamespace(on_frame=observe),
+            metrics=SimpleNamespace(counters=defaultdict(int))),
+        discovery_status="current", _refresh_discovery=refresh, frames=0)
+    await asyncio.wait_for(NativeMonitor._run(monitor), timeout=1)
+    assert monitor.frames == 2 and not monitor.recovery_task.done()
+    release_refresh.set()
+    await monitor.recovery_task
 
 
 def test_catalog_endpoint_requires_one_scope_and_connected_monitor(tmp_path, monkeypatch):

@@ -325,6 +325,8 @@ class NativeMonitor(Plugin):
         self.client, self.task = None, None
         self.management_client = None
         self.discovery_task = None
+        self.recovery_task = None
+        self._discovery_lock = asyncio.Lock()
         self.frames = 0
         self.config_error = ""
         self.discovery_status = "disabled"
@@ -835,6 +837,13 @@ class NativeMonitor(Plugin):
             raise
 
     async def _refresh_discovery(self):
+        lock = getattr(self, "_discovery_lock", None)
+        if lock is None:  # Lightweight offline monitor fixtures.
+            return await NativeMonitor._refresh_discovery_once(self)
+        async with lock:
+            return await NativeMonitor._refresh_discovery_once(self)
+
+    async def _refresh_discovery_once(self):
         from ..integrations.prophetx_discovery import active_tournament_ids, open_event_ids
         from ..core.native_research import _aware
         try:
@@ -960,6 +969,26 @@ class NativeMonitor(Plugin):
             props[event_id] = list(dict.fromkeys([*props.get(event_id, []), *subtypes]))
         return props
 
+    async def _recover_prophetx_catalog(self):
+        try:
+            await self._refresh_discovery()
+            if self.discovery_status != "current":
+                return
+            selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
+                                           *self.discovered_event_ids]))
+            props = NativeMonitor._prophetx_prop_scope(self)
+            if selected != self._subscribed_event_ids or props != self._subscribed_prop_subtypes:
+                # A changed declarative scope needs a fresh registration. A
+                # matching scope keeps the socket alive while REST recovers.
+                await self.client.subscribe(selected, props)
+                self._subscribed_event_ids = selected
+                self._subscribed_prop_subtypes = props
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.discovery_status = "subscription_failed"
+            self.discovery_error_type = type(exc).__name__
+
     async def _discover_periodically(self):
         try:
             elapsed = 0
@@ -1001,20 +1030,14 @@ class NativeMonitor(Plugin):
                         and self.client.public_market_data.catalog_at is None
                         and (self.context.config.get("discovery_tournament_ids")
                              or self.context.config.get("discovery_leagues"))):
-                    # Reconnect clears old depth. Refresh exact REST identity and
-                    # status once, then wait for new scoped v2 selection messages.
-                    await self._refresh_discovery()
-                    if self.discovery_status == "current":
-                        selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
-                                                       *self.discovered_event_ids]))
-                        props = NativeMonitor._prophetx_prop_scope(self)
-                        if selected != self._subscribed_event_ids or props != self._subscribed_prop_subtypes:
-                            # A failed startup read registered only private/system
-                            # channels. Close that socket so the next registration
-                            # includes the newly discovered market scope.
-                            await self.client.subscribe(selected, props)
-                            self._subscribed_event_ids = selected
-                            self._subscribed_prop_subtypes = props
+                    # Reconnect clears old depth. A multi-league REST refresh
+                    # must not block Talaria sign-in and channel confirmation.
+                    # catalog_at=None keeps all depth non-executable meanwhile.
+                    task = getattr(self, "recovery_task", None)
+                    if task is None or task.done():
+                        self.recovery_task = asyncio.create_task(
+                            NativeMonitor._recover_prophetx_catalog(self),
+                            name="prophetx-catalog-recovery")
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
                 if frame.get("type") == "transport_invalidated":
@@ -1040,6 +1063,10 @@ class NativeMonitor(Plugin):
                 await self.engine.native.on_frame(self.manifest.name, self.client, {"type": "transport_invalidated"})
 
     async def stop(self):
+        if self.recovery_task:
+            self.recovery_task.cancel()
+            await asyncio.gather(self.recovery_task, return_exceptions=True)
+            self.recovery_task = None
         if self.discovery_task:
             self.discovery_task.cancel()
             await asyncio.gather(self.discovery_task, return_exceptions=True)
