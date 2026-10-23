@@ -366,9 +366,15 @@ def test_novig_review_lead_keeps_exact_fee_phase_evidence(monkeypatch):
     current = utcnow()
     found = novig_prop_matches(prop_market(), novig_prop_rows(), {E: novig_event()},
         observed_at=current)
+    book = NovigBook()
+    book.apply({"ts": int(current.timestamp() * 1000), "snapshot": {M: {
+        "lifecycle": {"seq": 1, "status": "OPEN"},
+        "book": {"seq": 1, "orders": {B: [
+            {"orderId": "real-shape-under-bid", "price": "0.420", "qty": 6027}],
+            A: [{"orderId": "real-shape-over-bid", "price": "0.580", "qty": 6027}]}}}}})
     monitor = SimpleNamespace(client=SimpleNamespace(
         settings=SimpleNamespace(environment="production"),
-        book=SimpleNamespace(asks=lambda *_: [(D("0.58"), D("6027"))]),
+        book=book,
         health_check=lambda: {"streaming": True}),
         task=SimpleNamespace(done=lambda: False),
         context=SimpleNamespace(config={"discovery_interval_seconds": 300}),
@@ -392,6 +398,11 @@ def test_novig_review_lead_keeps_exact_fee_phase_evidence(monkeypatch):
     without_fee = NativeRuntime.research_comparisons(runtime, prop_market(), fair)
     assert all(item["rejection"] == "Applicable native fee metadata is unavailable"
                for item in without_fee)
+    monitor.research_catalog_rows[0]["fee"] = novig_prop_rows()[0]["fee"]
+    book.reset()
+    disconnected = NativeRuntime.research_comparisons(runtime, prop_market(), fair)
+    assert all(item["rejection"] == "No synchronized executable opposing bid depth"
+               for item in disconnected)
 
 
 def test_exact_research_review_draft_persists_without_approving_mapping(tmp_path):
