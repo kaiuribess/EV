@@ -240,6 +240,91 @@ class NativeRuntime:
                                 f"Novig catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
         return reasons
 
+    def research_venue_funnel(self, market, comparisons):
+        """Explain each read-only venue's first observed stop, without new API calls."""
+        from .native_research import NOVIG_PROP_TYPES
+
+        by_venue = {}
+        for item in comparisons:
+            by_venue.setdefault(item["venue"], []).append(item)
+        conflicts = self.research_identity_rejections(market)
+        result = {}
+        for venue in ("kalshi", "novig", "prophetx", "polymarket_us"):
+            record = self.engine.registry.records.get(venue)
+            monitor = record.plugin if record and record.enabled else None
+            if monitor is None:
+                result[venue] = {"stage": "disconnected", "reason": "Native monitor is disabled"}
+                continue
+            if venue == "kalshi":
+                supported = (market.league == "NBA" and market.market_type == "moneyline"
+                    or market.league == "MLB" and market.market_type in {"moneyline", "total"})
+            elif venue == "novig":
+                supported = (market.market_type == "moneyline"
+                    or market.market_type == "player_prop" and market.statistic in NOVIG_PROP_TYPES)
+            elif venue == "prophetx":
+                supported = market.market_type in {"moneyline", "player_prop"}
+            else:
+                supported = market.market_type == "moneyline"
+            if not supported:
+                result[venue] = {"stage": "unsupported_family",
+                    "reason": f"The reviewed {venue} research matcher does not support this sport/market family"}
+                continue
+            catalog_at = getattr(monitor, "research_catalog_at", None)
+            if catalog_at is None or getattr(monitor, "discovery_status", None) in {"read_failed", "disabled"}:
+                result[venue] = {"stage": "catalog_unavailable",
+                    "reason": f"Native catalog unavailable ({getattr(monitor, 'discovery_status', 'unknown')})"}
+                continue
+            now = utcnow()
+            catalog_limit = 2 * monitor.context.config.get("discovery_interval_seconds", 300)
+            if (now-catalog_at).total_seconds() > catalog_limit:
+                result[venue] = {"stage": "catalog_expired",
+                    "reason": "Native catalog is older than its bounded discovery interval",
+                    "catalog_observed_at": catalog_at.isoformat()}
+                continue
+            matches = getattr(monitor, "research_matches", {}).get(market.id, ())
+            if not matches:
+                conflict = next((item["reason"] for item in conflicts if item["venue"] == venue), None)
+                result[venue] = {"stage": "identity_rejected" if conflict else "not_discovered",
+                    "reason": conflict or "No exact event/outcome/period/threshold identity in the bounded native catalog",
+                    "catalog_observed_at": catalog_at.isoformat()}
+                continue
+            subscribed = getattr(monitor, "_subscribed_event_ids", ()) if venue == "prophetx" else (
+                getattr(monitor, "_subscribed_market_ids", ()))
+            def is_subscribed(match):
+                if venue != "prophetx":
+                    return match.native_market_id in subscribed
+                if match.native_event_id not in subscribed:
+                    return False
+                if market.market_type != "player_prop":
+                    return True
+                catalog = getattr(monitor.client.public_market_data, "catalog", {})
+                native = catalog.get((match.native_event_id, match.native_market_id), {})
+                return native.get("sub_type") in getattr(monitor, "_subscribed_prop_subtypes", {}).get(
+                    match.native_event_id, ())
+            in_scope = any(is_subscribed(match) for match in matches)
+            offers = by_venue.get(venue, ())
+            client = getattr(monitor, "client", None)
+            stream_ok = bool(client and getattr(monitor, "task", None)
+                and not monitor.task.done() and client.health_check().get("streaming"))
+            public_poly = venue == "polymarket_us" and client is not None and bool(
+                getattr(client, "rest_books", {}))
+            if not (stream_ok or public_poly):
+                stage, reason = "stream_unavailable", "Native market-data connection is unavailable"
+            elif not in_scope:
+                stage, reason = "not_subscribed", "Exact native market exists but is outside the current subscription slots"
+            elif not offers:
+                stage, reason = "book_unavailable", "Subscribed exact market has no current comparison; check book, catalog and fee clocks"
+            elif not any(offer.get("price") is not None for offer in offers):
+                stage, reason = "depth_or_fee_rejected", next((offer.get("rejection") for offer in offers
+                    if offer.get("rejection")), "No executable depth or verified fee at the comparison size")
+            else:
+                stage, reason = "priced_research", "Executable native offer compared; inspect fees and uncertainty separately"
+            result[venue] = {"stage": stage, "reason": reason,
+                "catalog_observed_at": catalog_at.isoformat(),
+                "exact_native_matches": len(matches), "subscribed": in_scope,
+                "comparison_directions": len(offers)}
+        return result
+
     def research_comparisons(self, market, fair, *, pricing_config=None):
         """Compare research fair values with existing read-only native streams.
 

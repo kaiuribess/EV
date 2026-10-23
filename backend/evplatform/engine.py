@@ -638,6 +638,8 @@ class Engine:
                            "native_discovery_reason": discovery_reason,
                            "native_identity_rejections": (self.native.research_identity_rejections(market)
                                if hasattr(self.native, "research_identity_rejections") else []),
+                           "native_venue_funnel": (self.native.research_venue_funnel(market, comparisons)
+                               if market and hasattr(self.native, "research_venue_funnel") else {}),
                            "native_match_count": len({(item["venue"], item["native_market_id"])
                                                       for item in comparisons}),
                            "status": ("PROVISIONAL POSITIVE EV" if any(
@@ -1053,6 +1055,9 @@ class Engine:
         }
 
     def state(self):
+        from .core.cross_exchange_arb import scan_arbitrage_research
+
+        research_rows = self.public_reference_estimates()
         orders = list(self.risk.orders.values())
         filled = [o for o in orders if o.filled_quantity]
         positions = [{
@@ -1078,7 +1083,8 @@ class Engine:
             "markets": [m.model_dump(mode="json") for m in self.markets.values()],
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
             "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
-            "reference_estimates": self.public_reference_estimates(),
+            "reference_estimates": research_rows,
+            "arbitrage_research": scan_arbitrage_research(research_rows),
             "research_history": list(reversed(self.research_history))[:50],
             "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
             "native_orders": [o.model_dump(mode="json") for o in list(self.risk.native_orders.values())[-200:]],

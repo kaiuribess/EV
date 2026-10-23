@@ -537,8 +537,17 @@ class NativeMonitor(Plugin):
         if self.manifest.name not in {"kalshi", "novig", "polymarket_us", "prophetx"} or self.research_catalog_at is None:
             return []
         research_ids = set(self.engine.reference_estimates) | set(getattr(self.engine, "consensus_estimates", {}))
-        markets = [self.engine.markets[market_id] for market_id in research_ids
-                   if market_id in self.engine.markets]
+        # Subscription capacity is scarce. Rank already-priced, exact source
+        # markets by independent sportsbook coverage before selecting native
+        # books. This changes monitoring only, never quote or order eligibility.
+        def source_rank(market_id):
+            row = getattr(self.engine, "consensus_estimates", {}).get(market_id) or self.engine.reference_estimates.get(market_id, {})
+            books = row.get("independent_book_count", len(row.get("references", ())))
+            return (-int(books >= 3), -books, self.engine.markets[market_id].start_time, market_id)
+
+        markets = [self.engine.markets[market_id] for market_id in sorted(
+            (market_id for market_id in research_ids if market_id in self.engine.markets),
+            key=source_rank)]
         source_ids = frozenset(market.id for market in markets)
         if self.manifest.name == "kalshi":
             # A short-lived fair set should not spend its overlap window
@@ -555,10 +564,10 @@ class NativeMonitor(Plugin):
             # names. Fetch only a bounded set of plausible events and require
             # the authoritative event description before matching.
             candidate_ids = []
-            for row in self.research_catalog_rows:
-                if row.get("status") != "OPEN":
-                    continue
-                for market in markets:
+            for market in markets:
+                for row in self.research_catalog_rows:
+                    if row.get("status") != "OPEN":
+                        continue
                     if market.market_type not in {"moneyline", "player_prop"} or market.league not in self.context.config.get("discovery_leagues", []):
                         continue
                     expected_type = ("MONEY" if market.market_type == "moneyline"
@@ -568,7 +577,6 @@ class NativeMonitor(Plugin):
                     start = row.get("startsTs")
                     if type(start) is int and abs(start - int(market.start_time.timestamp()*1000)) <= 120000:
                         candidate_ids.append(row.get("eventId"))
-                        break
             for event_id in list(dict.fromkeys(candidate_ids))[:32]:
                 if not isinstance(event_id, str) or event_id in self.research_events:
                     continue
@@ -703,11 +711,17 @@ class NativeMonitor(Plugin):
         try:
             pages = [await self.client.discover_league_events(league)
                      for league in config["discovery_leagues"]]
-            selected, truncated = balanced_open_moneylines(pages,
+            # Match against the bounded public catalog *before* using the
+            # eight-slot stream limit. Previously only the eight nearest
+            # baseline slugs entered research_catalog_rows, so an exact
+            # sportsbook event outside those slots could never be prioritized.
+            pool, pool_truncated = balanced_open_moneylines(pages,
+                leagues=config["discovery_leagues"], now=utcnow(), max_markets=50)
+            baseline, truncated = balanced_open_moneylines(pages,
                 leagues=config["discovery_leagues"], now=utcnow(),
                 max_markets=config.get("max_discovered_markets", 8))
             catalog = []
-            for slug in selected:
+            for slug in pool:
                 found = [(league, event, market)
                          for league, league_pages in zip(config["discovery_leagues"], pages)
                          for page in league_pages for event in page["events"]
@@ -718,14 +732,17 @@ class NativeMonitor(Plugin):
                 # The official league catalog already includes sides, rules,
                 # status, fee and tick metadata. An extra slug lookup for every
                 # row doubled the public request burst without adding scope.
-                if all(listed.get(field) is not None for field in (
-                        "marketSides", "description", "feeCoefficient", "orderPriceMinTickSize")):
+                complete = all(listed.get(field) is not None for field in (
+                    "marketSides", "description", "feeCoefficient", "orderPriceMinTickSize"))
+                if complete:
                     current = listed
-                else:
+                elif slug in baseline:
                     current = await self.client.public_market_metadata(slug)
                     if (current.get("id") != listed.get("id")
                             or current.get("gameStartTime") != listed.get("gameStartTime")):
                         raise ValueError("Polymarket US SDK market identity changed during discovery")
+                else:
+                    continue  # No extra broad per-slug reads for incomplete rows.
                 catalog.append(catalog_record(league, event, current, observed_at=utcnow()))
         except asyncio.CancelledError:
             raise
@@ -740,7 +757,7 @@ class NativeMonitor(Plugin):
         # public REST sample remains useful without credentials or as recovery,
         # but exhausting its separate quota must not discard the catalog or
         # prevent the full WebSocket subscription.
-        for slug in selected[:2]:
+        for slug in baseline[:2]:
             try:
                 await self.client.fetch_snapshot(slug)
             except asyncio.CancelledError:
@@ -749,8 +766,8 @@ class NativeMonitor(Plugin):
                 self.discovery_error_type = f"rest_snapshot_{type(exc).__name__}"
                 break
         priority = await self._refresh_research_matches()
-        self.discovered_market_ids = list(dict.fromkeys([*priority, *selected]))[:config.get("max_discovered_markets", 8)]
-        self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
+        self.discovered_market_ids = list(dict.fromkeys([*priority, *baseline]))[:config.get("max_discovered_markets", 8)]
+        self.discovery_status = "truncated" if truncated or pool_truncated else "current" if baseline else "empty"
 
     async def _discover_polymarket_periodically(self):
         from ..venues.polymarket_us import PolymarketUSMonitorConfig
@@ -804,21 +821,39 @@ class NativeMonitor(Plugin):
 
     async def _refresh_discovery(self):
         from ..integrations.prophetx_discovery import open_event_ids
+        from ..core.native_research import _aware
         try:
             tournaments = self.context.config.get("discovery_tournament_ids", [])
             payloads = [await self.client.discover_events(tournament_id=tournament_id)
                         for tournament_id in tournaments]
-            selected = open_event_ids(payloads, now=utcnow(),
-                max_events=self.context.config.get("max_discovered_events", 20))
+            pool = open_event_ids(payloads, now=utcnow(), max_events=50)
+            all_events = {str(row["event_id"]): {**row, "tournament_id": tournament_id}
+                for tournament_id, payload in zip(tournaments, payloads)
+                for row in payload.get("data", {}).get("sport_events", [])
+                if isinstance(row, dict) and str(row.get("event_id")) in pool}
+            engine = getattr(self, "engine", None)
+            source_rows = getattr(engine, "consensus_estimates", {})
+            known_markets = getattr(engine, "markets", {})
+            source_markets = [(known_markets[market_id], row.get("independent_book_count", 0))
+                for market_id, row in source_rows.items() if market_id in known_markets]
+            def event_rank(event_id):
+                event = all_events.get(event_id, {})
+                start = _aware(event.get("scheduled"))
+                score = max((count for market, count in source_markets
+                    if start is not None and event.get("name") == market.event_name
+                    and abs((start-market.start_time).total_seconds()) <= 120
+                    and (event.get("league") == market.league or
+                         market.league == "NBA" and event.get("tournament_id") == 132)), default=0)
+                return (-int(score >= 3), -score, pool.index(event_id))
+            selected = sorted(pool, key=event_rank)[:self.context.config.get("max_discovered_events", 20)]
             events = {}
-            for tournament_id, payload in zip(tournaments, payloads):
-                for row in payload.get("data", {}).get("sport_events", []):
-                    if isinstance(row, dict) and str(row.get("event_id")) in selected:
-                        events[str(row["event_id"])] = {**row, "tournament_id": tournament_id}
+            for event_id in selected:
+                if event_id in all_events:
+                    events[event_id] = all_events[event_id]
             market_payloads = [await self.client.discover_markets(selected[start:start+10])
                                for start in range(0, len(selected), 10)]
             props = {}
-            remaining = self.context.config.get("max_discovered_prop_subscriptions", 3)
+            prop_candidates = []
             for event_id in selected:
                 for payload in market_payloads:
                     rows = payload.get("data", {}).get(event_id, [])
@@ -827,18 +862,21 @@ class NativeMonitor(Plugin):
                             continue
                         subtype = row.get("sub_type")
                         selections = row.get("selections")
-                        if (remaining and row.get("status") == "active" and isinstance(subtype, str)
+                        if (row.get("status") == "active" and isinstance(subtype, str)
                                 and subtype.startswith("player_") and isinstance(selections, list)
                                 and selections and any(isinstance(group, list) and group for group in selections)
-                                and subtype not in props.get(event_id, [])):
-                            props.setdefault(event_id, []).append(subtype)
-                            remaining -= 1
-                        if not remaining:
-                            break
-                    if not remaining:
-                        break
-                if not remaining:
-                    break
+                                and (event_id, subtype) not in {(item[2], item[3]) for item in prop_candidates}):
+                            score = max((count for market, count in source_markets
+                                if market.market_type == "player_prop"
+                                and events[event_id].get("name") == market.event_name
+                                and row.get("player_id") == market.player_id
+                                and row.get("statistic") == market.statistic
+                                and row.get("period") in {"full", "full_game", "FULL"}
+                                and str(row.get("line")) == str(market.line)), default=0)
+                            prop_candidates.append((-int(score >= 3), -score, event_id, subtype))
+            for _, _, event_id, subtype in sorted(prop_candidates)[:self.context.config.get(
+                    "max_discovered_prop_subscriptions", 3)]:
+                props.setdefault(event_id, []).append(subtype)
             if hasattr(self.client, "public_market_data"):
                 observed_at = utcnow()
                 self.client.public_market_data.replace_catalog(market_payloads, selected, observed_at=observed_at)

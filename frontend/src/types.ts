@@ -9,6 +9,7 @@ export interface State extends Json {
   quotes: Json[]
   opportunities: Json[]
   reference_estimates: Json[]
+  arbitrage_research: Json[]
   orders: Json[]
   positions: Json[]
   metrics: Json
@@ -19,7 +20,7 @@ export interface State extends Json {
 }
 export const emptyState: State = {
   mode: 'disconnected', auto_trade: false, kill_switch: false, plugins: [],
-  markets: [], quotes: [], opportunities: [], reference_estimates: [], orders: [], positions: [],
+  markets: [], quotes: [], opportunities: [], reference_estimates: [], arbitrage_research: [], orders: [], positions: [],
   metrics: {}, risk: {}, events: [], signals: [], quarantine: [],
 }
 export const normalizeState = (data: Json): State => ({
@@ -29,6 +30,7 @@ export const normalizeState = (data: Json): State => ({
   quotes: Array.isArray(data.quotes) ? data.quotes : [],
   opportunities: Array.isArray(data.opportunities) ? data.opportunities : [],
   reference_estimates: Array.isArray(data.reference_estimates) ? data.reference_estimates : [],
+  arbitrage_research: Array.isArray(data.arbitrage_research) ? data.arbitrage_research : [],
   orders: Array.isArray(data.orders) ? data.orders : [],
   positions: Array.isArray(data.positions) ? data.positions : [],
   events: Array.isArray(data.events) ? data.events : [],
