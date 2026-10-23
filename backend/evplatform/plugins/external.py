@@ -1034,6 +1034,10 @@ class NativeMonitor(Plugin):
         subscription_count = (len(self._subscribed_event_ids) + sum(map(len, self._subscribed_prop_subtypes.values()))
             if self.manifest.name == "prophetx" else len(getattr(self, "_subscribed_market_ids", []))
             if self.manifest.name in {"kalshi", "novig", "polymarket_us"} else 0)
+        last_error = (state.get("last_error") or state.get("error") or state.get("last_auth_failure")
+            or getattr(self, "discovery_error_type", "") or None)
+        if last_error is None and status in {"blocked", "error"}:
+            last_error = state.get("reason") or None
         return {**state, "status": status,
                 "message": state.get("reason") or "Native monitor; normalized venue mapping and live preflight required for orders",
                 "frames": self.frames,
@@ -1045,7 +1049,7 @@ class NativeMonitor(Plugin):
                  "reconnect_count": getattr(self, "_reconnect_count", 0),
                  "oldest_valid_book_age_seconds": max(ages) if ages else None,
                  "data_stale": not bool(current),
-                 "last_reported_error": state.get("reason") or getattr(self, "discovery_error_type", "") or None,
+                 "last_reported_error": last_error,
                 "discovery_status": self.discovery_status,
                 **({"discovery_error_type": self.discovery_error_type}
                    if self.manifest.name in {"prophetx", "polymarket_us"} else {}),

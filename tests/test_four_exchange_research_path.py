@@ -146,6 +146,15 @@ def test_live_health_bypasses_frozen_cached_record_and_heartbeat_is_not_book():
     monitor._observe_market_frame(native_frame())
     live = monitor.health_snapshot()
     assert live["market_data_updates"] == 1 and live["valid_book_count"] == 1
+    assert live["last_reported_error"] is None
+    monitor.client.health_check = lambda: {"state": "streaming", "streaming": True,
+        "reason": "Authenticated subscription confirmed"}
+    assert monitor.health_snapshot()["last_reported_error"] is None
+    monitor.client.health_check = lambda: {"state": "access_denied", "streaming": False,
+        "reason": "API permission denied"}
+    assert monitor.health_snapshot()["last_reported_error"] == "API permission denied"
+    monitor.client.health_check = lambda: {"state": "streaming", "streaming": True,
+        "reason": ""}
     registry = PluginRegistry()
     registry.records["prophetx"] = PluginRecord(monitor, enabled=True,
         health={"status": "streaming", "market_data_updates": 0})
