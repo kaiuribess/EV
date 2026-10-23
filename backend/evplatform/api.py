@@ -176,6 +176,10 @@ def create_app(settings=None):
     async def state():
         return engine.state()
 
+    @app.get("/api/native/market-data/prophetx")
+    async def prophetx_market_data(limit: int = Query(20, ge=1, le=100)):
+        return engine.native.prophetx_research_books(limit=limit)
+
     @app.get("/api/signals")
     async def signal_history(limit: int = Query(25, ge=1, le=200),
                              offset: int = Query(0, ge=0), synthetic: bool = True):

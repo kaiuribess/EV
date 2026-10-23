@@ -250,6 +250,8 @@ class ProphetXMonitorConfig(BaseModel):
         description="Authenticated tournament catalogs to refresh for game-market subscriptions")
     discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
     max_discovered_events: int = Field(default=20, ge=1, le=50)
+    max_discovered_prop_subscriptions: int = Field(default=1, ge=0, le=10,
+        description="Read-only player prop subtype channels selected from the current V4 catalog")
     account_review: ProphetXAccountReview | None = Field(default=None,
         description="Non-secret account inception/funded-cash evidence; does not authorize orders")
     legacy_market_ids: list[str] = Field(default_factory=list, deprecated=True,
@@ -308,6 +310,8 @@ class NativeMonitor(Plugin):
         self.discovered_event_ids: list[str] = []
         self.discovered_market_ids: list[str] = []
         self._subscribed_event_ids: list[str] = []
+        self._subscribed_prop_subtypes: dict[str, list[str]] = {}
+        self.discovered_prop_subtypes: dict[str, list[str]] = {}
         self._subscribed_market_ids: list[str] = []
         # Catalog evidence is read-only. It is never fed to NativeBookMapper or
         # used as an executable mapping without a separate exact review.
@@ -335,6 +339,8 @@ class NativeMonitor(Plugin):
         self.discovered_event_ids = []
         self.discovered_market_ids = []
         self._subscribed_event_ids = []
+        self._subscribed_prop_subtypes = {}
+        self.discovered_prop_subtypes = {}
         self._subscribed_market_ids = []
         self.research_catalog_rows = []
         self.research_catalog_at = None
@@ -389,8 +395,10 @@ class NativeMonitor(Plugin):
         if configure is not None:
             if self.manifest.name == "prophetx":
                 selected = list(dict.fromkeys([*context.config.get("event_ids", []), *self.discovered_event_ids]))
-                await configure({**context.config, "event_ids": selected})
+                props = NativeMonitor._prophetx_prop_scope(self)
+                await configure({**context.config, "event_ids": selected, "prop_subtypes": props})
                 self._subscribed_event_ids = selected
+                self._subscribed_prop_subtypes = props
             elif self.manifest.name == "novig":
                 selected = list(dict.fromkeys([*context.config.get("market_ids", []),
                                                *self.discovered_market_ids]))
@@ -704,6 +712,32 @@ class NativeMonitor(Plugin):
                         for tournament_id in self.context.config.get("discovery_tournament_ids", [])]
             selected = open_event_ids(payloads, now=utcnow(),
                 max_events=self.context.config.get("max_discovered_events", 20))
+            market_payloads = [await self.client.discover_markets(selected[start:start+10])
+                               for start in range(0, len(selected), 10)]
+            props = {}
+            remaining = self.context.config.get("max_discovered_prop_subscriptions", 1)
+            for event_id in selected:
+                for payload in market_payloads:
+                    rows = payload.get("data", {}).get(event_id, [])
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        subtype = row.get("sub_type")
+                        selections = row.get("selections")
+                        if (remaining and row.get("status") == "active" and isinstance(subtype, str)
+                                and subtype.startswith("player_") and isinstance(selections, list)
+                                and selections and any(isinstance(group, list) and group for group in selections)
+                                and subtype not in props.get(event_id, [])):
+                            props.setdefault(event_id, []).append(subtype)
+                            remaining -= 1
+                        if not remaining:
+                            break
+                    if not remaining:
+                        break
+                if not remaining:
+                    break
+            if hasattr(self.client, "public_market_data"):
+                self.client.public_market_data.replace_catalog(market_payloads, selected, observed_at=utcnow())
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -714,6 +748,13 @@ class NativeMonitor(Plugin):
             return
         self.discovery_status = "current"
         self.discovered_event_ids = selected
+        self.discovered_prop_subtypes = props
+
+    def _prophetx_prop_scope(self) -> dict[str, list[str]]:
+        props = {event_id: list(subtypes) for event_id, subtypes in self.context.config.get("prop_subtypes", {}).items()}
+        for event_id, subtypes in getattr(self, "discovered_prop_subtypes", {}).items():
+            props[event_id] = list(dict.fromkeys([*props.get(event_id, []), *subtypes]))
+        return props
 
     async def _discover_periodically(self):
         try:
@@ -724,14 +765,16 @@ class NativeMonitor(Plugin):
                     continue
                 selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
                                                *self.discovered_event_ids]))
-                if selected == self._subscribed_event_ids:
+                props = NativeMonitor._prophetx_prop_scope(self)
+                if selected == self._subscribed_event_ids and props == getattr(self, "_subscribed_prop_subtypes", {}):
                     continue
                 try:
-                    await self.client.subscribe(selected, self.context.config.get("prop_subtypes", {}))
+                    await self.client.subscribe(selected, props)
                 except Exception:
                     self.discovery_status = "subscription_failed"
                     continue
                 self._subscribed_event_ids = selected
+                self._subscribed_prop_subtypes = props
         except asyncio.CancelledError:
             raise
 
@@ -741,6 +784,12 @@ class NativeMonitor(Plugin):
                 if (not self.manifest.capabilities.get("monitor_only")
                         or self.manifest.capabilities.get("native_event_forwarding")):
                     await self.engine.native.on_frame(self.manifest.name, self.client, frame)
+                if (self.manifest.name == "prophetx" and frame.get("type") == "snapshot_required"
+                        and self.client.public_market_data.catalog_at is None
+                        and self.context.config.get("discovery_tournament_ids")):
+                    # Reconnect clears old depth. Refresh exact REST identity and
+                    # status once, then wait for new scoped v2 selection messages.
+                    await self._refresh_discovery()
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
                 if frame.get("type") == "transport_invalidated":
@@ -788,7 +837,10 @@ class NativeMonitor(Plugin):
                 "frames": self.frames,
                 "discovery_status": self.discovery_status,
                 "discovered_event_count": len(self.discovered_event_ids),
-                "discovered_market_count": len(self.discovered_market_ids),
+                "discovered_market_count": (len(self.client.public_market_data.catalog)
+                    if self.manifest.name == "prophetx" else len(self.discovered_market_ids)),
+                **({"discovered_prop_subscription_count": sum(map(len, self.discovered_prop_subtypes.values()))}
+                   if self.manifest.name == "prophetx" else {}),
                 **({"discovered_market_ids": list(self.discovered_market_ids),
                     "subscribed_market_ids": list(self._subscribed_market_ids),
                     "research_matched_market_ids": sorted({item.native_market_id

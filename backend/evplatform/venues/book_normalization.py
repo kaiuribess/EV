@@ -163,7 +163,7 @@ class NativeBookMapper:
             if venue == "novig":
                 return self._novig(client, frame, received)
             if venue == "prophetx":
-                return self._prophetx(frame, received)
+                return self._prophetx(client, frame, received)
             if venue == "polymarket_us":
                 return self._polymarket_us(client, frame, received)
             return []
@@ -350,7 +350,7 @@ class NativeBookMapper:
                                          synchronized=key in self._clocks, status=status))
         return result
 
-    def _prophetx(self, frame, received):
+    def _prophetx(self, client, frame, received):
         if frame.get("event") in {"market", "v2.market", "market_strike", "v2.market_strike", "sport_event", "v2.sport_event"}:
             # Rule/status changes require fresh reviewed scope and book data.
             # Do not guess which native status strings mean active.
@@ -365,6 +365,14 @@ class NativeBookMapper:
             return []
         if not isinstance(scope, dict) or str(scope.get("event_id")) != str(data["sport_event_id"]):
             return self.invalidate("prophetx")
+        if frame.get("envelope", {}).get("op") == "d":
+            return self.invalidate("prophetx")
+        if client is not None and hasattr(client, "public_market_data"):
+            catalog = client.public_market_data.catalog.get((str(data["sport_event_id"]), native_market))
+            catalog_at = client.public_market_data.catalog_at
+            if (catalog is None or catalog["status"] != "active" or catalog_at is None
+                    or not 0 <= (received-catalog_at).total_seconds() <= 600):
+                return self.invalidate("prophetx")
         info = data["info"]
         sequence = int(info["sequence_number"])
         subject = f"{data['sport_event_id']}:{native_market}:{info['id']}"
@@ -381,15 +389,28 @@ class NativeBookMapper:
                     or (mapping.prop_sub_type is not None and str(scope.get("sub_type")) != mapping.prop_sub_type)
                     or (mapping.prop_sub_type is None and scope.get("sub_type") is not None)):
                 continue
+            if client is not None and hasattr(client, "public_market_data"):
+                identity = catalog["strikes"].get(mapping.instrument.instrument_id)
+                if identity is None or identity["outcome_id"] != mapping.instrument.native_outcome:
+                    return self.invalidate("prophetx")
             selections = [row for group in groups for row in group
                           if str(row.get("strike_id")) == mapping.instrument.instrument_id
                           and str(row.get("outcome_id")) == mapping.instrument.native_outcome]
+            if any(str(row.get("strike_id")) == mapping.instrument.instrument_id
+                   and str(row.get("outcome_id")) != mapping.instrument.native_outcome
+                   for group in groups for row in group):
+                return self.invalidate("prophetx")
             if not selections:
                 # This event can update another strike within the same market.
                 # Do not clear or refresh an unrelated strike's snapshot.
                 continue
             levels, times, seen_prices = [], [], set()
             for selection in selections:
+                stake = decimal_value(selection.get("value", 0))
+                if not stake.is_finite() or stake < 0:
+                    raise ValueError("Invalid ProphetX advertised stake")
+                if stake == 0:
+                    continue  # provider placeholder: no executable price or depth
                 parsed = executable_level(selection)
                 p, q = parsed["american_price"], parsed["executable_stake_usd"]
                 if p in seen_prices:
@@ -400,8 +421,6 @@ class NativeBookMapper:
                     times.append(_clock(parsed["source_observed_at"], mapping.source_timestamp_unit))
             # The official payload contains all displayed selections for a strike;
             # replacements may reduce displayed depth and never borrow old levels.
-            if frame.get("envelope", {}).get("op") == "d":
-                levels, times = [], []
             result.append(self._book(mapping, levels, times, sequence, received,
                                      status="active" if levels else "suspended"))
         return result

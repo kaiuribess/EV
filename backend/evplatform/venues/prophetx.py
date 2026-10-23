@@ -57,7 +57,8 @@ def executable_level(selection: dict) -> dict:
     """Return unambiguous stake and payout units; missing `value` has no depth."""
     price = decimal_value(selection["price"])
     stake = decimal_value(selection.get("value", 0))
-    if price != price.to_integral_value() or abs(price) < 100 or stake < 0:
+    if (not price.is_finite() or not stake.is_finite() or price != price.to_integral_value()
+            or abs(price) < 100 or stake < 0):
         raise ValueError("Invalid ProphetX American-price level")
     gross_per_stake = Decimal(1) + (price / 100 if price > 0 else 100 / -price)
     return {
@@ -95,6 +96,8 @@ class ProphetXClient(NativeTransport):
 
     def __init__(self, settings: ProphetXSettings | None = None, client: httpx.AsyncClient | None = None):
         super().__init__(settings or ProphetXSettings(), client)
+        from .prophetx_market_data import ProphetXMarketData
+        self.public_market_data = ProphetXMarketData()
         self._access_token = ""
         self._refresh_token = ""
         self._access_expires = 0.0
@@ -109,6 +112,7 @@ class ProphetXClient(NativeTransport):
         self._authenticated_user_id = ""  # Backend-only identity from signed registration, never a key.
         self._confirmed_channels: set[str] = set()
         self._market_frames = 0
+        self._channel_limit: int | None = None
         self._refresh_task: asyncio.Task | None = None
         self._last_auth_failure: dict | None = None
         from .prophetx_private import ProphetXPrivateState
@@ -139,7 +143,10 @@ class ProphetXClient(NativeTransport):
                 "signin_confirmed": self._signin_confirmed,
                 "subscriptions_confirmed": len(self._confirmed_channels), "subscriptions_expected": len(self.channels),
                 "market_frames": self._market_frames, "access_expires_at": self._access_expires or None,
-                "market_data_received": self._market_frames > 0, "trading_enabled": False,
+                 "market_data_received": any(book["levels"] for book in self.public_market_data.books.values()),
+                 "market_book_subjects": len(self.public_market_data.books),
+                 "market_book_rejections": self.public_market_data.rejected_frames,
+                 "channel_limit": self._channel_limit, "trading_enabled": False,
                 "last_auth_failure": self._last_auth_failure}
 
     def _require_credentials(self):
@@ -367,6 +374,7 @@ class ProphetXClient(NativeTransport):
         if data.get("channel_count", 0) > data.get("channel_limit", 0):
             self.health, self.reason = "subscription_rejected", "ProphetX channel quota exceeded"
             raise VenueError("ProphetX channel quota exceeded")
+        self._channel_limit = data.get("channel_limit")
         self.channels = {item["channel_name"]: item for item in data["authorized_channel"]}
         self._authenticated_user_id = self.registration_user_id(data["authenticated"])
         self.private.register(data["authorized_channel"], user=self._authenticated_user_id,

@@ -115,6 +115,10 @@ async def test_native_monitor_discovery_uses_existing_client_and_keeps_last_good
             return {"data": {"sport_events": [{"event_id": 123, "name": "A at B",
                 "status": "not_started", "scheduled": "2026-10-22T02:00:00Z"}]}}
 
+        async def discover_markets(self, event_ids):
+            assert event_ids == ["123"]
+            return {"data": {"123": []}}
+
     client = Client()
     monitor = SimpleNamespace(client=client,
         context=SimpleNamespace(config={"discovery_tournament_ids": [132], "max_discovered_events": 5}),
@@ -124,6 +128,40 @@ async def test_native_monitor_discovery_uses_existing_client_and_keeps_last_good
     client.fail = True
     await NativeMonitor._refresh_discovery(monitor)
     assert monitor.discovered_event_ids == ["123"] and monitor.discovery_status == "read_failed"
+
+
+@pytest.mark.asyncio
+async def test_catalog_discovers_one_actual_player_prop_subtype_for_read_only_stream(monkeypatch):
+    from evplatform.venues.prophetx_market_data import ProphetXMarketData
+
+    fixed = datetime(2026, 10, 22, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: fixed)
+
+    class Client:
+        public_market_data = ProphetXMarketData()
+
+        async def discover_events(self, **kwargs):
+            return {"data": {"sport_events": [{"event_id": 123, "name": "A at B",
+                "status": "not_started", "scheduled": "2026-10-22T02:00:00Z"}]}}
+
+        async def discover_markets(self, event_ids):
+            assert event_ids == ["123"]
+            return {"data": {"123": [
+                {"id": 219, "sub_type": "moneyline", "status": "active", "selections": []},
+                {"id": 300, "sub_type": "player_total_points", "status": "active",
+                 "selections": [[{"strike_id": "s1", "outcome_id": 1}], []]},
+                {"id": 301, "sub_type": "player_total_rebounds", "status": "active",
+                 "selections": [[{"strike_id": "s2", "outcome_id": 2}], []]},
+            ]}}
+
+    monitor = SimpleNamespace(client=Client(), context=SimpleNamespace(config={
+        "discovery_tournament_ids": [132], "max_discovered_events": 5,
+        "max_discovered_prop_subscriptions": 1}), discovery_status="disabled", discovered_event_ids=[])
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovery_status == "current"
+    assert monitor.discovered_prop_subtypes == {"123": ["player_total_points"]}
+    assert len(monitor.client.public_market_data.catalog) == 3
+    assert monitor.client.public_market_data.snapshot(now=fixed, connected=True)["levels"] == []
 
 
 def test_prophetx_discovery_config_rejects_duplicate_or_invalid_tournaments():

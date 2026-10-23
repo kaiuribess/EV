@@ -162,6 +162,21 @@ def test_prophetx_explicit_clock_unit_scope_and_placeholder_withdrawal(market):
     assert invalid.status == "suspended" and not invalid.synchronized
 
 
+def test_prophetx_zero_price_placeholder_and_delete_never_keep_old_depth(market):
+    mapper = NativeBookMapper([mapping(market, "prophetx")])
+    assert mapper.process("prophetx", None, prophet_frame())[0][1].asks
+    placeholder = prophet_frame(seq=101)
+    placeholder["data"]["info"]["selections"][0] = [{
+        "strike_id": "strike-home", "outcome_id": 1, "price": 0, "value": 0}]
+    assert mapper.process("prophetx", None, placeholder)[0][1].asks == ()
+    assert mapper.process("prophetx", None, prophet_frame(seq=102))[0][1].asks
+    deletion = {"event": "v2.market_selections", "scope": {"event_id": 12},
+        "envelope": {"op": "d"}, "data": {"sport_event_id": 12, "market_id": 22,
+        "info": {"id": 22, "sequence_number": 103, "selections": []}}}
+    invalid = mapper.process("prophetx", None, deletion)[0][1]
+    assert not invalid.synchronized and invalid.asks == ()
+
+
 def test_prophetx_subtype_does_not_match_other_scope(market):
     mapper = NativeBookMapper([mapping(market, "prophetx", prop_sub_type="player_points")])
     assert mapper.process("prophetx", None, prophet_frame()) == []

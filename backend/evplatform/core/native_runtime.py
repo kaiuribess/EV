@@ -697,6 +697,12 @@ class NativeRuntime:
         return adapter
 
     async def on_frame(self, venue, client, frame):
+        if venue == "prophetx" and hasattr(client, "public_market_data"):
+            if frame.get("type") in {"transport_invalidated", "snapshot_required"}:
+                client.public_market_data.invalidate(
+                    catalog_uncertain=frame.get("type") == "transport_invalidated")
+            else:
+                client.public_market_data.apply(frame, received_at=utcnow())
         adapter = self.bind_client(venue, client)
         if adapter and hasattr(adapter, "observe_private_frame"):
             adapter.observe_private_frame(frame)
@@ -738,6 +744,20 @@ class NativeRuntime:
             for market, book in self.mapper.process(venue, client, frame):
                 await self.engine.bus.publish(Envelope(schema_name="sports.market", source=venue, payload=market))
                 await self.engine.bus.publish(Envelope(schema_name="exchange.native_book", source=venue, payload=book))
+
+    def prophetx_research_books(self, *, limit: int = 20) -> dict:
+        """Read-only native research view; no canonical or execution mapping."""
+        record = self.engine.registry.records.get("prophetx")
+        monitor = record.plugin if record and record.enabled else None
+        client = getattr(monitor, "client", None)
+        if client is None or not hasattr(client, "public_market_data"):
+            return {"available": False, "reason": "ProphetX Trading/MM monitor unavailable",
+                    "levels": [], "read_only": True}
+        connected = (getattr(monitor, "task", None) is not None and not monitor.task.done()
+                     and client.health_check().get("streaming") is True)
+        return {"available": True, "environment": client.settings.environment,
+                "streaming": connected,
+                **client.public_market_data.snapshot(now=utcnow(), connected=connected, limit=limit)}
 
     def runtime_facts(self, venue=None):
         from decimal import Decimal
