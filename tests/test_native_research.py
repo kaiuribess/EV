@@ -177,6 +177,38 @@ def test_novig_contract_is_one_cent_and_pregame_fee_metadata_is_zero():
     assert D(result["net_estimated_profit_usd"]) == D("0.03")
 
 
+def test_novig_stream_snapshot_and_delta_feed_existing_read_only_research_path():
+    """A catalog match consumes opposite-side L3 depth in Novig's cent units."""
+    row = novig_rows()[0]
+    match = next(item for item in novig_moneyline_matches(
+        market(), [row], {E: novig_event()}, observed_at=NOW)
+        if item.outcome == "Atlanta Hawks")
+    book = NovigBook()
+    snapshot = {"ts": int(NOW.timestamp() * 1000), "snapshot": {M: {
+        "lifecycle": {"seq": 1, "status": "OPEN"},
+        "book": {"seq": 8, "orders": {B: [
+            {"orderId": "opposite-bid", "price": "0.440", "qty": 500}]}}}}}
+    book.apply(snapshot)
+    levels = book.asks(M, match.opposing_outcome_id)
+    assert levels == [(D("0.560"), 500)]
+    result = compare_minimum_lot(match, D("0.60"), levels,
+        fee_for=lambda p, q: novig_taker_fee(row, novig_event(), p, q),
+        uncertainty_margin_probability=D("0.01"), now=NOW)
+    assert result["normal_payout_usd"] == "1.00"
+    assert result["comparison_quantity"] == "100"
+    assert result["positive_after_costs"] is True
+    book.apply({"ts": int(NOW.timestamp() * 1000) + 1000,
+        "delta": {M: {"book": {"seq": 9, "deltas": [
+            {"kind": "add", "orderId": "better-bid", "outcomeId": B,
+             "price": "0.450", "qty": 100}]}}}})
+    assert book.asks(M, B)[0] == (D("0.550"), 100)
+    book.reset()
+    assert book.asks(M, B) == []
+    unavailable = compare_minimum_lot(match, D("0.60"), book.asks(M, B),
+        fee_for=lambda p, q: D(0), uncertainty_margin_probability=D("0.01"), now=NOW)
+    assert unavailable["positive_after_costs"] is False
+
+
 def test_missing_uncertainty_or_depth_does_not_claim_positive_net_ev():
     match = kalshi_moneyline_matches(market(), kalshi_rows(), observed_at=NOW)[0]
     unknown = compare_minimum_lot(match, D("0.70"), [(D("0.50"), D(3))],
