@@ -125,6 +125,13 @@ def analyze(path: Path) -> dict:
             first = first or now
             last = now
             sample_count += 1
+            # The observer starts its HTTP request before the backend finishes
+            # recalculating the returned state. Use that state's timestamp for
+            # comparison freshness; a just-computed estimate can legitimately
+            # be milliseconds later than the request-start clock.
+            state_at = _datetime(sample.get("state_at")) or now
+            if abs((state_at - now).total_seconds()) > 5:
+                state_at = now  # A cached state cannot refresh old native depth.
             order_counts.add(sample["counts"]["native_orders"])
             controls.add(tuple(sorted(sample["controls"].items())))
             build_starts.add(sample.get("started_at"))
@@ -303,8 +310,12 @@ def analyze(path: Path) -> dict:
                     if native.get("rejection"):
                         native_rejections[(venue, native["rejection"])] += 1
                     try:
-                        depth = Decimal(str(native.get("available_depth_contracts")))
-                        quantity = Decimal(str(native.get("comparison_quantity")))
+                        if venue == "prophetx":
+                            depth = Decimal(str(native.get("available_stake_usd")))
+                            quantity = Decimal(str(native.get("cash_cost_usd")))
+                        else:
+                            depth = Decimal(str(native.get("available_depth_contracts")))
+                            quantity = Decimal(str(native.get("comparison_quantity")))
                         after_fee = Decimal(str(native.get("fee_adjusted_estimated_profit_usd")))
                         payout = Decimal(str(native.get("normal_payout_usd")))
                     except (InvalidOperation, TypeError, ValueError):
@@ -313,7 +324,7 @@ def analyze(path: Path) -> dict:
                     if not (depth > 0 and quantity > 0 and depth >= quantity and payout > 0
                             and native.get("price") is not None and native.get("fee_evidence")
                             and not native.get("historical") and calculated is not None
-                            and 0 <= (now-calculated).total_seconds() <= 30
+                            and 0 <= (state_at-calculated).total_seconds() <= 30
                             and venue in live_native_streams):
                         continue
                     valid_native.append(native)

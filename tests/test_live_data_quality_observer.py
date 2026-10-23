@@ -134,3 +134,22 @@ def test_reconnecting_venue_or_old_comparison_is_not_current_depth():
         report = analyze(path)
         assert report["grains"]["fair_market_snapshots"] == 2
         assert report["grains"]["native_depth_direction_snapshots"] == 0
+
+
+def test_native_estimate_can_be_computed_during_state_response_and_prophetx_uses_usd_stake():
+    with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+        path = Path(folder) / "samples.jsonl"
+        state = _state()
+        state["timestamp"] = "2026-10-23T00:00:01Z"
+        state["plugins"].append({"manifest": {"name": "prophetx"}, "enabled": True,
+                                 "health": {"status": "streaming", "streaming": True}})
+        native = state["reference_estimates"][0]["native_research_estimates"][0]
+        native.update({"venue": "prophetx", "native_market_id": "px-market",
+                       "available_depth_contracts": None, "comparison_quantity": None,
+                       "available_stake_usd": "3", "cash_cost_usd": "1",
+                       "calculated_at": "2026-10-23T00:00:00.500Z"})
+        path.write_text(json.dumps({"sample": compact_state(state, "2026-10-23T00:00:00Z")}) + "\n",
+                        encoding="utf-8")
+        report = analyze(path)
+        assert report["grains"]["native_depth_direction_snapshots"] == 1
+        assert report["native"]["venue_direction_snapshots"] == {"prophetx": 1}

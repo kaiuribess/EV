@@ -38,6 +38,7 @@ def _native(row: dict) -> dict:
         "venue", "source_market_id", "native_market_id", "native_outcome_id",
         "side", "outcome", "price", "available_depth_contracts",
         "comparison_quantity", "normal_payout_usd", "cash_cost_usd",
+        "available_stake_usd",
         "gross_estimated_profit_usd", "taker_fee_usd",
         "fee_adjusted_estimated_profit_usd", "uncertainty_allowance_usd",
         "net_estimated_profit_usd", "positive_after_costs", "positive_estimate",
