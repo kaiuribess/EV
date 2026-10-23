@@ -377,6 +377,7 @@ def test_novig_review_lead_keeps_exact_fee_phase_evidence(monkeypatch):
         book=book,
         health_check=lambda: {"streaming": True}),
         task=SimpleNamespace(done=lambda: False),
+        _book_at={M: current},
         context=SimpleNamespace(config={"discovery_interval_seconds": 300}),
         research_catalog_at=current, research_matches={prop_market().id: found},
         research_catalog_rows=novig_prop_rows(), research_events={E: novig_event()})
@@ -393,6 +394,9 @@ def test_novig_review_lead_keeps_exact_fee_phase_evidence(monkeypatch):
     assert over["fee_evidence"]["event_phase"] == "OPEN_PREGAME"
     assert over["taker_fee_usd"] == "0"
     assert over["normal_payout_usd"] == "1.00"
+    assert over["native_book_sequence"] == 1
+    assert over["native_book_update_at"] == current.isoformat()
+    assert over["native_market_status"] == "OPEN"
     assert over["execution_eligible"] is False
     monitor.research_catalog_rows[0]["fee"] = None
     without_fee = NativeRuntime.research_comparisons(runtime, prop_market(), fair)

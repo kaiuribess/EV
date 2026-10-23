@@ -517,9 +517,74 @@ def test_approved_fixture_pilot_reaches_fee_and_kelly_bounded_native_candidate()
     assert candidate.native_book_age_ms is not None
 
 
+@pytest.mark.asyncio
+async def test_offline_novig_trusted_pilot_reaches_unsigned_review_without_placing():
+    """The approved one-market route uses the shared native calculator and review."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from evplatform.core.manual_native import ManualNativeService
+    from evplatform.core.risk import RiskEngine
+    from evplatform.core.config import RiskConfig
+
+    market, quotes, _, scoped = approved_pilot_case()
+    instrument = NativeInstrument(venue="novig", instrument_id="OFFLINE-novig-market",
+        canonical_market_id=market.id, outcome="Home", native_outcome="OFFLINE-outcome",
+        quantity_unit="whole_cent_contracts", price_format="probability",
+        payout_per_unit_usd="0.01", quantity_step="1", minimum_quantity="1",
+        minimum_order_cost_usd="0", order_minimum_verified=True,
+        order_minimum_source="OFFLINE whole-contract minimum fixture",
+        cash_quantum_usd="0.00001", price_bands=(
+            NativePriceBand(minimum="0.001", maximum="0.050", step="0.001"),
+            NativePriceBand(minimum="0.055", maximum="0.945", step="0.005"),
+            NativePriceBand(minimum="0.950", maximum="0.999", step="0.001")),
+        settlement_rules_fingerprint=market.identity(), verified=True, source="OFFLINE exact mapping")
+    fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
+        per_unit_usd="0", per_fill_usd="0", fixed_order_usd="0", verified=True,
+        source="OFFLINE pregame WHEN_LIVE market fee fixture",
+        observed_at=NOW-timedelta(seconds=1), valid_until=NOW+timedelta(minutes=1))
+    book = NativeBook(instrument=instrument, market_fingerprint=market.identity(),
+        asks=(NativeLevel(price="0.400", quantity="1000"),), fee_bound=fee,
+        source_time=NOW-timedelta(milliseconds=100), received_at=NOW,
+        revision=1, synchronized=True)
+    fair = fair_value(market, quotes, scoped, NOW)
+    candidate = native_opportunity(market, fair, book, scoped, max_stake_usd=Decimal("1"),
+        mode="production", stake_sizing="quarter_kelly", available_cash_usd=Decimal("25"), now=NOW)
+    assert candidate.qualified and candidate.execution_eligible
+    assert candidate.intent.instrument.payout_per_unit_usd == Decimal("0.01")
+    assert candidate.intent.quantity == candidate.intent.quantity.to_integral_value()
+    assert 0 < candidate.intent.reserved_cost_usd <= Decimal("1")
+    risk = RiskEngine(RiskConfig())
+    risk.kill_switch = True
+    preview_check, place, arm = Mock(), AsyncMock(), Mock()
+    native = SimpleNamespace(books={(market.id, "novig", "Home"): book},
+        build_id="OFFLINE-build", preview_check=preview_check,
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id,
+            account_fingerprint="a" * 64), execute=place)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={market.id: market}, settings=SimpleNamespace(mode="production", pricing=scoped),
+        control=arm)
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "OFFLINE-scoped-profile"
+    service._fresh_candidate = AsyncMock(return_value=candidate)
+    review = await service.preview(market.id, "novig", "Home", Decimal("1"))
+    assert review["unsigned"] and review["candidate"]["intent"]["quantity"] == str(candidate.intent.quantity)
+    assert (
+        Decimal(review["candidate"]["intent"]["limit_price"])
+        * Decimal(review["candidate"]["intent"]["quantity"])
+        * Decimal("0.01")
+    ) <= Decimal("1")
+    assert review["source_policy"]["trusted_pilot"]["uncertainty_margin_probability"] == "0.01"
+    preview_check.assert_called_once()
+    place.assert_not_awaited()
+    arm.assert_not_called()
+    assert not risk.auto_trade and risk.kill_switch
+
+
 @pytest.mark.parametrize("mutation", [
     "unknown_status_unapproved", "unknown_age_unapproved", "stale_poll",
-    "suspended", "withdrawn", "missing_normal_review", "wrong_provider", "wrong_market",
+    "suspended", "withdrawn", "truncated", "missing_normal_review", "wrong_provider", "wrong_market",
 ])
 def test_pilot_policy_rejects_unreviewed_or_unavailable_source(mutation):
     market, quotes, book, scoped = approved_pilot_case()
@@ -532,6 +597,8 @@ def test_pilot_policy_rejects_unreviewed_or_unavailable_source(mutation):
         quotes[0] = quotes[0].model_copy(update={"source_scope_poll_at": NOW-timedelta(minutes=1)})
     elif mutation in {"suspended", "withdrawn"}:
         quotes[0] = quotes[0].model_copy(update={"status": mutation})
+    elif mutation == "truncated":
+        quotes[0] = quotes[0].model_copy(update={"verification_reason": "truncated_response"})
     elif mutation == "missing_normal_review":
         quotes[0] = quotes[0].model_copy(update={"normal_outcome_verified": False})
     elif mutation == "wrong_provider":

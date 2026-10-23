@@ -70,7 +70,8 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
         if ref.get("source_scope_is_current") is False:
             reasons.append(f"{book}: provider reports the book/fixture poll is not current")
         if ref.get("verification_reason") in {
-                "retained_top_up", "partial_response", "stale_cached_board", "degraded_source",
+                "retained_top_up", "partial_response", "truncated_response",
+                "stale_cached_board", "degraded_source",
                 "future_observation_clock", "incomplete_or_cross_frame_outcomes",
                 "unsynchronized_outcomes", "trusted_game_cross_frame_pair"}:
             reasons.append(f"{book}: provider row is cached, degraded or assembled across frames")

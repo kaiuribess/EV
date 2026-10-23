@@ -525,6 +525,16 @@ class NativeRuntime:
                         result["net_estimated_profit_usd"] = None
                         result["rejection"] = "Native minimum quantity is unknown"
                 result["fee_evidence"] = fee_evidence
+                if venue == "novig":
+                    # Per-market book evidence is distinct from connection
+                    # heartbeats and from repeated /api/state reads. Retain it
+                    # with each research comparison for later edge-duration
+                    # and price/quantity-change analysis.
+                    subject = f"{match.native_market_id}:book"
+                    result["native_book_sequence"] = client.book.sequences.values.get(subject)
+                    book_at = getattr(monitor, "_book_at", {}).get(match.native_market_id)
+                    result["native_book_update_at"] = book_at.isoformat() if book_at else None
+                    result["native_market_status"] = client.book.statuses.get(match.native_market_id)
                 result["fair_probability"] = str(fair.probabilities[match.outcome])
                 result["reference_profile_id"] = fair.reference_profile_id
                 result["reference_books"] = [ref.get("bookmaker") for ref in fair.references]

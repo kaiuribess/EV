@@ -46,6 +46,7 @@ def _native(row: dict) -> dict:
         "reasons", "rejection", "fair_probability", "calculated_at",
         "catalog_observed_at", "catalog_age_ms", "historical",
         "mapping_reviewed", "execution_eligible", "fee_evidence",
+        "native_book_sequence", "native_book_update_at", "native_market_status",
     )
     return {key: row.get(key) for key in keys}
 
