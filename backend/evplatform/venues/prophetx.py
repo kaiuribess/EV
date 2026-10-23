@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import math
 import re
@@ -93,6 +94,10 @@ class ProphetXClient(NativeTransport):
         "sandbox": "https://api.sandbox.prophetx.dev/partner",
         "production": "https://cash.api.prophetx.co/partner",
     }
+    GEO_HOSTS = {
+        "sandbox": "https://sandbox.prophetx.dev",
+        "production": "https://www.prophetx.co",
+    }
     TERMINAL_STATES = {"credentials_missing", "unauthorized", "access_denied", "geolocation_required",
                        "session_limit", "auth_outcome_unknown", "subscription_rejected", "auth_refresh_failed"}
 
@@ -114,6 +119,7 @@ class ProphetXClient(NativeTransport):
         self._authenticated_user_id = ""  # Backend-only identity from signed registration, never a key.
         self._confirmed_channels: set[str] = set()
         self._market_frames = 0
+        self._location_attempt: tuple[str, float] | None = None
         self._channel_limit: int | None = None
         self._refresh_task: asyncio.Task | None = None
         self._last_auth_failure: dict | None = None
@@ -304,6 +310,39 @@ class ProphetXClient(NativeTransport):
     async def fetch_balance(self) -> dict:
         return await self.request("GET", "/v4/mm/get_balance")
 
+    async def check_current_location(self, client_order_id: str) -> bool:
+        """Check this machine's current egress IP with ProphetX before an order.
+
+        This is deliberately separate from account authentication and never
+        accepts a caller-supplied IP or retains the address in logs/state.
+        An earlier successful check cannot certify a later order.
+        """
+        self._location_attempt = None
+        if not isinstance(client_order_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_order_id):
+            return False
+        try:
+            response = await self.http.get("https://api.ipify.org", params={"format": "json"})
+            response.raise_for_status()
+            address = ipaddress.ip_address(response.json()["ip"])
+            if not address.is_global:
+                raise ValueError("Non-public egress IP")
+            response = await self.http.post(
+                self.GEO_HOSTS[self.settings.environment] + "/ip-geolocation/api/v1/check-ip",
+                json={"ip_address": str(address)},
+            )
+            response.raise_for_status()
+            result = response.json()
+            if isinstance(result, dict) and result.get("success") is True:
+                self._location_attempt = (client_order_id, time.monotonic() + 10)
+                return True
+            return False
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return False
+
+    def location_valid_for(self, client_order_id: str) -> bool:
+        return bool(self._location_attempt and self._location_attempt[0] == client_order_id
+                    and time.monotonic() < self._location_attempt[1])
+
     async def fetch_transactions(self, **params) -> dict:
         """Authenticated wallet ledger; never infer commission from a rate."""
         return await self.request("GET", "/v4/mm/get_transactions", params=params)
@@ -332,11 +371,17 @@ class ProphetXClient(NativeTransport):
     async def submit_order(self, body: dict, *, before_send: Callable[[], None] | None = None) -> dict:
         client_id = body.get("external_id", "")
         guard = placement_guard(self, client_id, before_send)
+        if self.settings.environment == "production" and not self.location_valid_for(client_id):
+            raise VenueError("A fresh ProphetX location check is required for this order")
         if body.get("price") not in self.price_ladder:
             raise VenueError("Price must be validated against the current native price ladder")
 
         def dispatch():
             guard()
+            if self.settings.environment == "production":
+                if not self.location_valid_for(client_id):
+                    raise VenueError("ProphetX location check expired before dispatch")
+                self._location_attempt = None  # One check permits one transmission only.
             if body.get("price") not in self.price_ladder:
                 raise VenueError("Native price ladder changed before placement")
 
@@ -518,6 +563,7 @@ class ProphetXClient(NativeTransport):
                 self._confirmed_channels.clear()
 
     async def disconnect(self):
+        self._location_attempt = None
         self.private.reset()
         await super().disconnect()
         self._signin_confirmed = False

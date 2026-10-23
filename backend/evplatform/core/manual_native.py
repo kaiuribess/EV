@@ -278,6 +278,8 @@ class ManualNativeService:
                                  "book": self.engine.native.books[
                                      (candidate.market_id, candidate.venue, candidate.outcome)].model_dump(mode="json")})
                     await storage.event(evidence, durable=True)
+                if candidate.venue == "prophetx" and self.engine.settings.mode == "production":
+                    await self.engine.native.verify_prophetx_location(order)
                 with self.engine.risk.manual_order(candidate.intent.id):
                     order = await self.engine.native.execute(candidate, execution_origin="manual")
                 return {"order": order.model_dump(mode="json"), "automation_enabled": self.engine.risk.auto_trade,

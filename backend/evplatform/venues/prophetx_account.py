@@ -1,11 +1,12 @@
 """Authenticated ProphetX wallet cash and separate full-inventory verification."""
 from datetime import timedelta
 from decimal import Decimal
+import math
 
 from ..core.models import OrderStatus, utcnow
 from .prophetx_financial import (
     ProphetXAccountReview, authenticated_identity, complete_order_history,
-    source_time,
+    reporting_pages, source_time,
 )
 from .reconciliation import ReconciliationError, _number, _object, _text
 from .common import decimal_value
@@ -49,9 +50,22 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
         cash_verified = (authenticated_identity(client) == (user, fingerprint)
                          and (private is None or private.fence(client=client) == captured_fence))
         return NativeAccountSnapshot(**base, balance_usd=before[0], cash_available_verified=cash_verified,
-            reason="Account inception and funded-cash-only review is required for complete ProphetX inventory"
+            reason="Current cash is verified; LEC and older positions require a reviewed funded-cash inventory scope"
                    if cash_verified else "ProphetX account identity changed during wallet read")
-    history = await complete_order_history(client, review, observed_at=observed_at)
+    if review.current_inventory_reviewed_at is not None:
+        baseline = review.current_inventory_reviewed_at
+        if (review.account_fingerprint != fingerprint or review.valid_until <= now
+                or not review.funded_cash_only or baseline >= now
+                or now-baseline > timedelta(days=2)):
+            raise ReconciliationError("Current ProphetX inventory review is stale or belongs to another account")
+        # The documented updated-at query spans at most two days. This route
+        # is valid only when the reviewed baseline attests empty funded-cash
+        # inventory *and* the separate funding evidence excludes LEC.
+        history = await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+            params={"updated_at_from": math.floor(baseline.timestamp()),
+                    "updated_at_to": math.ceil(now.timestamp())}, observed_at=observed_at)
+    else:
+        history = await complete_order_history(client, review, observed_at=observed_at)
     relevant = [o for o in managed_orders if o.venue == "prophetx" and o.mode == client.settings.environment
                 and o.id not in settled_order_ids and o.status != OrderStatus.REJECTED]
     owned = {o.venue_order_id: o for o in relevant if o.venue_order_id}
@@ -61,6 +75,8 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
         reasons.append("Managed ProphetX order identity/financial reconciliation is incomplete")
     resting, positions, seen_owned = {}, {}, set()
     matched_stake, unmatched_stake = Decimal(0), Decimal(0)
+    if review.current_inventory_reviewed_at is not None and before[1:] != (Decimal(0), Decimal(0)):
+        reasons.append("Current-empty-inventory review conflicts with wallet exposure")
     for row in history.rows:
         if row.get("user_id") != user:
             raise ReconciliationError("ProphetX history contains a different participant")

@@ -70,6 +70,9 @@ class NativeRuntime:
         self._account_generations = {}
         self._account_snapshot_fences = {}
         self._account_probes = set()
+        # A real ProphetX location check is bound to one order attempt and is
+        # never inferred from merely running in the production environment.
+        self._prophetx_location = None
         self._account_probe_lock = asyncio.Lock()
         self._settlement_probe_lock = asyncio.Lock()
         self.manager = NativeOrderManager(engine.risk, engine.storage, engine.bus, engine.metrics,
@@ -768,9 +771,27 @@ class NativeRuntime:
         from ..venues.bridge import NativePreflight
         if not preview_only:
             adapter = self.manager.adapters[order.venue]
+            location_verified = (p.environment == "production" and
+                (order.venue != "prophetx" or self._prophetx_location_valid(order, adapter.client)))
             adapter.preflight = NativePreflight(environment=p.environment, account_authorized=True,
-                geographic_eligibility_verified=p.environment == "production", native_trading_enabled=True,
+                geographic_eligibility_verified=location_verified, native_trading_enabled=True,
                 evidence=p.digest(), valid_until=min(time.time()+5, *(e.expires_at.timestamp() for e in p.evidence)))
+
+    def _prophetx_location_valid(self, order, client):
+        proof = self._prophetx_location
+        return bool(proof and proof[0] == order.id and proof[1] is client
+                    and time.monotonic() < proof[2]
+                    and client.location_valid_for(order.intent.client_order_id))
+
+    async def verify_prophetx_location(self, order):
+        """Bind one fresh, actual owner-machine check to this exact attempt."""
+        if order.venue != "prophetx" or order.mode != "production":
+            return
+        adapter = self.manager.adapters.get("prophetx")
+        self._prophetx_location = None
+        if adapter is None or not await adapter.client.check_current_location(order.intent.client_order_id):
+            raise RiskRejected("ProphetX current location check failed or is unavailable")
+        self._prophetx_location = (order.id, adapter.client, time.monotonic() + 10)
 
     def preview_check(self, order):
         """Run the placement economics and risk checks without issuing authority."""
@@ -889,6 +910,8 @@ class NativeRuntime:
         try:
             return await self.manager.execute(order)
         finally:
+            if self._prophetx_location and self._prophetx_location[0] == order.id:
+                self._prophetx_location = None
             if order.id in self.engine.risk.native_orders:
                 # Even an ordinary acknowledgement changes account inventory.
                 # Block new orders until the durable ledger and account agree.

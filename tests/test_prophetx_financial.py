@@ -360,6 +360,49 @@ async def test_inventory_missing_history_review_never_assumes_empty_account(case
     assert result.balance_usd == D("89.8")
 
 
+async def test_reviewed_current_empty_inventory_needs_no_lifetime_backfill(case):
+    _, client, old_review = case
+    client.balance.update(balance="50.10", matched_order_balance="0", unmatched_order_balance="0")
+    current = ProphetXAccountReview(account_fingerprint=old_review.account_fingerprint,
+        current_inventory_reviewed_at=NOW-timedelta(minutes=1),
+        current_inventory_scope_evidence="OFFLINE reviewed empty account inventory",
+        funded_cash_only=True, funding_scope_evidence="OFFLINE no GEC or LEC account evidence",
+        valid_until=NOW+timedelta(days=1))
+
+    def recent(params):
+        assert "updated_at_from" in params and "updated_at_to" in params
+        assert "from" not in params and "to" not in params
+        return {"data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
+
+    client.overrides["/v4/mm/get_order_history"] = recent
+    snapshot = await probe_prophetx_account(client, [], review=current, observed_at=NOW)
+    assert snapshot.reconciled and snapshot.cash_available_verified
+    assert snapshot.balance_usd == D("50.10")
+    assert snapshot.open_order_count == snapshot.position_count == 0
+    assert len(client.calls) == 1  # Bounded current updates, no lifetime windows.
+
+    client.balance["matched_order_balance"] = "1"
+    blocked = await probe_prophetx_account(client, [], review=current, observed_at=NOW)
+    assert not blocked.reconciled and "conflicts with wallet exposure" in blocked.reason
+
+
+async def test_current_inventory_review_rejects_old_baseline_and_unmanaged_position(case):
+    _, client, old_review = case
+    client.balance.update(balance="50.10", matched_order_balance="0", unmatched_order_balance="0")
+    review = ProphetXAccountReview(account_fingerprint=old_review.account_fingerprint,
+        current_inventory_reviewed_at=NOW-timedelta(minutes=1),
+        current_inventory_scope_evidence="OFFLINE reviewed empty account inventory",
+        funded_cash_only=True, funding_scope_evidence="OFFLINE no GEC or LEC account evidence",
+        valid_until=NOW+timedelta(days=1))
+    with pytest.raises(ReconciliationError, match="stale"):
+        await probe_prophetx_account(client, [], review=review.model_copy(update={
+            "current_inventory_reviewed_at": NOW-timedelta(days=3)}), observed_at=NOW)
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [client.row], "next_cursor": ""}, "last_synced_at": iso()}
+    result = await probe_prophetx_account(client, [], review=review, observed_at=NOW)
+    assert not result.reconciled and "Unmanaged" in result.reason
+
+
 async def test_current_wallet_cash_excludes_credit_without_claiming_complete_inventory(case):
     order, client, _ = case
     client.balance["gec_balance"] = "250"

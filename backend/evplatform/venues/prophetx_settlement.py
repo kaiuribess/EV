@@ -4,6 +4,7 @@ No maker rebates, exposure credits, push/void, manual grades or resettlement.
 An explicit account review and actual order/fee/cash evidence are mandatory.
 """
 from decimal import Decimal
+from datetime import timedelta
 import hashlib
 import json
 
@@ -32,8 +33,11 @@ def supports_prophetx_settlement_scope(profile, adapter, mappings, managed_order
     try:
         review = ProphetXAccountReview.model_validate(adapter.client.account_review)
         now = utcnow()
+        baseline = review.history_created_from or review.current_inventory_reviewed_at
         if (not review.funded_cash_only or review.account_fingerprint != profile.account_fingerprint
-                or review.valid_until <= now or review.history_created_from >= now):
+                or review.valid_until <= now or baseline is None or baseline >= now
+                or (review.current_inventory_reviewed_at is not None
+                    and now-baseline > timedelta(days=2))):
             return False
         reviewed = NativeBookMapper(tuple(NativeMarketMapping.model_validate(m.model_dump()) for m in mappings))
         scoped = [m for m in reviewed.mappings if m.instrument.venue == profile.venue and m.market.id in profile.market_ids]
@@ -53,7 +57,7 @@ def supports_prophetx_settlement_scope(profile, adapter, mappings, managed_order
         for o in managed_orders:
             if o.venue != profile.venue or o.mode != profile.environment or o.account_fingerprint != profile.account_fingerprint:
                 continue
-            if o.intent.instrument.instrument_id in strikes or o.created_at <= review.history_created_from:
+            if o.intent.instrument.instrument_id in strikes or o.created_at <= baseline:
                 return False
             strikes.add(o.intent.instrument.instrument_id)
         return True
@@ -66,8 +70,9 @@ async def reconcile_prophetx_settlement(client, order, managed_orders, *,
                                         observed_at=None):
     now = observed_at or utcnow()
     user, fingerprint = authenticated_identity(client)
+    baseline = (review.history_created_from or review.current_inventory_reviewed_at) if review else None
     if (review is None or review.account_fingerprint != fingerprint or not review.funded_cash_only
-            or review.valid_until <= now or review.history_created_from >= order.created_at):
+            or review.valid_until <= now or baseline is None or baseline >= order.created_at):
         raise ReconciliationError("Current funded-cash account review is required for ProphetX settlement")
     if (order.venue != "prophetx" or order.mode != client.settings.environment or
             order.account_fingerprint != fingerprint or not order.venue_order_id or

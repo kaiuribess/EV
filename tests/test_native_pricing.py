@@ -335,6 +335,38 @@ def prophetx_one_dollar_fixture(market, quotes, *, fair_probability=".60", timin
     return m, q, book, fair, config, now
 
 
+async def test_prophetx_owner_preview_has_no_location_or_order_write(market, quotes):
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes)
+    found = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+        mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    # Only this service boundary is under test; production fair-policy approval
+    # is deliberately absent from the fixture and remains a separate gate.
+    found = found.model_copy(update={"intent": found.intent.model_copy(update={"mode": "production"})})
+    risk = RiskEngine(RiskConfig())
+    geo = AsyncMock(side_effect=RiskRejected("Location denied"))
+    execute = AsyncMock()
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(found.market_id, found.venue, found.outcome): book},
+        build_order=lambda item, **_: SimpleNamespace(id=item.intent.id,
+            account_fingerprint="a" * 64, intent=item.intent),
+        verify_prophetx_location=geo, execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={m.id: m}, settings=SimpleNamespace(mode="production"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(return_value=found)
+    service._verify_prophetx_request = AsyncMock()
+    preview = await service.preview(found.market_id, "prophetx", found.outcome, D("1"))
+    assert preview["unsigned"] and preview["candidate"]["intent"]["quantity"] == "1"
+    geo.assert_not_awaited()
+    execute.assert_not_awaited()
+    with pytest.raises(RiskRejected, match="Location denied"):
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"),
+                             preview["proposal_digest"])
+    geo.assert_awaited_once()
+    execute.assert_not_awaited()
+
+
 def test_prophetx_one_dollar_limit_keeps_win_fee_in_ev_but_not_debit(market, quotes):
     m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes)
     found = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
