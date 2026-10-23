@@ -62,8 +62,17 @@ def catalog_record(league: str, event: dict, market: dict, *, observed_at: datet
             continue
         city, nickname = team.get("safeName"), team.get("name")
         if (isinstance(city, str) and isinstance(nickname, str)
-                and isinstance(team.get("id"), int)):
-            teams.append({"id": team["id"], "name": f"{city} {nickname}".strip(),
+                and city.strip() and nickname.strip() and type(team.get("id")) is int):
+            # Some US catalog rows provide a city plus mascot (Chicago/Bulls);
+            # others provide an abbreviated display name plus the complete
+            # official name (PIT Steelers/Pittsburgh Steelers). Appending the
+            # latter duplicates the mascot and prevents an exact team join.
+            safe_parts, name_parts = city.strip().split(), nickname.strip().split()
+            full_name = (nickname.strip() if len(name_parts) >= 2
+                and safe_parts[-1].casefold() == name_parts[-1].casefold()
+                else f"{city.strip()} {nickname.strip()}")
+            teams.append({"id": team["id"], "name": full_name,
+                          "raw_safe_name": city, "raw_name": nickname,
                           "abbreviation": str(team.get("abbreviation") or "").upper()})
     sides = []
     for side in market.get("marketSides") or []:
@@ -115,6 +124,8 @@ def moneyline_matches(market: Market, rows: list[dict], *, observed_at: datetime
         sides = row.get("sides", [])
         if (len(teams) != 2 or len(sides) != 2
                 or {team["name"] for team in teams} != set(market.participants)
+                or not all(team["name"].casefold() in row["question"].casefold()
+                           for team in teams)
                 or {side["long"] for side in sides} != {True, False}
                 or not all(side["tradable"] and side["description"]
                            and side["description"].casefold() in row["question"].casefold()

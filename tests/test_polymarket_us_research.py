@@ -67,6 +67,29 @@ def test_exact_moneyline_identity_creates_unapproved_long_short_leads():
                for m in matches)
 
 
+def test_complete_native_team_name_is_not_duplicated_with_abbreviated_safe_name():
+    # A captured NFL catalog used PIT Steelers/Pittsburgh Steelers and
+    # NO Saints/New Orleans Saints. Preserve the full official name.
+    event = {"slug": "nba-chi-mil-2026-10-23", "title": "Bulls at Bucks",
+        "startTime": START.isoformat(), "teams": [
+            {"id": 37, "safeName": "CHI Bulls", "name": "Chicago Bulls", "abbreviation": "chi"},
+            {"id": 41, "safeName": "MIL Bucks", "name": "Milwaukee Bucks", "abbreviation": "mil"}]}
+    row = native_catalog()
+    market = {"slug": SLUG, "id": 1305786, "gameStartTime": START.isoformat(),
+        "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+        "question": row["question"], "description": row["rules"],
+        "active": True, "closed": False, "hidden": False, "archived": False,
+        "status": "MARKET_STATUS_OPEN", "feeCoefficient": "0.0695",
+        "minimumTradeQty": "0.01", "orderPriceMinTickSize": "0.01",
+        "marketSides": [{"id": side["id"], "long": side["long"],
+            "teamId": side["team_id"], "description": side["description"],
+            "tradable": True} for side in row["sides"]]}
+    normalized = catalog_record("nba", event, market, observed_at=NOW)
+    assert [team["name"] for team in normalized["teams"]] == [
+        "Chicago Bulls", "Milwaukee Bucks"]
+    assert len(moneyline_matches(source_market(), [normalized], observed_at=NOW)) == 2
+
+
 @pytest.mark.parametrize("change", [
     lambda row: row["teams"][0].update(name="Chicago Bears"),
     lambda row: row.update(market_start=(START + timedelta(minutes=1)).isoformat()),
