@@ -137,6 +137,38 @@ async def test_market_rotation_uses_reconnect_snapshot_only_after_success(monkey
 
 
 @pytest.mark.asyncio
+async def test_novig_rotation_keeps_focused_prop_ahead_of_full_research_slots(monkeypatch):
+    cycles = 0
+
+    async def one_cycle(_):
+        nonlocal cycles
+        cycles += 1
+        if cycles > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
+
+    class Client:
+        selections = []
+
+        async def replace_monitor_markets(self, ids):
+            self.selections.append(ids)
+
+    client = Client()
+    monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
+        "discovery_interval_seconds": 300, "market_ids": [], "max_discovered_markets": 2}),
+        discovered_market_ids=[CLOSED], _subscribed_market_ids=[], discovery_status="current",
+        research_matches={"priced": [SimpleNamespace(native_market_id=LIVE),
+                                      SimpleNamespace(native_market_id=NEXT)]},
+        focused_prop_source_ids=["needs_complete_pair"],
+        focused_prop_matches={"needs_complete_pair": [SimpleNamespace(native_market_id=CLOSED)]},
+        engine=None)
+    with pytest.raises(asyncio.CancelledError):
+        await NativeMonitor._discover_novig_periodically(monitor)
+    assert client.selections == [[CLOSED, LIVE]]
+
+
+@pytest.mark.asyncio
 async def test_client_rotation_never_sends_an_order_and_validates_before_closing():
     class Socket:
         closes = 0

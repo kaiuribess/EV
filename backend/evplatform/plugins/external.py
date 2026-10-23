@@ -644,7 +644,7 @@ class NativeMonitor(Plugin):
             priority = await self._refresh_research_matches()
             focused = [item.native_market_id for market_id in getattr(self, "focused_prop_source_ids", ())
                        for item in getattr(self, "focused_prop_matches", {}).get(market_id, ())][:2]
-            selected = list(dict.fromkeys([*priority, *focused, *selected]))[:config.get("max_discovered_markets", 50)]
+            selected = list(dict.fromkeys([*focused, *priority, *selected]))[:config.get("max_discovered_markets", 50)]
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -868,8 +868,10 @@ class NativeMonitor(Plugin):
                 if self.discovery_status == "read_failed":
                     continue
                 research = [item.native_market_id for matches in self.research_matches.values() for item in matches]
+                focused = [item.native_market_id for market_id in getattr(self, "focused_prop_source_ids", ())
+                           for item in getattr(self, "focused_prop_matches", {}).get(market_id, ())][:2]
                 selected = list(dict.fromkeys([*self.context.config.get("market_ids", []),
-                    *research, *self.discovered_market_ids]))[:len(self.context.config.get("market_ids", []))
+                    *focused, *research, *self.discovered_market_ids]))[:len(self.context.config.get("market_ids", []))
                         + self.context.config.get("max_discovered_markets", 50)]
                 if selected == self._subscribed_market_ids:
                     continue
