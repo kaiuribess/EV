@@ -5,6 +5,8 @@ from decimal import Decimal as D
 from types import SimpleNamespace
 
 import pytest
+import httpx
+from polymarket_us.errors import RateLimitError
 
 from evplatform.core.config import PricingConfig
 from evplatform.core.models import Market, Settlement
@@ -14,6 +16,7 @@ from evplatform.integrations.polymarket_us_research import (
     catalog_record, current_book, direction_levels, moneyline_matches, parsed_book, taker_fee,
 )
 from evplatform.venues.polymarket_us import PolymarketUSClient
+from evplatform.venues.common import VenueError
 
 NOW = datetime(2026, 10, 22, 18, tzinfo=timezone.utc)
 START = NOW + timedelta(days=1)
@@ -156,6 +159,22 @@ async def test_public_sdk_market_and_book_calls_are_read_only_and_slug_bound():
     assert sdk.markets.calls == [("retrieve_by_slug", SLUG), ("book", SLUG)]
     assert client.rest_books[SLUG]["bids"] and not client.authenticated
     client._public_sdk = None
+    await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_sdk_public_429_stops_without_retry_and_backs_off():
+    calls = 0
+    async def limited(slug):
+        nonlocal calls
+        calls += 1
+        request = httpx.Request("GET", "https://gateway.polymarket.us/v1/markets/example/book")
+        raise RateLimitError("limited", response=httpx.Response(429, request=request))
+    client = PolymarketUSClient()
+    with pytest.raises(VenueError, match="rate limited"):
+        await client._public_read(limited, SLUG)
+    assert calls == 1 and client.error_count == 1
+    assert client._next_request > __import__("time").monotonic() + 25
     await client.disconnect()
 
 

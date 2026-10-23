@@ -236,7 +236,7 @@ class PolymarketUSClient(NativeTransport):
     async def fetch_snapshot(self, market_slug: str):
         validated_slugs([market_slug])
         sdk = self._public_client()
-        result = await sdk.markets.book(market_slug)
+        result = await self._public_read(sdk.markets.book, market_slug)
         data = result.get("marketData") if isinstance(result, dict) else None
         if not isinstance(data, dict) or data.get("marketSlug") != market_slug:
             raise VenueError("Polymarket US SDK returned a mismatched public book")
@@ -244,8 +244,27 @@ class PolymarketUSClient(NativeTransport):
         # or impersonates the authenticated WebSocket book.
         self.rest_books[market_slug] = data
         self.rest_book_received_at[market_slug] = time.time()
-        self.request_count += 1
         return result
+
+    async def _public_read(self, method, slug: str):
+        """Share the adapter's read budget with SDK calls; never auto-retry 429."""
+        from polymarket_us.errors import RateLimitError
+
+        async with self._request_lock:
+            wait = self._next_request - time.monotonic()
+            while wait > 0:
+                await asyncio.sleep(wait)
+                wait = self._next_request - time.monotonic()
+            # The public gateway rejected the former unpaced batch. One read
+            # per second is a conservative local cap, not a claimed venue tier.
+            self._next_request = time.monotonic() + max(1.0, 1/self.settings.requests_per_second)
+            self.request_count += 1
+            try:
+                return await method(slug)
+            except RateLimitError:
+                self.error_count += 1
+                self._next_request = time.monotonic() + 30
+                raise VenueError("Polymarket US public read rate limited") from None
 
     def _public_client(self):
         if self._public_sdk is None:
@@ -255,11 +274,10 @@ class PolymarketUSClient(NativeTransport):
 
     async def public_market_metadata(self, market_slug: str) -> dict:
         validated_slugs([market_slug])
-        result = await self._public_client().markets.retrieve_by_slug(market_slug)
+        result = await self._public_read(self._public_client().markets.retrieve_by_slug, market_slug)
         market = result.get("market", result) if isinstance(result, dict) else None
         if not isinstance(market, dict) or market.get("slug") != market_slug:
             raise VenueError("Polymarket US SDK returned a mismatched public market")
-        self.request_count += 1
         return market
 
     async def configure_subscriptions(self, config):

@@ -123,6 +123,40 @@ async def test_monitor_keeps_previous_scope_on_discovery_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_complete_league_catalog_avoids_redundant_slug_metadata_reads(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+    calls = []
+
+    class Client:
+        async def discover_league_events(self, league):
+            row = event(f"{league}-next", NOW + timedelta(hours=2))
+            market = row["markets"][0]
+            market.update(id=7, description="Full game includes overtime", question="Team A versus Team B",
+                          feeCoefficient="0.0695", orderPriceMinTickSize="0.01", marketSides=[])
+            return [page(league, [row])]
+
+        async def public_market_metadata(self, slug):
+            calls.append(("unnecessary_metadata", slug))
+            raise AssertionError("Complete league catalog already has exact market metadata")
+
+        async def fetch_snapshot(self, slug):
+            calls.append(("book", slug))
+            return {"marketData": {"marketSlug": slug}}
+
+    async def no_matches():
+        return []
+
+    monitor = SimpleNamespace(client=Client(), context=SimpleNamespace(config={
+        "discovery_leagues": ["nba"], "max_discovered_markets": 1}),
+        discovery_status="disabled", discovered_market_ids=[],
+        _refresh_research_matches=no_matches)
+    await NativeMonitor._refresh_polymarket_discovery(monitor)
+    assert monitor.discovery_status in {"current", "truncated"}
+    assert calls == [("book", "aec-nba-next")]
+    assert len(monitor.research_catalog_rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_rotation_restarts_read_only_stream_with_new_baseline(monkeypatch):
     cycles = 0
 

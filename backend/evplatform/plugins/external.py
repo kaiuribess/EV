@@ -688,10 +688,17 @@ class NativeMonitor(Plugin):
                 if len(found) != 1:
                     raise ValueError("Ambiguous Polymarket US event/market catalog")
                 league, event, listed = found[0]
-                current = await self.client.public_market_metadata(slug)
-                if (current.get("id") != listed.get("id")
-                        or current.get("gameStartTime") != listed.get("gameStartTime")):
-                    raise ValueError("Polymarket US SDK market identity changed during discovery")
+                # The official league catalog already includes sides, rules,
+                # status, fee and tick metadata. An extra slug lookup for every
+                # row doubled the public request burst without adding scope.
+                if all(listed.get(field) is not None for field in (
+                        "marketSides", "description", "feeCoefficient", "orderPriceMinTickSize")):
+                    current = listed
+                else:
+                    current = await self.client.public_market_metadata(slug)
+                    if (current.get("id") != listed.get("id")
+                            or current.get("gameStartTime") != listed.get("gameStartTime")):
+                        raise ValueError("Polymarket US SDK market identity changed during discovery")
                 catalog.append(catalog_record(league, event, current, observed_at=utcnow()))
                 await self.client.fetch_snapshot(slug)
         except asyncio.CancelledError:
