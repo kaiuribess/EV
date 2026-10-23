@@ -10,6 +10,7 @@ from evplatform.integrations.normalization import VerifiedProviderMapper, extrac
 from evplatform.integrations.parlay import ParlayRest
 from evplatform.integrations.parlay_focused_props import (FocusedCreditWindow,
     exact_parlay_event_id, needs_focused_references)
+from evplatform.plugins.external import ProviderBridge
 
 
 EVENT = "472de3df50fe86e9508e60fc83c21388"
@@ -165,3 +166,20 @@ def test_exact_event_resolution_never_uses_player_or_team_name_alone():
     assert exact_parlay_event_id(market, [correct, dict(correct)]) is None
     assert exact_parlay_event_id(market, [{**correct, "commence_time": "2026-10-25T17:05:00Z"}]) is None
     assert exact_parlay_event_id(market, [{**correct, "away_team": "Other"}]) is None
+
+
+def test_focused_health_snapshot_reports_live_usage_not_startup_state():
+    bridge = ProviderBridge.__new__(ProviderBridge)
+    bridge.manifest = SimpleNamespace(name="parlay_rest")
+    bridge.engine = SimpleNamespace(registry=SimpleNamespace(records={
+        "parlay_rest": SimpleNamespace(health={"status": "connected",
+            "focused_novig_nfl_props": {"state": "disabled"}})}))
+    bridge.client = SimpleNamespace(quota=SimpleNamespace(stats=lambda: {"requests": 4}))
+    bridge.mapper = SimpleNamespace(mapped_count=7, quarantine=[])
+    bridge._focused_status = {"state": "complete", "pages": 1,
+                              "hourly_credits_reserved": 3}
+    bridge.focused_task = SimpleNamespace(done=lambda: False)
+    result = bridge.health_snapshot()
+    assert result["focused_novig_nfl_props"] == bridge._focused_status
+    assert result["quota"] == {"requests": 4}
+    assert result["mapped_quotes"] == 7

@@ -296,6 +296,21 @@ class ProviderBridge(InputPlugin):
                 "mapped_quotes": self.mapper.mapped_count if self.mapper else 0,
                 "quarantined": len(self.mapper.quarantine) if self.mapper else 0}
 
+    def health_snapshot(self):
+        """Expose live focused-request usage without polling the paid provider."""
+        health = dict(self.engine.registry.records[self.manifest.name].health)
+        if self.client:
+            health["quota"] = self.client.quota.stats()
+            health["focused_novig_nfl_props"] = dict(self._focused_status)
+            health["mapped_quotes"] = self.mapper.mapped_count if self.mapper else 0
+            health["quarantined"] = len(self.mapper.quarantine) if self.mapper else 0
+            if self.focused_task and self.focused_task.done():
+                error = self.focused_task.exception() if not self.focused_task.cancelled() else None
+                health["focused_novig_nfl_props"] = {
+                    **health["focused_novig_nfl_props"], "state": "task_stopped",
+                    "error_type": type(error).__name__ if error else None}
+        return health
+
 
 class NativeMonitorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
