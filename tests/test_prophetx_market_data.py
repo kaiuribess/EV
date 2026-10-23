@@ -135,6 +135,22 @@ def test_catalog_without_selection_rows_accepts_scoped_stream_identity_for_resea
     assert all(row["executable_stake_usd"] == "0" for row in data.snapshot(now=NOW, connected=True)["levels"])
 
 
+def test_rest_prop_seed_preserves_price_and_value_without_claiming_live_depth():
+    payload = catalog()
+    payload["data"]["123"][1]["selections"][0][0].update({
+        "price": 300, "value": "3.25", "quantity": "500", "updated_at": 1792731906663622000})
+    data = ProphetXMarketData()
+    data.replace_catalog([payload], ["123"], observed_at=NOW)
+    view = data.snapshot(now=NOW, connected=True)
+    assert view["rest_player_prop_market_count"] == 1
+    assert view["current_player_prop_markets"] == 0
+    assert view["levels"] == []
+    sample = view["rest_player_prop_samples"][0]
+    assert sample["american_price"] == "300" and sample["rest_advertised_stake_usd"] == "3.25"
+    assert sample["gross_payout_per_usd_stake"] == "4"
+    assert sample["executable_stake_usd"] == "0" and not view["rest_price_observation_verified"]
+
+
 def test_native_research_read_uses_the_existing_monitor_and_never_calls_placement():
     client = ProphetXClient(ProphetXSettings(environment="production"))
     client.public_market_data.replace_catalog([catalog()], ["123"], observed_at=NOW)

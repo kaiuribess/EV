@@ -14,6 +14,7 @@ from .prophetx import executable_level
 class ProphetXMarketData:
     def __init__(self):
         self.catalog: dict[tuple[str, str], dict] = {}
+        self.rest_samples: dict[tuple[str, str], list[dict]] = {}
         self.catalog_at: datetime | None = None
         self.books: dict[tuple[str, str, str], dict] = {}
         self.frames = 0
@@ -43,6 +44,7 @@ class ProphetXMarketData:
         if observed_at.tzinfo is None:
             raise ValueError("Catalog observation needs an aware clock")
         catalog = {}
+        rest_samples = {}
         seen = set()
         for response in responses:
             data = response.get("data") if isinstance(response, dict) else None
@@ -59,6 +61,7 @@ class ProphetXMarketData:
                     if key in catalog:
                         raise ValueError("Duplicate ProphetX market identity")
                     identities = {}
+                    rest_levels = []
                     groups = market.get("selections")
                     if isinstance(groups, list):
                         groups = groups if all(isinstance(group, list) for group in groups) else [groups]
@@ -72,16 +75,30 @@ class ProphetXMarketData:
                                     raise ValueError("Conflicting ProphetX strike identity")
                                 identities[strike] = {"outcome_id": outcome, "name": str(row.get("name") or "")[:120],
                                                       "status": row.get("status") or "unknown"}
+                                if len(rest_levels) < 20:
+                                    try:
+                                        parsed = executable_level(row)
+                                        if parsed["executable_stake_usd"] > 0:
+                                            rest_levels.append({"strike_id": strike, "outcome_id": outcome,
+                                                "selection_name": identities[strike]["name"],
+                                                "american_price": str(parsed["american_price"]),
+                                                "rest_advertised_stake_usd": str(parsed["executable_stake_usd"]),
+                                                "gross_payout_per_usd_stake": str(parsed["gross_payout_per_usd_stake"]),
+                                                "updated_at_raw": parsed["source_observed_at"]})
+                                    except (ValueError, KeyError, TypeError, ArithmeticError):
+                                        pass  # malformed REST level is not a live stream book
                     catalog[key] = {"name": str(market.get("name") or "")[:120],
                                     "status": market.get("status"), "sub_type": market.get("sub_type"),
                                     "strikes": identities}
+                    if rest_levels:
+                        rest_samples[key] = rest_levels
         if seen != set(event_ids):
             raise ValueError("Incomplete ProphetX event market catalog")
         # Changed/withdrawn identities cannot inherit earlier stream liquidity.
         self.books = {key: book for key, book in self.books.items()
                       if (key[0], key[1]) in catalog
                       and self.catalog.get((key[0], key[1])) == catalog[(key[0], key[1])]}
-        self.catalog, self.catalog_at = catalog, observed_at
+        self.catalog, self.rest_samples, self.catalog_at = catalog, rest_samples, observed_at
 
     def invalidate(self, *, catalog_uncertain: bool = False):
         self.books.clear()
@@ -195,11 +212,23 @@ class ProphetXMarketData:
                              "research_only": True})
         rows.sort(key=lambda item: (not item["stream_current"], item["local_receipt_age_seconds"],
                                     item["event_id"], item["market_id"], item["strike_id"]))
+        rest_props = [{"event_id": event_id, "market_id": market_id,
+                       "market_name": self.catalog[(event_id, market_id)]["name"],
+                       "market_sub_type": self.catalog[(event_id, market_id)]["sub_type"],
+                       "market_status": self.catalog[(event_id, market_id)]["status"],
+                       **level, "stream_current": False, "executable_stake_usd": "0"}
+                      for (event_id, market_id), levels in self.rest_samples.items()
+                      if str(self.catalog[(event_id, market_id)]["sub_type"]).startswith("player_")
+                      for level in levels[:1]]
         return {"catalog_market_count": len(self.catalog), "book_subject_count": len(self.books),
                 "market_frame_count": self.frames, "rejected_market_frames": self.rejected_frames,
                 "last_rejection": self.last_rejection,
                 "catalog_at": self.catalog_at.isoformat() if self.catalog_at else None,
                 "catalog_current": catalog_current,
+                "rest_player_prop_market_count": len(rest_props),
+                "rest_player_prop_samples": rest_props[:5],
+                "rest_snapshot_at": self.catalog_at.isoformat() if self.catalog_at else None,
+                "rest_price_observation_verified": False,
                 "current_game_markets": len({(r["event_id"], r["market_id"]) for r in rows
                                              if r["stream_current"] and r["channel_scope_sub_type"] is None}),
                 "current_player_prop_markets": len({(r["event_id"], r["market_id"]) for r in rows
