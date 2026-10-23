@@ -37,7 +37,7 @@ def frame(market=219, *, subtype=None, sequence=1, op="u"):
                         "value": "10.00", "updated_at": 1792731906663622000}]]
     return {"event": "v2.market_selections", "scope": {"event_id": 123, **({"sub_type": subtype} if subtype else {})},
             "envelope": {"op": op}, "data": {"sport_event_id": 123, "market_id": market,
-            "info": {"id": market, "sequence_number": sequence, "selections": selections}}}
+            "info": {"id": market, "status": "active", "sequence_number": sequence, "selections": selections}}}
 
 
 def seeded():
@@ -117,6 +117,22 @@ def test_explicitly_suspended_selection_is_not_executable():
     rows = data.snapshot(now=NOW, connected=True)["levels"]
     assert all(row["executable_stake_usd"] == "0" for row in rows if row["strike_id"] == "home-strike")
     assert any(row["executable_stake_usd"] == "20.00" for row in rows if row["strike_id"] == "away-strike")
+
+
+def test_catalog_without_selection_rows_accepts_scoped_stream_identity_for_research_only():
+    payload = catalog()
+    payload["data"]["123"][0]["selections"] = None
+    data = ProphetXMarketData()
+    data.replace_catalog([payload], ["123"], observed_at=NOW)
+    data.apply(frame(), received_at=NOW)
+    view = data.snapshot(now=NOW, connected=True)
+    assert view["current_game_markets"] == 1
+    assert all(row["identity_evidence"] == "scoped_v2_stream_only" and row["research_only"]
+               for row in view["levels"])
+    stopped = frame(sequence=2)
+    stopped["data"]["info"]["status"] = "suspended"
+    data.apply(stopped, received_at=NOW)
+    assert all(row["executable_stake_usd"] == "0" for row in data.snapshot(now=NOW, connected=True)["levels"])
 
 
 def test_native_research_read_uses_the_existing_monitor_and_never_calls_placement():

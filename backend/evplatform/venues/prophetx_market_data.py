@@ -34,7 +34,8 @@ class ProphetXMarketData:
             "scope_sub_type": scope.get("sub_type"), "catalog_match": market is not None,
             "catalog_sub_type": market.get("sub_type") if market else None,
             "catalog_strike_count": len(market["strikes"]) if market else None,
-            "info_fields": sorted(info), "first_selection_fields": sorted(first),
+            "info_fields": sorted(info), "stream_market_status": info.get("status"),
+            "first_selection_fields": sorted(first),
             "first_strike_prefix": str(first.get("strike_id", ""))[:8]}
 
     def replace_catalog(self, responses: list[dict], event_ids: list[str], *, observed_at: datetime):
@@ -135,11 +136,23 @@ class ProphetXMarketData:
                         continue
                     strike = str(row.get("strike_id"))
                     identity = market["strikes"].get(strike)
-                    if identity is None or identity["outcome_id"] != str(row.get("outcome_id")):
-                        raise ValueError("Unknown ProphetX strike/outcome")
+                    if identity is None:
+                        if market["strikes"] or not row.get("strike_id") or row.get("outcome_id") is None:
+                            raise ValueError("Unknown ProphetX strike/outcome")
+                        # Some V4 market catalogs omit `selections` entirely.
+                        # A scoped v2 frame still identifies its strike/outcome,
+                        # but this remains research-only stream evidence.
+                        identity = {"outcome_id": str(row["outcome_id"]),
+                                    "name": str(row.get("name") or "")[:120], "status": "unknown"}
+                        identity_evidence = "scoped_v2_stream_only"
+                    else:
+                        identity_evidence = "v4_rest_and_scoped_v2"
+                    if identity["outcome_id"] != str(row.get("outcome_id")):
+                        raise ValueError("Conflicting ProphetX strike/outcome")
                     parsed = executable_level(row)
                     levels.append({"strike_id": strike, "outcome_id": identity["outcome_id"],
                                    "selection_name": identity["name"], "selection_status": identity["status"],
+                                   "identity_evidence": identity_evidence,
                                    "american_price": str(parsed["american_price"]),
                                    "available_stake_usd": str(parsed["executable_stake_usd"]),
                                    "gross_payout_per_usd_stake": str(parsed["gross_payout_per_usd_stake"]),
@@ -152,7 +165,8 @@ class ProphetXMarketData:
             return
         self.books[subject] = {"levels": levels, "received_at": received_at,
                                "sequence": info.get("sequence_number"),
-                               "scope_sub_type": scope.get("sub_type")}
+                               "scope_sub_type": scope.get("sub_type"),
+                               "stream_market_status": info.get("status")}
 
     def snapshot(self, *, now: datetime, connected: bool, limit: int = 20,
                  max_receipt_age_seconds: int = 30, max_catalog_age_seconds: int = 600) -> dict:
@@ -165,14 +179,16 @@ class ProphetXMarketData:
                 continue
             age = (now - book["received_at"]).total_seconds()
             current = (connected and catalog_current and 0 <= age <= max_receipt_age_seconds
-                       and market["status"] == "active")
+                       and market["status"] == "active"
+                       and str(book["stream_market_status"]).lower() in {"active", "open"})
             for level in book["levels"]:
                 level_current = (current and str(level["selection_status"]).lower() not in {
                     "suspended", "inactive", "closed", "withdrawn", "removed", "settled", "canceled", "cancelled"})
                 rows.append({"event_id": event_id, "market_id": market_id, "subject_id": subject_id,
                              "market_name": market["name"], "market_sub_type": market["sub_type"],
                              "channel_scope_sub_type": book["scope_sub_type"],
-                             "market_status": market["status"], **level,
+                             "market_status": market["status"],
+                             "stream_market_status": book["stream_market_status"], **level,
                              "local_receipt_at": book["received_at"].astimezone(timezone.utc).isoformat(),
                              "local_receipt_age_seconds": round(age, 3), "stream_current": level_current,
                              "executable_stake_usd": level["available_stake_usd"] if level_current else "0",
