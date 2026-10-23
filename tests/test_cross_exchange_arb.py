@@ -38,6 +38,8 @@ def test_fees_depth_identity_and_stale_offers_reject_false_hedges():
     assert compare_hedge(first, offer("kalshi", "Away")) is None
     assert compare_hedge(first, offer("novig", "Home")) is None
     assert compare_hedge(first, offer("novig", "Away", native_start="2026-10-25T20:05:00+00:00"))["status"] == "identity_unresolved"
+    assert compare_hedge(first, offer("polymarket_us", "Away",
+        identity_limitations=["Tie pays $0.50"]))["status"] == "identity_unresolved"
 
 
 def test_novig_cent_contract_and_prophetx_winnings_fee_are_normalized():

@@ -143,6 +143,8 @@ def moneyline_matches(market: Market, rows: list[dict], *, observed_at: datetime
         return []
     row, long_name, short_name, native_start = matches[0]
     digest = hashlib.sha256((row["question"] + "\n" + row["rules"]).encode()).hexdigest()
+    limitations = (("Native rules include a tie settlement; this two-winner estimate excludes ties",)
+        if re.search(r"\btie\b", row["rules"], re.IGNORECASE) else ())
     return [ResearchNativeMatch(
         venue="polymarket_us", source_market_id=market.id, source_event_id=market.event_id,
         source_market_fingerprint=market.identity(), native_market_id=row["slug"],
@@ -151,7 +153,8 @@ def moneyline_matches(market: Market, rows: list[dict], *, observed_at: datetime
         source_start=market.start_time, native_start=native_start,
         rules_sha256=digest, rules_excerpt=row["rules"][:300],
         normal_win_condition=f"{outcome} wins the full game; exceptional settlement remains unreviewed",
-        price_denomination_usd="1", catalog_observed_at=observed_at)
+        price_denomination_usd="1", catalog_observed_at=observed_at,
+        identity_limitations=limitations)
         for side, outcome in (("long", long_name), ("short", short_name))]
 
 

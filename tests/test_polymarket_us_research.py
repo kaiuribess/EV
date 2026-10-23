@@ -90,6 +90,15 @@ def test_complete_native_team_name_is_not_duplicated_with_abbreviated_safe_name(
     assert len(moneyline_matches(source_market(), [normalized], observed_at=NOW)) == 2
 
 
+def test_explicit_native_tie_rule_remains_a_research_limitation():
+    row = native_catalog()
+    row["rules"] += " If the game ends in a tie, each side settles to $0.50."
+    matches = moneyline_matches(source_market(), [row], observed_at=NOW)
+    assert len(matches) == 2
+    assert all("excludes ties" in item.identity_limitations[0] for item in matches)
+    assert all(item.public()["execution_eligible"] is False for item in matches)
+
+
 @pytest.mark.parametrize("change", [
     lambda row: row["teams"][0].update(name="Chicago Bears"),
     lambda row: row.update(market_start=(START + timedelta(minutes=1)).isoformat()),

@@ -178,7 +178,7 @@ function ReferenceResearchCard({ row, offers, historical, selectMarket }: {
     {!historical && row.native_venue_funnel && <small>Native funnel: {Object.entries(row.native_venue_funnel).map(([venue, value]) => `${human(venue)} ${human((value as Json).stage)} — ${text((value as Json).reason)}`).join(' · ')}</small>}
     {!historical && <NativeResearchOffers offers={offers} reason={nativeDiscoveryReason(row)} />}
     <p>{(row.limitations ?? []).slice(0, 5).join(' · ')}{historical ? ` · ${text(row.expiration_reason)}` : ''}</p>
-    <small>Provider-trusted normal WIN/LOSS estimate; exceptional settlements excluded. Research estimates do not authorize orders.</small>
+    <small>Provider-trusted two-winner WIN/LOSS estimate; ties and exceptional settlements are excluded where applicable. Research estimates do not authorize orders.</small>
   </button>
 }
 

@@ -111,7 +111,7 @@ def compare_hedge(offer_a, offer_b, *, settlement_cases=None,
         "execution_eligible": False,
         "limitations": ["Two separate legs can move or fill only partially",
             "Exceptional venue settlements and payout correlations are unreviewed",
-            *(["Native event start or outcome identity differs across venues"]
+            *(["Native timing or payout-condition identity is unresolved across venues"]
               if not identity_aligned else [])] if not exact else
             ["Two separate legs can move or fill only partially; no executor is implemented"]}
 
