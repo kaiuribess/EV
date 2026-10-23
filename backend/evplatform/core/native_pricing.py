@@ -50,6 +50,7 @@ class NativeFeeBound(NativeContract):
     per_unit_usd: Nonnegative
     per_fill_usd: Nonnegative
     fixed_order_usd: Nonnegative
+    fee_payment_timing: Literal["upfront_or_unknown", "winnings_only"] = "upfront_or_unknown"
     verified: bool = False
     source: str = Field(min_length=1)
     observed_at: datetime
@@ -66,11 +67,17 @@ class NativeFeeBound(NativeContract):
             raise NoSignal("Unverified or incompatible native fee bound")
         if not self.observed_at <= now < self.valid_until:
             raise NoSignal("Native fee bound is stale or future-dated")
+        if self.fee_payment_timing == "winnings_only" and instrument.venue != "prophetx":
+            raise NoSignal("Winnings-only fee timing is not verified for this venue")
         instrument.validate_quantity(quantity)
         with localcontext() as context:
             context.prec = 100
             maximum_fills = quantity / instrument.quantity_step
             return quantity * self.per_unit_usd + maximum_fills * self.per_fill_usd + self.fixed_order_usd
+
+    def maximum_upfront_fee(self, instrument: NativeInstrument, quantity: Decimal, now: datetime) -> Decimal:
+        fee = self.maximum_fee(instrument, quantity, now)
+        return Decimal(0) if self.fee_payment_timing == "winnings_only" else fee
 
 
 class NativeBook(NativeContract):
@@ -269,23 +276,25 @@ def research_native_estimate(market: Market, fair: FairValue, book: NativeBook,
         raise NoSignal("Insufficient depth at the best executable price for one minimum lot")
     cost = instrument.cost_for(quantity, level.price)
     fee_cap = book.fee_bound.maximum_fee(instrument, quantity, now)
-    debit = cost + fee_cap
+    debit = cost + book.fee_bound.maximum_upfront_fee(instrument, quantity, now)
     if cost < instrument.minimum_order_cost_usd:
         raise NoSignal("Minimum lot is below the venue's verified minimum cash order")
     payout = instrument.minimum_split_payout(quantity, level.price)
     if payout <= 0 or debit <= 0:
         raise NoSignal("Native cash units do not support a minimum-lot comparison")
     outcome = instrument.outcome
-    expected_profit = fair.probabilities[outcome] * payout - debit
-    sensitivity_profit = (fair.sensitivity_probabilities[outcome] * payout - debit
+    expected_profit = fair.probabilities[outcome] * payout - cost - fee_cap
+    sensitivity_profit = (fair.sensitivity_probabilities[outcome] * payout - cost - fee_cap
                           if fair.sensitivity_probabilities else None)
     return {"market_id": market.id, "venue": instrument.venue,
             "native_market_id": instrument.instrument_id, "outcome": outcome,
             "price": str(level.price), "minimum_quantity": str(quantity),
             "available_at_best_price": str(level.quantity),
             "cash_cost_usd": str(cost), "conservative_fee_usd": str(fee_cap),
+            "fee_payment_timing": book.fee_bound.fee_payment_timing,
             "maximum_debit_usd": str(debit), "normal_winning_payout_usd": str(payout),
-            "expected_profit_usd": str(expected_profit), "roi": str(expected_profit / debit),
+            "maximum_loss_usd": str(debit),
+            "expected_profit_usd": str(expected_profit), "roi": str(expected_profit / (cost + fee_cap)),
             "sensitivity_expected_profit_usd": str(sensitivity_profit) if sensitivity_profit is not None else None,
             "positive_estimate": expected_profit > 0 and (sensitivity_profit is None or sensitivity_profit > 0),
             "quality_mode": config.reference_quality_mode,
@@ -313,14 +322,14 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
         return min(binary_profit, (1 - non_decisive) * binary_profit) - intent.max_fee_usd
     expected_profit = profit_at(probability)
     ev = expected_profit / payout
-    roi = expected_profit / intent.reserved_cost_usd
+    roi = expected_profit / intent.maximum_economic_cost_usd
     sensitivity_p = (fair.sensitivity_probabilities[intent.instrument.outcome] - margin
                      if fair.sensitivity_probabilities else None)
     if sensitivity_p is not None and not 0 <= sensitivity_p <= 1:
         raise NoSignal("Pilot uncertainty allowance exceeds sensitivity probability")
     sensitivity_profit = profit_at(sensitivity_p) if sensitivity_p is not None else None
     sensitivity_ev = sensitivity_profit / payout if sensitivity_profit is not None else None
-    sensitivity_roi = sensitivity_profit / intent.reserved_cost_usd if sensitivity_profit is not None else None
+    sensitivity_roi = sensitivity_profit / intent.maximum_economic_cost_usd if sensitivity_profit is not None else None
     qualified = ev >= config.min_ev and roi >= config.min_roi and (
         sensitivity_ev is None or sensitivity_ev >= config.min_ev and sensitivity_roi >= config.min_roi)
     reasons = () if qualified else ("Both primary and sensitivity models must meet native EV and ROI thresholds",)
@@ -377,8 +386,8 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
             raise NoSignal("Pilot uncertainty allowance eliminates the modeled winning chance")
         sizing = quarter_kelly_budget(book, min(probabilities), bounds, available_cash_usd=available_cash_usd,
             unit_size_usd=unit_size_usd, now=now, max_stake_usd=max_stake_usd)
-        if sizing.budget_usd < sizing.minimum_cost_with_fees_usd:
-            raise NoSignal("Quarter-Kelly budget is below the verified native minimum including fees; skipped")
+        if sizing.budget_usd < sizing.minimum_upfront_debit_usd:
+            raise NoSignal("Quarter-Kelly budget is below the verified native minimum upfront debit; skipped")
         max_stake_usd = sizing.budget_usd
     try:
         max_stake_usd = D(max_stake_usd)
@@ -395,10 +404,12 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     with localcontext() as context:
         context.prec = 100
         unit_cost = instrument.cost_for(step, price) / step
-        variable_cost = unit_cost + fee.per_unit_usd + fee.per_fill_usd / step
-        if max_stake_usd <= fee.fixed_order_usd:
+        upfront = fee.fee_payment_timing != "winnings_only"
+        variable_cost = unit_cost + (fee.per_unit_usd + fee.per_fill_usd / step if upfront else D(0))
+        fixed_upfront_fee = fee.fixed_order_usd if upfront else D(0)
+        if max_stake_usd <= fixed_upfront_fee:
             raise NoSignal("Native order budget is smaller than fixed fees")
-        affordable = ((max_stake_usd - fee.fixed_order_usd) / variable_cost / step).to_integral_value(rounding=ROUND_FLOOR) * step
+        affordable = ((max_stake_usd - fixed_upfront_fee) / variable_cost / step).to_integral_value(rounding=ROUND_FLOOR) * step
     quantity = min(affordable, available)
     if instrument.maximum_quantity is not None:
         quantity = min(quantity, instrument.maximum_quantity)
@@ -410,6 +421,7 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     identity = str(uuid4())
     intent = NativeOrderIntent(id=identity, client_order_id=str(uuid4()), instrument=instrument,
         quantity=quantity, limit_price=price, max_fee_usd=maximum_fee, fee_source=fee.source,
+        fee_payment_timing=fee.fee_payment_timing,
         fees_verified=True, created_at=now, mode=mode)
     if intent.reserved_cost_usd > max_stake_usd:
         raise NoSignal("Native rounded reservation exceeds stake budget")
@@ -444,6 +456,8 @@ def native_revalidate_intent(intent: NativeOrderIntent, market: Market, fair: Fa
     if available < quantity:
         raise NoSignal("Insufficient native liquidity at the original limit")
     fees = book.fee_bound.maximum_fee(intent.instrument, quantity, now)
+    if intent.fee_payment_timing != book.fee_bound.fee_payment_timing:
+        raise NoSignal("Native fee payment timing changed after intent creation")
     if fees + paid > intent.max_fee_usd:
         raise NoSignal("Current native fees exceed the original reservation")
     # Keep the original durable ID and price. This is a validation result, not

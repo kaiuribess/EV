@@ -25,6 +25,7 @@ class StakeSizing(NativeContract):
     minimum_quantity: Positive
     minimum_cost_usd: Positive
     minimum_cost_with_fees_usd: Positive
+    minimum_upfront_debit_usd: Positive
     minimum_evidence: str = Field(min_length=1)
 
 
@@ -39,7 +40,8 @@ def minimum_order(book, price, now):
         quantity = max(ins.minimum_quantity, cash_steps * ins.quantity_step)
         ins.validate_quantity(quantity, order=True)
         cost = ins.cost_for(quantity, price)
-        return quantity, cost, cost + book.fee_bound.maximum_fee(ins, quantity, now)
+        fee = book.fee_bound
+        return quantity, cost, cost + fee.maximum_fee(ins, quantity, now), cost + fee.maximum_upfront_fee(ins, quantity, now)
 
 
 def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_size_usd, now,
@@ -51,13 +53,13 @@ def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_
         raise NoSignal("No verified available account cash after pending reservations")
     price = book.asks[0].price if price is None else price
     ins = book.instrument
-    quantity, cost, reserved = minimum_order(book, price, now)
+    quantity, cost, economic_cost, upfront_debit = minimum_order(book, price, now)
     with localcontext() as context:
         context.prec = 100
         # Match size may be much smaller than the NEW order minimum. Reserve
         # for a cash rounding loss on every smallest legal partial match.
         gross = ins.minimum_split_payout(quantity, price) / quantity
-        unit_cost = reserved / quantity
+        unit_cost = economic_cost / quantity
         p = probability * (1 - bounds.non_decisive_probability())
         fraction = max(D(0), min(D(1), (p * gross - unit_cost) / (gross - unit_cost))) if gross > unit_cost else D(0)
         budget = cash * D("0.25") * fraction
@@ -68,5 +70,6 @@ def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_
             budget = min(budget, cap)
     return StakeSizing(unit_size_usd=unit_size_usd, account_cash_after_reservations_usd=cash,
         conservative_probability=p, full_kelly_fraction=fraction, budget_usd=budget,
-        minimum_quantity=quantity, minimum_cost_usd=cost, minimum_cost_with_fees_usd=reserved,
+        minimum_quantity=quantity, minimum_cost_usd=cost, minimum_cost_with_fees_usd=economic_cost,
+        minimum_upfront_debit_usd=upfront_debit,
         minimum_evidence=ins.order_minimum_source)

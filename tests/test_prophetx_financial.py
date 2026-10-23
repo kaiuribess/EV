@@ -34,6 +34,11 @@ def test_wallet_sync_accepts_only_bounded_provider_clock_skew():
             "gec_balance": "0", "unmatched_order_balance_status": "succeed",
             "unmatched_order_last_synced_at": iso(.6)}
     assert balance_facts({"data": data}, observed_at=NOW) == (D("25"), D("0"), D("0"))
+    data["gec_balance"] = "100"
+    assert balance_facts({"data": data}, observed_at=NOW)[0] == D("25")
+    with pytest.raises(ReconciliationError, match="exposure-credit"):
+        balance_facts({"data": data}, observed_at=NOW, funded_cash_only=True)
+    data["gec_balance"] = "0"
     data["unmatched_order_last_synced_at"] = iso(2.1)
     with pytest.raises(ReconciliationError):
         balance_facts({"data": data}, observed_at=NOW)
@@ -351,7 +356,19 @@ async def test_inventory_matches_owned_orders_positions_and_cash(case):
 async def test_inventory_missing_history_review_never_assumes_empty_account(case):
     order, client, _ = case
     result = await probe_prophetx_account(client, [order], observed_at=NOW)
-    assert not result.reconciled and result.position_count is None and not result.cash_available_verified
+    assert not result.reconciled and result.position_count is None and result.cash_available_verified
+    assert result.balance_usd == D("89.8")
+
+
+async def test_current_wallet_cash_excludes_credit_without_claiming_complete_inventory(case):
+    order, client, _ = case
+    client.balance["gec_balance"] = "250"
+    result = await probe_prophetx_account(client, [order], observed_at=NOW)
+    assert result.cash_available_verified and result.balance_usd == D("89.8")
+    assert not result.reconciled and result.position_count is None
+    client.balance["unmatched_order_last_synced_at"] = iso(-11)
+    with pytest.raises(ReconciliationError, match="Unmatched wallet balance"):
+        await probe_prophetx_account(client, [order], observed_at=NOW)
 
 
 async def test_inventory_external_position_missing_managed_order_and_private_change_block(case):
@@ -385,7 +402,7 @@ async def test_aggregate_wallet_exposure_mismatch_blocks_inventory(case):
     order, client, review = case
     client.balance["matched_order_balance"] = "11"
     result = await probe_prophetx_account(client, [order], review=review, observed_at=NOW)
-    assert not result.reconciled and "wallet exposure differs" in result.reason and not result.cash_available_verified
+    assert not result.reconciled and "wallet exposure differs" in result.reason and result.cash_available_verified
 
 
 async def test_empty_account_requires_complete_history_and_actual_zero_exposure(case):
@@ -400,7 +417,7 @@ async def test_changed_native_limit_price_does_not_clear_inventory(case):
     order, client, review = case
     client.row["price"] = 125
     result = await probe_prophetx_account(client, [order], review=review, observed_at=NOW)
-    assert not result.reconciled and not result.cash_available_verified
+    assert not result.reconciled and result.cash_available_verified
 
 
 def close_win(case):
@@ -419,6 +436,45 @@ async def test_settlement_uses_actual_cash_and_stable_revision(case):
     assert result.settled_at == NOW-timedelta(seconds=2)
     again = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
     assert result.settlement_id == again.settlement_id
+
+
+async def test_winnings_only_commission_arriving_at_settlement_is_not_double_counted(case):
+    order, client, review = case
+    order = order.model_copy(update={"intent": order.intent.model_copy(update={
+        "fee_payment_timing": "winnings_only"}), "fees": D(0)})
+    client.row["fee"] = ".2"
+    client.wallet = [client.wallet[0]]
+    client.balance["balance"] = "90"
+    close_win(case)
+    client.wallet[-1].update(balance_before="90", balance="112")
+    client.wallet.append(dict(details="settlement-fee-1", user_id=USER, trade_id=OID,
+        market_id="219", status="Completed", transaction_type="COMMISSION",
+        transaction_sub_type="COMMISSION", amount=".2", change="-.2",
+        balance_before="112", balance="111.8", created_at=iso(-1)))
+    result = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
+    assert result.payout_usd == D("22") and result.additional_fee_usd == D(".2")
+    assert result.payout_usd-order.filled_cost_usd-order.fees-result.additional_fee_usd == D("11.8")
+    folded = order.model_copy(update={"fees": D(".2")})
+    already_counted = await reconcile_prophetx_settlement(client, folded, [folded], review=review, observed_at=NOW)
+    assert already_counted.additional_fee_usd == 0
+    assert already_counted.payout_usd-folded.filled_cost_usd-folded.fees == D("11.8")
+
+
+async def test_losing_winnings_only_order_cannot_acquire_new_commission(case):
+    order, client, review = case
+    order = order.model_copy(update={"intent": order.intent.model_copy(update={
+        "fee_payment_timing": "winnings_only"}), "fees": D(0)})
+    client.wallet = [client.wallet[0]]
+    client.row.update(status="closed", winning_status="loss", settled_at=iso(-2), fee="0")
+    result = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
+    assert result.payout_usd == result.additional_fee_usd == 0
+    client.wallet.append(dict(details="unexpected-losing-fee", user_id=USER, trade_id=OID,
+        market_id="219", status="Completed", transaction_type="COMMISSION",
+        transaction_sub_type="COMMISSION", amount=".1", change="-.1",
+        balance_before="90", balance="89.9", created_at=iso(-1)))
+    client.row["fee"] = ".1"
+    with pytest.raises(ReconciliationError, match="unexpected winnings fee"):
+        await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
 
 
 async def test_closed_settlement_can_obtain_fee_from_exact_history(case):

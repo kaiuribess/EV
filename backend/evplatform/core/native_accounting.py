@@ -195,6 +195,9 @@ class NativeOrderIntent(NativeContract):
     limit_price: ExactDecimal
     max_fee_usd: Nonnegative
     fee_source: str = Field(min_length=1)
+    # Old intents remain conservative. A reviewed winnings-only ProphetX fee
+    # stays in EV and the fee cap, but is not funded before a possible win.
+    fee_payment_timing: Literal["upfront_or_unknown", "winnings_only"] = "upfront_or_unknown"
     fees_verified: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     mode: Literal["sandbox", "production"]
@@ -203,6 +206,8 @@ class NativeOrderIntent(NativeContract):
     def valid_intent(self):
         if not self.instrument.verified or not self.fees_verified:
             raise ValueError("Native intent requires reviewed instrument and fee bounds")
+        if self.fee_payment_timing == "winnings_only" and self.instrument.venue != "prophetx":
+            raise ValueError("Winnings-only fee timing is reviewed only for ProphetX")
         self.instrument.validate_quantity(self.quantity, order=True)
         self.instrument.validate_price(self.limit_price)
         if (self.instrument.minimum_order_cost_usd is not None and
@@ -220,6 +225,12 @@ class NativeOrderIntent(NativeContract):
 
     @property
     def reserved_cost_usd(self) -> Decimal:
+        return self.maximum_cost_usd + (Decimal(0) if self.fee_payment_timing == "winnings_only"
+                                        else self.max_fee_usd)
+
+    @property
+    def maximum_economic_cost_usd(self) -> Decimal:
+        """Conservative cost for pricing, independent of when fees are paid."""
         return self.maximum_cost_usd + self.max_fee_usd
 
 

@@ -320,6 +320,49 @@ def test_fractional_kalshi_and_prophetx_stakes_keep_native_quantity(market, quot
     assert stake.intent.minimum_gross_payout_usd == D("8.34")  # each .01 match may round profit down
 
 
+def prophetx_one_dollar_fixture(market, quotes, *, fair_probability=".60", timing="winnings_only"):
+    m, q, book, fair, config, now = setup_native(market, quotes, venue="prophetx",
+        price="100", quantity="4", per_unit_usd=".02", per_fill_usd="0", fixed_order_usd="0",
+        fee_payment_timing=timing)
+    # A $1 minimum *fill* is a fixture assumption, not a verified venue fact.
+    instrument = book.instrument.model_copy(update={"quantity_step": D("1"),
+        "minimum_order_cost_usd": D("1"), "order_minimum_verified": True,
+        "order_minimum_source": "OFFLINE minimum-and-fill fixture"})
+    book = book.model_copy(update={"instrument": instrument, "fee_bound": book.fee_bound.model_copy(
+        update={"instrument_fingerprint": instrument_fingerprint(instrument)})})
+    p = D(fair_probability)
+    fair = fair.model_copy(update={"probabilities": {"home": p, "away": 1-p}})
+    return m, q, book, fair, config, now
+
+
+def test_prophetx_one_dollar_limit_keeps_win_fee_in_ev_but_not_debit(market, quotes):
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes)
+    found = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+        mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    assert found.intent.quantity == D("1") and found.intent.reserved_cost_usd == D("1")
+    assert found.intent.max_fee_usd == D(".02") and found.expected_profit_usd == D(".18")
+    assert found.sizing.minimum_cost_with_fees_usd == D("1.02")
+    assert found.sizing.minimum_upfront_debit_usd == D("1")
+    with pytest.raises(NoSignal, match="minimum upfront debit"):
+        native_opportunity(m, fair, book.model_copy(update={"fee_bound": book.fee_bound.model_copy(
+            update={"fee_payment_timing": "upfront_or_unknown"})}), config, max_stake_usd=D("1"),
+            mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    with pytest.raises(NoSignal, match="timing changed"):
+        native_revalidate_intent(found.intent, m, fair, book.model_copy(update={
+            "fee_bound": book.fee_bound.model_copy(update={"fee_payment_timing": "upfront_or_unknown"})}),
+            config, now=now)
+
+
+def test_prophetx_one_dollar_no_forced_kelly_and_fee_negative_reject(market, quotes):
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes, fair_probability=".509")
+    with pytest.raises(NoSignal, match="below the verified native minimum"):
+        native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+            mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    with pytest.raises(NoSignal):
+        native_opportunity(m, fair, book.model_copy(update={"status": "suspended"}), config,
+            max_stake_usd=D("1"), mode="sandbox", now=now)
+
+
 def test_negative_native_observations_are_visible_but_not_qualified(market, quotes):
     found = candidate(setup_native(market, quotes, price="0.650"))
     assert found.expected_profit_usd < 0

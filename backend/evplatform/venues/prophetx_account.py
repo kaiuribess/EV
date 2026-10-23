@@ -1,4 +1,4 @@
-"""Full-history, funded-cash ProphetX inventory verification (read-only)."""
+"""Authenticated ProphetX wallet cash and separate full-inventory verification."""
 from datetime import timedelta
 from decimal import Decimal
 
@@ -11,7 +11,7 @@ from .reconciliation import ReconciliationError, _number, _object, _text
 from .common import decimal_value
 
 
-def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10)):
+def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10), funded_cash_only=False):
     data = _object(_object(raw, "balance").get("data"), "balance data")
     if data.get("unmatched_order_balance_status") != "succeed":
         raise ReconciliationError("ProphetX unmatched balance has not synchronized")
@@ -24,19 +24,17 @@ def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10)):
     cash = _number(data.get("balance"), "available balance")
     matched = _number(data.get("matched_order_balance"), "matched balance")
     unmatched = _number(data.get("unmatched_order_balance"), "unmatched balance")
-    if _number(data.get("gec_balance"), "global exposure credit") != 0:
+    # The documented `balance` is available cash, distinct from GEC. Never
+    # add credit to it; funded-cash-only inventory review still excludes GEC.
+    credit = _number(data.get("gec_balance"), "global exposure credit")
+    if funded_cash_only and credit != 0:
         raise ReconciliationError("ProphetX exposure-credit accounting is outside funded-cash scope")
     return cash, matched, unmatched
 
 
 async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids=frozenset(),
                                 review: ProphetXAccountReview | None = None, observed_at=None):
-    """A complete scan is account-scoped and never creates authorization.
-
-    No short lookback is called complete. Missing inception/funding evidence
-    returns an actionable unreconciled snapshot. Resting and filled inventory
-    must agree with both durable orders and authenticated wallet aggregates.
-    """
+    """Verify current cash independently; complete inventory never comes from a balance alone."""
     # Local import permits the shared dispatcher to import this adapter.
     from .account_probe import NativeAccountSnapshot
     now = observed_at or utcnow()
@@ -45,10 +43,14 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 account_fingerprint=fingerprint, identity_verified=True, observed_at=now)
     private = getattr(client, "private", None)
     captured_fence = private.begin_probe(client=client) if private is not None else None
-    before = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow())
+    before = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow(),
+                           funded_cash_only=review is not None)
     if review is None:
-        return NativeAccountSnapshot(**base, balance_usd=before[0], reason=
-            "Account inception and funded-cash-only review is required for complete ProphetX inventory")
+        cash_verified = (authenticated_identity(client) == (user, fingerprint)
+                         and (private is None or private.fence(client=client) == captured_fence))
+        return NativeAccountSnapshot(**base, balance_usd=before[0], cash_available_verified=cash_verified,
+            reason="Account inception and funded-cash-only review is required for complete ProphetX inventory"
+                   if cash_verified else "ProphetX account identity changed during wallet read")
     history = await complete_order_history(client, review, observed_at=observed_at)
     relevant = [o for o in managed_orders if o.venue == "prophetx" and o.mode == client.settings.environment
                 and o.id not in settled_order_ids and o.status != OrderStatus.REJECTED]
@@ -105,11 +107,13 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
     expected_resting = {oid for oid, o in owned.items() if o.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}}
     if set(resting) != expected_resting:
         reasons.append("ProphetX resting order inventory differs")
-    after = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow())
+    after = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow(),
+                          funded_cash_only=True)
     if before != after or before[1:] != (matched_stake, unmatched_stake):
         reasons.append("ProphetX wallet exposure differs or changed during inventory reads")
-    if (authenticated_identity(client) != (user, fingerprint) or
-            (private is not None and private.fence(client=client) != captured_fence)):
+    identity_stable = (authenticated_identity(client) == (user, fingerprint) and
+                       (private is None or private.fence(client=client) == captured_fence))
+    if not identity_stable:
         reasons.append("ProphetX private account changed during inventory reads")
     private_as_of = None
     if private is None or captured_fence is None:
@@ -122,7 +126,7 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
             reasons.append("ProphetX private history watermark, order facts, or account fence did not reconcile")
     return NativeAccountSnapshot(**{**base, "observed_at": observed_at or utcnow()}, balance_usd=after[0],
         open_order_count=len(resting), position_count=len(positions), reconciled=not reasons,
-        cash_available_verified=not reasons,
+        cash_available_verified=identity_stable and before == after,
         private_connection_generation=captured_fence[0] if private_as_of is not None else None,
         private_revision=captured_fence[1] if private_as_of is not None else None,
         private_as_of=private_as_of,

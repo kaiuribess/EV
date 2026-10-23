@@ -80,7 +80,7 @@ async def reconcile_prophetx_settlement(client, order, managed_orders, *,
                and o.account_fingerprint == fingerprint and o.intent.instrument.instrument_id == order.intent.instrument.instrument_id]
     if len(related) != 1 or related[0].id != order.id:
         raise ReconciliationError("Shared ProphetX position settlement is unsupported")
-    balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow())
+    balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow(), funded_cash_only=True)
     raw = _object(await client.reconcile_order(order.venue_order_id), "order response")
     row = _object(raw.get("data"), "owned order")
     if row.get("status") != "closed":
@@ -108,11 +108,28 @@ async def reconcile_prophetx_settlement(client, order, managed_orders, *,
         expected_order_id=order.venue_order_id, observed_at=at, reporting_watermark=matched.last_synced_at)
     snap = report.snapshot
     if (snap.cumulative_quantity != order.filled_quantity or snap.cumulative_cost_usd != order.filled_cost_usd
-            or snap.cumulative_gross_payout_usd != order.gross_payout_usd or snap.cumulative_fee_usd != order.fees
+            or snap.cumulative_gross_payout_usd != order.gross_payout_usd
+            or not order.fees <= snap.cumulative_fee_usd <= order.intent.max_fee_usd
             or matched.last_synced_at < settled):
         raise ReconciliationError("ProphetX settlement differs from reconciled fill accounting")
+    settlement_fee = snap.cumulative_fee_usd - order.fees
     wallet = validate_wallet_rows(wallet_history.rows, user_id=user, order_id=order.venue_order_id,
                                   market_id=row.get("market_id"), observed_at=at)
+    pre_settlement_fee = sum((_number(x["amount"], "pre-settlement commission") for x in wallet
+        if x["transaction_type"] == "COMMISSION" and
+        source_time(x["created_at"], observed_at=at, name="Commission") < settled), Decimal(0))
+    # A reporting refresh may already have folded the settlement commission
+    # into the durable cumulative fee before this settlement read. Accept only
+    # the earlier total or the final total, never an unsupported intermediate.
+    if order.fees not in {pre_settlement_fee, snap.cumulative_fee_usd}:
+        raise ReconciliationError("ProphetX commission timing differs from reconciled fees")
+    post_settlement_fee = sum((_number(x["amount"], "settlement commission") for x in wallet
+        if x["transaction_type"] == "COMMISSION" and
+        source_time(x["created_at"], observed_at=at, name="Commission") >= settled), Decimal(0))
+    if post_settlement_fee != snap.cumulative_fee_usd - pre_settlement_fee:
+        raise ReconciliationError("ProphetX settlement commission lacks matching wallet evidence")
+    if not winning and order.intent.fee_payment_timing == "winnings_only" and post_settlement_fee:
+        raise ReconciliationError("A losing ProphetX order has an unexpected winnings fee")
     pays = [row for row in wallet if row["transaction_type"] == "PAY"]
     payout = sum((_number(row["amount"], "settlement credit") for row in pays), Decimal(0))
     if grade in {"won", "profit"}:
@@ -128,13 +145,15 @@ async def reconcile_prophetx_settlement(client, order, managed_orders, *,
         "native_order_id": order.venue_order_id, "grade": grade,
         "settled_at": settled.isoformat(), "matched_watermark": matched.last_synced_at.isoformat(),
         "payout_usd": str(payout), "execution_fees_usd": str(order.fees),
+        "settlement_fee_usd": str(settlement_fee),
         "transactions": [{k: x[k] for k in ("details", "transaction_type", "amount", "change", "created_at")}
                          for x in wallet]}, sort_keys=True, default=str)
     # Stable revision changes on a real financial correction; clocks from a
     # later reporting sync alone must not create a duplicate settlement.
-    revision = json.dumps([order.venue_order_id, grade, settled.isoformat(), str(payout), str(order.fees),
+    revision = json.dumps([order.venue_order_id, grade, settled.isoformat(), str(payout),
+                           str(order.fees), str(settlement_fee),
                            sorted(str(x["details"]) for x in wallet)], separators=(",", ":"))
     return NativeSettlement(order_id=order.id, venue="prophetx", account_fingerprint=fingerprint,
         environment=order.mode, market_fingerprint=order.market_fingerprint,
         settlement_id="prophetx:"+hashlib.sha256(revision.encode()).hexdigest(),
-        payout_usd=payout, settled_at=settled, evidence=evidence)
+        payout_usd=payout, additional_fee_usd=settlement_fee, settled_at=settled, evidence=evidence)

@@ -156,7 +156,7 @@ async def observe_monitor_cash(client, *, now: Callable[[], datetime] = utcnow) 
     elif venue == "prophetx":
         row = _object(_object(await client.fetch_balance()).get("data"))
         result.update(reported_balance_usd=_money(row.get("balance")),
-                      account_scope="Connected monitor session; reported balance may include exposure credits")
+                      account_scope="Connected ProphetX wallet; reported available cash excludes separately listed exposure credit")
         for field, output in (("gec_balance", "reported_exposure_credit_usd"),
                               ("matched_order_balance", "reported_matched_order_balance_usd"),
                               ("unmatched_order_balance", "reported_unmatched_order_balance_usd")):

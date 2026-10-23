@@ -235,4 +235,4 @@ async def test_prophetx_signed_registration_identity_does_not_claim_inventory_re
         client.request = request
         snapshot = await probe_native_account(client)
     assert snapshot.identity_verified and str(snapshot.balance_usd) == "50.23"
-    assert not snapshot.reconciled and not snapshot.cash_available_verified
+    assert not snapshot.reconciled and snapshot.cash_available_verified
