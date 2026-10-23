@@ -930,20 +930,33 @@ class NativeMonitor(Plugin):
                         if not isinstance(row, dict):
                             continue
                         subtype = row.get("sub_type")
-                        selections = row.get("selections")
                         if (row.get("status") == "active" and isinstance(subtype, str)
-                                and subtype.startswith("player_") and isinstance(selections, list)
-                                and selections and any(isinstance(group, list) and group for group in selections)
-                                and (event_id, subtype) not in {(item[2], item[3]) for item in prop_candidates}):
-                            score = max((count for market, count in source_markets
-                                if market.market_type == "player_prop"
-                                and events[event_id].get("name") == market.event_name
-                                and row.get("player_id") == market.player_id
+                                and subtype.startswith("player_")
+                                and (event_id, subtype) not in {(item[-2], item[-1])
+                                                                 for item in prop_candidates}):
+                            # Some current V4 prop rows omit selections/line.
+                            # A subtype is enough to monitor a research channel,
+                            # but never enough for exact native market matching.
+                            event = events[event_id]
+                            start = _aware(event.get("scheduled"))
+                            related = [(market, int(count)) for market, count in source_markets
+                                if market.market_type == "player_prop" and start is not None
+                                and event.get("name") == market.event_name
+                                and (event.get("league") == market.league or
+                                     market.league == "NBA" and event.get("tournament_id") == 132)
+                                and abs((start-market.start_time).total_seconds()) <= 120]
+                            exact = max((count for market, count in related
+                                if row.get("player_id") == market.player_id
                                 and row.get("statistic") == market.statistic
                                 and row.get("period") in {"full", "full_game", "FULL"}
                                 and str(row.get("line")) == str(market.line)), default=0)
-                            prop_candidates.append((-int(score >= 3), -score, event_id, subtype))
-            for _, _, event_id, subtype in sorted(prop_candidates)[:config.get(
+                            family = subtype.removeprefix("player_total_") if subtype.startswith(
+                                "player_total_") else None
+                            family_score = max((count for market, count in related
+                                if market.statistic == family), default=0)
+                            prop_candidates.append((-int(exact >= 3), -exact,
+                                -int(family_score >= 3), -family_score, event_id, subtype))
+            for *_, event_id, subtype in sorted(prop_candidates)[:config.get(
                     "max_discovered_prop_subscriptions", 3)]:
                 props.setdefault(event_id, []).append(subtype)
             if hasattr(self.client, "public_market_data"):

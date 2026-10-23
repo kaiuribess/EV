@@ -119,3 +119,41 @@ async def test_prophetx_exact_prop_subtype_wins_single_subscription_slot(monkeyp
         discovery_status="disabled", discovered_event_ids=[])
     await NativeMonitor._refresh_discovery(monitor)
     assert monitor.discovered_prop_subtypes == {"202": ["player_points"]}
+
+
+@pytest.mark.asyncio
+async def test_prophetx_missing_rest_prop_selections_still_get_research_channel(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+    async def no_matching_side_effects(_):
+        return []
+    monkeypatch.setattr(NativeMonitor, "_refresh_research_matches", no_matching_side_effects)
+    event = {"event_id": 202, "name": "Away at Home", "status": "not_started",
+             "scheduled": (NOW+timedelta(hours=2)).isoformat()}
+
+    class Client:
+        async def discover_sports(self, *, active_events_only):
+            return {"data": {"tournaments": [{"id": 31, "name": "NFL"}]}}
+
+        async def discover_events(self, *, tournament_id):
+            assert tournament_id == 31
+            return {"data": {"sport_events": [event]}}
+
+        async def discover_markets(self, event_ids):
+            return {"data": {"202": [
+                {"id": 300, "sub_type": "player_total_receptions", "status": "active",
+                 "selections": [[{"strike_id": "receptions"}]]},
+                {"id": 301, "sub_type": "player_total_receiving_yards", "status": "active",
+                 "selections": None}]}}
+
+    source = SimpleNamespace(event_name="Away at Home", league="NFL",
+        start_time=NOW+timedelta(hours=2), market_type="player_prop",
+        player_id="player-1", statistic="receiving_yards", line="54.5")
+    engine = SimpleNamespace(consensus_estimates={"source": {"independent_book_count": 3}},
+                             markets={"source": source})
+    monitor = SimpleNamespace(client=Client(), engine=engine,
+        context=SimpleNamespace(config={"discovery_tournament_ids": [],
+            "discovery_leagues": ["NFL"], "max_discovered_events": 1,
+            "max_discovered_prop_subscriptions": 1}),
+        discovery_status="disabled", discovered_event_ids=[])
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovered_prop_subtypes == {"202": ["player_total_receiving_yards"]}
