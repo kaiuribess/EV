@@ -18,6 +18,24 @@ class ProphetXMarketData:
         self.books: dict[tuple[str, str, str], dict] = {}
         self.frames = 0
         self.rejected_frames = 0
+        self.last_rejection: dict | None = None
+
+    def _reject(self, reason: str, frame: dict):
+        data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
+        scope = frame.get("scope") if isinstance(frame.get("scope"), dict) else {}
+        market = self.catalog.get((str(data.get("sport_event_id")), str(data.get("market_id"))))
+        info = data.get("info") if isinstance(data.get("info"), dict) else {}
+        groups = info.get("selections")
+        first = next((row for group in groups if isinstance(group, list)
+                      for row in group if isinstance(row, dict)), {}) if isinstance(groups, list) else {}
+        self.rejected_frames += 1
+        self.last_rejection = {"reason": reason, "event_id": str(data.get("sport_event_id")),
+            "market_id": str(data.get("market_id")), "scope_event_id": str(scope.get("event_id")),
+            "scope_sub_type": scope.get("sub_type"), "catalog_match": market is not None,
+            "catalog_sub_type": market.get("sub_type") if market else None,
+            "catalog_strike_count": len(market["strikes"]) if market else None,
+            "info_fields": sorted(info), "first_selection_fields": sorted(first),
+            "first_strike_prefix": str(first.get("strike_id", ""))[:8]}
 
     def replace_catalog(self, responses: list[dict], event_ids: list[str], *, observed_at: datetime):
         """Install one complete, event-keyed REST discovery round atomically."""
@@ -81,7 +99,7 @@ class ProphetXMarketData:
         data = frame.get("data")
         scope = frame.get("scope")
         if not isinstance(data, dict) or not isinstance(scope, dict):
-            self.rejected_frames += 1
+            self._reject("missing_data_or_scope", frame)
             return
         event_id, market_id = str(data.get("sport_event_id")), str(data.get("market_id"))
         key = (event_id, market_id)
@@ -90,7 +108,7 @@ class ProphetXMarketData:
         if (str(scope.get("event_id")) != event_id or market is None or not isinstance(info, dict)
                 or info.get("id") is None or (scope.get("sub_type") is not None
                     and scope["sub_type"] != market["sub_type"])):
-            self.rejected_frames += 1
+            self._reject("scope_or_catalog_identity", frame)
             self.invalidate(catalog_uncertain=True)
             return
         subject = (event_id, market_id, str(info["id"]))
@@ -100,7 +118,7 @@ class ProphetXMarketData:
         groups = info.get("selections")
         if not isinstance(groups, list) or any(not isinstance(group, list) for group in groups):
             self.books.pop(subject, None)
-            self.rejected_frames += 1
+            self._reject("selection_shape", frame)
             return
         levels = []
         try:
@@ -128,9 +146,9 @@ class ProphetXMarketData:
                                    "updated_at_raw": parsed["source_observed_at"]})
             if len({(row["strike_id"], row["american_price"]) for row in levels}) != len(levels):
                 raise ValueError("Duplicate ProphetX level")
-        except (ValueError, KeyError, TypeError, ArithmeticError):
+        except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
             self.books.pop(subject, None)
-            self.rejected_frames += 1
+            self._reject(str(exc) if isinstance(exc, ValueError) else "malformed_selection", frame)
             return
         self.books[subject] = {"levels": levels, "received_at": received_at,
                                "sequence": info.get("sequence_number"),
@@ -163,6 +181,7 @@ class ProphetXMarketData:
                                     item["event_id"], item["market_id"], item["strike_id"]))
         return {"catalog_market_count": len(self.catalog), "book_subject_count": len(self.books),
                 "market_frame_count": self.frames, "rejected_market_frames": self.rejected_frames,
+                "last_rejection": self.last_rejection,
                 "catalog_at": self.catalog_at.isoformat() if self.catalog_at else None,
                 "catalog_current": catalog_current,
                 "current_game_markets": len({(r["event_id"], r["market_id"]) for r in rows
