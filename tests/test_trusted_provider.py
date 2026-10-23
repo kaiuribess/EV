@@ -1,4 +1,5 @@
 """Provider-trusted probabilities are real-source research, never order permission."""
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -107,6 +108,40 @@ def test_trusted_rejects_suspension_incomplete_pair_and_stale_poll():
         market = updates[0][0]
         with pytest.raises(NoSignal):
             fair_value(market, [q for _, q in updates], config(), NOW)
+
+
+@pytest.mark.parametrize("scope", ["paginated_response_not_atomic", "incomplete_snapshot"])
+def test_complete_parlay_pair_from_bounded_board_is_labeled_research(scope):
+    envelope = frame()
+    if scope == "paginated_response_not_atomic":
+        envelope = replace(envelope, metadata={**envelope.metadata,
+            "headers": {"x-result-has-more": "true", "x-next-offset": "500"}})
+    else:
+        rows = [{"kind": "game", "bookmaker": book, "market_key": "h2h",
+            "event_id": "event-1", "home_team": "Home", "away_team": "Away",
+            "commence_time": (NOW + timedelta(hours=1)).isoformat(),
+            "home_ml": -110, "away_ml": -110, "period": "FULL"}
+            for book in ("pinnacle", "fanduel")]
+        envelope = ProviderEnvelope("parlay_ws", "initial_state",
+            {"data": rows, "snapshot_complete": False, "snapshot_scope": "recent_rows"},
+            NOW, 1, published_at=NOW, metadata={"sport": "basketball_nba"})
+    _, updates = projected(envelope)
+    market = updates[0][0]
+    fair = fair_value(market, [q for _, q in updates], config(), NOW)
+    assert len(fair.references) == 2 and not fair.execution_eligible
+    assert all(ref["verification_reason"] == scope for ref in fair.references)
+    assert any("board coverage is bounded or paginated" in reason
+               for reason in fair.ineligibility_reasons)
+    with pytest.raises(NoSignal):
+        fair_value(market, [q for _, q in updates], config("strict_verified"), NOW)
+
+
+def test_degraded_or_truncated_parlay_board_remains_unusable_for_trusted_research():
+    for headers in ({"x-result-degraded": "pinnacle"}, {"x-result-truncated": "true"}):
+        envelope = replace(frame(), metadata={"sport": "basketball_nba", "headers": headers})
+        _, updates = projected(envelope)
+        with pytest.raises(NoSignal):
+            fair_value(updates[0][0], [q for _, q in updates], config(), NOW)
 
 
 def test_trusted_keeps_strict_mode_and_source_mapping_separate():
