@@ -149,7 +149,13 @@ class NativeCandidate(NativeContract):
     book_revision: int = Field(ge=0)
     references: tuple[dict[str, Any], ...]
     calculated_at: datetime
-    quote_age_ms: float = Field(ge=0)
+    # Null when a sportsbook selection has no measured observation clock.
+    # Native-book age remains available separately from reference evidence.
+    quote_age_ms: float | None = Field(default=None, ge=0)
+    native_book_age_ms: float | None = Field(default=None, ge=0)
+    unadjusted_fair_probability: AnnotatedProbability | None = None
+    source_quality_mode: Literal["strict_verified", "trusted_provider"] = "strict_verified"
+    uncertainty_margin_probability: AnnotatedProbability | None = None
     qualified: bool
     synthetic: Literal[False] = False
     model: str
@@ -291,7 +297,9 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
                     intent: NativeOrderIntent, bounds: NativeSettlementProbabilities | WinnerOnlyNormalOutcome,
                     now: datetime, *, durable_intent: NativeOrderIntent | None = None) -> NativeCandidate:
     config = market_config(config, market)
-    probability = fair.probabilities[intent.instrument.outcome]
+    unadjusted_probability = fair.probabilities[intent.instrument.outcome]
+    margin = fair.trusted_pilot_margin_probability or D(0)
+    probability = unadjusted_probability - margin
     if not probability.is_finite() or not 0 <= probability <= 1:
         raise NoSignal("Invalid native fair probability")
     cost, payout = intent.maximum_cost_usd, intent.minimum_gross_payout_usd
@@ -306,19 +314,27 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
     expected_profit = profit_at(probability)
     ev = expected_profit / payout
     roi = expected_profit / intent.reserved_cost_usd
-    sensitivity_p = fair.sensitivity_probabilities[intent.instrument.outcome] if fair.sensitivity_probabilities else None
+    sensitivity_p = (fair.sensitivity_probabilities[intent.instrument.outcome] - margin
+                     if fair.sensitivity_probabilities else None)
+    if sensitivity_p is not None and not 0 <= sensitivity_p <= 1:
+        raise NoSignal("Pilot uncertainty allowance exceeds sensitivity probability")
     sensitivity_profit = profit_at(sensitivity_p) if sensitivity_p is not None else None
     sensitivity_ev = sensitivity_profit / payout if sensitivity_profit is not None else None
     sensitivity_roi = sensitivity_profit / intent.reserved_cost_usd if sensitivity_profit is not None else None
     qualified = ev >= config.min_ev and roi >= config.min_roi and (
         sensitivity_ev is None or sensitivity_ev >= config.min_ev and sensitivity_roi >= config.min_roi)
     reasons = () if qualified else ("Both primary and sensitivity models must meet native EV and ROI thresholds",)
-    ref_ages = [(now - datetime.fromisoformat(ref["source_time"])).total_seconds() * 1000 for ref in fair.references]
+    ref_ages = ([(now - datetime.fromisoformat(ref["source_time"])).total_seconds() * 1000
+                 for ref in fair.references] if all(ref.get("source_time") for ref in fair.references) else [])
+    measured_quote_age = (max([book.age_ms(now), *ref_ages]) if ref_ages else None)
     return NativeCandidate(id=intent.id, market_id=market.id, event_id=market.event_id,
         venue=intent.instrument.venue, outcome=intent.instrument.outcome, intent=durable_intent or intent,
         fair_probability=probability, expected_profit_usd=expected_profit, ev_per_usd_payout=ev,
         roi=roi, book_revision=book.revision, references=fair.references, calculated_at=now,
-        quote_age_ms=max([book.age_ms(now), *ref_ages]),
+        quote_age_ms=measured_quote_age, native_book_age_ms=book.age_ms(now),
+        unadjusted_fair_probability=unadjusted_probability if margin else None,
+        source_quality_mode=config.reference_quality_mode,
+        uncertainty_margin_probability=margin if margin else None,
         qualified=qualified, model=fair.model, normal_outcome_policy=fair.normal_outcome_policy,
         estimate_label=("Winner-only estimated EV — exceptional settlements excluded"
                         if fair.normal_outcome_policy == "winner_only_binary"
@@ -346,11 +362,19 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     bounds = _validate_market(market, fair, book, config, now)
     if mode == "production" and not fair.live_execution_allowed:
         raise NoSignal("Reference profile does not authorize production execution")
+    scoped = market_config(config, market)
+    if scoped.reference_quality_mode == "trusted_provider":
+        pilot = scoped.trusted_pilot_policy
+        ceiling = min(pilot.max_debit_usd, pilot.max_loss_usd)
+        max_stake_usd = ceiling if max_stake_usd is None else min(D(max_stake_usd), ceiling)
     sizing = None
     if stake_sizing == "quarter_kelly":
-        probabilities = [fair.probabilities[book.instrument.outcome]]
+        margin = fair.trusted_pilot_margin_probability or D(0)
+        probabilities = [fair.probabilities[book.instrument.outcome] - margin]
         if fair.sensitivity_probabilities:
-            probabilities.append(fair.sensitivity_probabilities[book.instrument.outcome])
+            probabilities.append(fair.sensitivity_probabilities[book.instrument.outcome] - margin)
+        if min(probabilities) <= 0:
+            raise NoSignal("Pilot uncertainty allowance eliminates the modeled winning chance")
         sizing = quarter_kelly_budget(book, min(probabilities), bounds, available_cash_usd=available_cash_usd,
             unit_size_usd=unit_size_usd, now=now, max_stake_usd=max_stake_usd)
         if sizing.budget_usd < sizing.minimum_cost_with_fees_usd:
@@ -401,6 +425,11 @@ def native_revalidate_intent(intent: NativeOrderIntent, market: Market, fair: Fa
     bounds = _validate_market(market, fair, book, config, now)
     if intent.mode == "production" and not fair.live_execution_allowed:
         raise NoSignal("Reference profile does not authorize production execution")
+    scoped = market_config(config, market)
+    if scoped.reference_quality_mode == "trusted_provider":
+        pilot = scoped.trusted_pilot_policy
+        if intent.reserved_cost_usd > min(pilot.max_debit_usd, pilot.max_loss_usd):
+            raise NoSignal("Durable native intent exceeds the owner-approved pilot ceiling")
     if instrument_fingerprint(intent.instrument) != instrument_fingerprint(book.instrument):
         raise NoSignal("Native instrument or grid changed after intent creation")
     quantity = intent.quantity if remaining_quantity is None else remaining_quantity

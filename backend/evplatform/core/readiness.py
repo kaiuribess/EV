@@ -212,6 +212,9 @@ class MarketReadiness(StrictRecord):
     usable_reference_books: int = Field(default=0, ge=0)
     required_books_present: bool = False
     oldest_reference_age_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Provider delivery is a bounded input indicator, never a measured
+    # selection-observation age. The source policy is separately authorized.
+    reference_age_basis: Literal["selection_observation", "provider_delivery"] = "selection_observation"
     orderbook_age_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     orderbook_synchronized: bool = False
     market_active: bool = False

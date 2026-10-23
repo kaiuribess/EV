@@ -73,6 +73,8 @@ class ManualNativeService:
             "fair_probability": str(candidate.fair_probability), "roi": str(candidate.roi),
             "expected_profit_usd": str(candidate.expected_profit_usd),
             "model": candidate.model, "sensitivity_model": candidate.sensitivity_model,
+            "source_quality_mode": candidate.source_quality_mode,
+            "uncertainty_margin_probability": str(candidate.uncertainty_margin_probability),
             "sensitivity_roi": str(candidate.sensitivity_roi),
             "reference_profile_id": candidate.reference_profile_id,
             "reference_policy_digest": candidate.reference_policy_digest,
@@ -195,6 +197,15 @@ class ManualNativeService:
                     "account_fingerprint_suffix": order.account_fingerprint[-8:],
                     "build_id": getattr(self.engine.native, "build_id", None),
                     "profile_digest": profile_digest,
+                    "source_policy": {"quality_mode": candidate.source_quality_mode,
+                        "trusted_pilot": (self.engine.settings.pricing.trusted_pilot_policy.model_dump(mode="json")
+                            if candidate.source_quality_mode == "trusted_provider"
+                            and getattr(self.engine.settings, "pricing", None) is not None else None),
+                        "unadjusted_fair_probability": str(candidate.unadjusted_fair_probability)
+                            if candidate.unadjusted_fair_probability is not None else None,
+                        "uncertainty_margin_probability": str(candidate.uncertainty_margin_probability)
+                            if candidate.uncertainty_margin_probability is not None else None,
+                        "quote_observation_age_known": candidate.quote_age_ms is not None},
                     "max_cost_usd": str(max_cost_usd),
                     "executable_depth": [level.model_dump(mode="json") for level in book.asks],
                     "book_source_time": book.source_time.isoformat() if book.source_time else None,

@@ -9,12 +9,13 @@ from .paths import PROJECT_ROOT
 
 
 class TrustedPilotPolicy(BaseModel):
-    """Owner-review record only. Saving it never arms native execution."""
+    """One-market owner approval, independent of launch, cash and kill-switch gates."""
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     owner_approved: bool = False
     exact_market_id: str | None = None
     provider_id: str | None = None
+    crosscheck_provider_id: str | None = None
     trusted_books: list[str] = Field(default_factory=list)
     accept_unknown_active_status: bool = False
     accept_unknown_quote_observation_age: bool = False
@@ -41,6 +42,9 @@ class TrustedPilotPolicy(BaseModel):
                 raise ValueError("Trusted live pilot requires an exact, complete owner-reviewed source policy")
             if self.max_debit_usd > Decimal("1") or self.max_loss_usd > Decimal("1"):
                 raise ValueError("Existing one-dollar pilot ceiling cannot be enlarged here")
+            if self.independent_crosscheck == "separate_provider" and (
+                    not self.crosscheck_provider_id or self.crosscheck_provider_id == self.provider_id):
+                raise ValueError("A separate-provider cross-check needs a second named provider")
         return self
 
 
@@ -67,8 +71,8 @@ class PricingConfig(BaseModel):
     market_overrides: dict[str, dict] = Field(default_factory=dict)
     reference_profile_mode: Literal["legacy", "strict"] = "legacy"
     # Reference quality is independent of the win/loss payout model. Trusted
-    # provider estimates are research-only until a separate scoped pilot is
-    # reviewed; they never inherit the strict profile's execution permission.
+    # provider estimates remain research-only unless the exact one-market
+    # pilot is separately approved; they never inherit strict permission.
     reference_quality_mode: Literal["strict_verified", "trusted_provider"] = "strict_verified"
     trusted_max_delivery_age_ms: int = Field(default=30000, ge=1000, le=600000)
     trusted_max_indicator_age_ms: int = Field(default=30000, ge=1000, le=600000)

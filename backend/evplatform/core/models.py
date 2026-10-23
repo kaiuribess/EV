@@ -255,6 +255,7 @@ class FairValue(Contract):
     ineligibility_reasons: tuple[str, ...] = ()
     sensitivity_model: str | None = None
     sensitivity_probabilities: dict[str, Decimal] | None = None
+    trusted_pilot_margin_probability: Decimal | None = None
 
 
 class Candidate(Contract):

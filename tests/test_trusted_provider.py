@@ -393,6 +393,142 @@ def test_synthetic_trusted_positive_ev_is_research_only_without_order_intent():
             mode="production", now=NOW)
 
 
+def approved_pilot_case():
+    market, quotes, book = trusted_native_fixture()
+    quotes = [quote.model_copy(update={
+        "normal_outcome_verified": True,
+        "normal_outcome_evidence": "OFFLINE reviewed ordinary winner identity",
+        "source_scope_poll_at": NOW - timedelta(seconds=1),
+        "source_scope_is_current": True,
+    }) for quote in quotes]
+    policy = TrustedPilotPolicy(enabled=True, owner_approved=True,
+        exact_market_id=market.id, provider_id="parlay_rest",
+        trusted_books=["pinnacle", "fanduel"],
+        accept_unknown_active_status=True, accept_unknown_quote_observation_age=True,
+        max_indicator_age_ms=30000, independent_crosscheck="two_distinct_books",
+        uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal("1"),
+        max_loss_usd=Decimal("1"), approval_evidence="OFFLINE owner-policy fixture only")
+    scoped = config().model_copy(update={"trusted_pilot_policy": policy})
+    return market, quotes, book, scoped
+
+
+def test_approved_fixture_pilot_reaches_fee_and_kelly_bounded_native_candidate():
+    market, quotes, book, scoped = approved_pilot_case()
+    fair = fair_value(market, quotes, scoped, NOW)
+    assert fair.execution_eligible and fair.live_execution_allowed
+    assert fair.trusted_pilot_margin_probability == Decimal("0.01")
+    assert all(ref["age_ms"] is None for ref in fair.references)
+    assert all(ref["source_scope_poll_at"] for ref in fair.references)
+    candidate = native_opportunity(market, fair, book, scoped,
+        max_stake_usd=Decimal("1"), mode="production", stake_sizing="quarter_kelly",
+        available_cash_usd=Decimal("50"), now=NOW)
+    assert candidate.qualified and candidate.execution_eligible
+    assert candidate.intent.reserved_cost_usd <= Decimal("1")
+    assert candidate.fair_probability == fair.probabilities["Home"] - Decimal("0.01")
+    assert candidate.quote_age_ms is None  # No measured selection observation age.
+    assert candidate.native_book_age_ms is not None
+
+
+@pytest.mark.parametrize("mutation", [
+    "unknown_status_unapproved", "unknown_age_unapproved", "stale_poll",
+    "suspended", "withdrawn", "missing_normal_review", "wrong_provider", "wrong_market",
+])
+def test_pilot_policy_rejects_unreviewed_or_unavailable_source(mutation):
+    market, quotes, book, scoped = approved_pilot_case()
+    policy = scoped.trusted_pilot_policy
+    if mutation == "unknown_status_unapproved":
+        policy = policy.model_copy(update={"accept_unknown_active_status": False})
+    elif mutation == "unknown_age_unapproved":
+        policy = policy.model_copy(update={"accept_unknown_quote_observation_age": False})
+    elif mutation == "stale_poll":
+        quotes[0] = quotes[0].model_copy(update={"source_scope_poll_at": NOW-timedelta(minutes=1)})
+    elif mutation in {"suspended", "withdrawn"}:
+        quotes[0] = quotes[0].model_copy(update={"status": mutation})
+    elif mutation == "missing_normal_review":
+        quotes[0] = quotes[0].model_copy(update={"normal_outcome_verified": False})
+    elif mutation == "wrong_provider":
+        quotes[0] = quotes[0].model_copy(update={"provider": "oddize"})
+    else:
+        policy = policy.model_copy(update={"exact_market_id": "another-market"})
+    scoped = scoped.model_copy(update={"trusted_pilot_policy": policy})
+    try:
+        fair = fair_value(market, quotes, scoped, NOW)
+    except NoSignal:
+        return
+    assert not fair.execution_eligible and not fair.live_execution_allowed
+    with pytest.raises(NoSignal):
+        native_opportunity(market, fair, book, scoped, max_stake_usd=Decimal("1"),
+            mode="production", now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_approved_fixture_pilot_can_be_previewed_without_placement_or_arming():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from evplatform.core.manual_native import ManualNativeService
+    from evplatform.core.risk import RiskEngine
+    from evplatform.core.config import RiskConfig
+
+    market, quotes, book, scoped = approved_pilot_case()
+    candidate = native_opportunity(market, fair_value(market, quotes, scoped, NOW),
+        book, scoped, max_stake_usd=Decimal("1"), mode="production",
+        stake_sizing="quarter_kelly", available_cash_usd=Decimal("50"), now=NOW)
+    risk = RiskEngine(RiskConfig())
+    risk.kill_switch = True
+    preview_check, place = Mock(), AsyncMock()
+    native = SimpleNamespace(books={(market.id, "kalshi", "Home"): book},
+        build_id="OFFLINE-build", preview_check=preview_check,
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id,
+            account_fingerprint="a" * 64), execute=place)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={market.id: market}, settings=SimpleNamespace(mode="production", pricing=scoped))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "OFFLINE-scoped-profile"
+    service._fresh_candidate = AsyncMock(return_value=candidate)
+    proposal = await service.preview(market.id, "kalshi", "Home", Decimal("1"))
+    assert proposal["unsigned"] and proposal["candidate"]["fair_probability"] == str(candidate.fair_probability)
+    assert proposal["candidate"]["quote_age_ms"] is None
+    assert proposal["source_policy"]["quality_mode"] == "trusted_provider"
+    assert proposal["source_policy"]["trusted_pilot"]["max_debit_usd"] == "1"
+    assert proposal["source_policy"]["quote_observation_age_known"] is False
+    preview_check.assert_called_once()
+    place.assert_not_awaited()
+    assert not risk.auto_trade and risk.kill_switch
+
+
+def test_trusted_pilot_preflight_rejects_automatic_route_and_prior_attempt():
+    from types import SimpleNamespace
+    from evplatform.core.native_runtime import NativeRuntime
+    from evplatform.core.risk import RiskEngine, RiskRejected
+    from evplatform.core.config import RiskConfig
+
+    market, _, _, scoped = approved_pilot_case()
+    risk = RiskEngine(RiskConfig())
+    risk.kill_switch = True
+    account = "a" * 64
+    profile = SimpleNamespace(venue="kalshi", environment="production",
+        account_fingerprint=account, market_ids=(market.id,),
+        strategy_ids=("native_positive_ev",), validation_pilot=True,
+        limits=SimpleNamespace(max_native_order_attempts=1))
+    runtime = SimpleNamespace(
+        report=lambda: SimpleNamespace(safe_to_arm=True, live_trading_ready=True,
+                                       sandbox_trading_ready=False),
+        profile_for=lambda venue: profile,
+        engine=SimpleNamespace(settings=SimpleNamespace(live_enabled=True, pricing=scoped),
+                               markets={market.id: market}, risk=risk))
+    base = dict(id="current", venue="kalshi", mode="production",
+        account_fingerprint=account, market_id=market.id,
+        strategy="native_positive_ev", reserved_cost=Decimal("0.40"))
+    with pytest.raises(RiskRejected, match="manual attempt only"):
+        NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="automatic"))
+    risk.native_orders["prior"] = SimpleNamespace(**(base | {"id": "prior"}),
+                                                    execution_origin="manual")
+    with pytest.raises(RiskRejected, match="already exists"):
+        NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="manual"),
+                                        preview_only=True)
+
+
 @pytest.mark.asyncio
 async def test_provisional_native_estimate_reaches_reference_dashboard_without_order(tmp_path):
     market, quotes, book = trusted_native_fixture(utcnow())

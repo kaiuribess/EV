@@ -7,6 +7,7 @@ from .config import PricingConfig
 from .models import Candidate, FairValue, FeeSchedule, Market, OrderBook, Quote, utcnow
 from .reference_profiles import (freshness_rule, policy_digest, profile_for_market,
                                  quote_eligibility, trusted_quote_research_eligibility)
+from .trusted_pilot import trusted_pilot_reference_check
 
 D = Decimal
 
@@ -219,23 +220,41 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
                 "normal_outcome_verified": quote.normal_outcome_verified,
                 "normal_outcome_evidence": quote.normal_outcome_evidence,
                 "execution_eligible": eligible and not trusted,
+                "confidence_limitations": list(diagnostics[book][1]),
                 "freshness_factor": "1" if eligible else "0", "ttl_seconds": str(rule.ttl_seconds) if rule else None,
                 "sensitivity_probabilities": {k: str(v) for k, v in sensitivity[book].items()}})
         references.append(evidence)
+    pilot_eligible, pilot_reasons = (trusted_pilot_reference_check(config, market, references, now)
+                                     if trusted else (False, ()))
+    if trusted and pilot_eligible and (disagreement > config.max_disagreement
+            or sensitivity_disagreement > config.max_disagreement):
+        pilot_eligible, pilot_reasons = False, ("Pilot reference disagreement exceeds the configured limit",)
+    if pilot_eligible:
+        for reference in references:
+            reference["execution_eligible"] = True
+            reference["confidence_limitations"] = [
+                "Owner-approved provider-trust pilot; exact quote observation may remain unknown",
+                *(item for item in reference["confidence_limitations"]
+                  if item != "Provider-trusted research estimate; not approved for live execution"),
+            ]
+    eligible_for_execution = (not reasons and not trusted) or pilot_eligible
     return FairValue(market_id=market.id, probabilities=result, references=references,
                      model=config.devig_method, normal_outcome_policy=config.normal_outcome_policy,
                      calculated_at=now, disagreement=disagreement,
                      synthetic=any(q.synthetic for q in by_book.values()),
                      reference_profile_id=profile_id, reference_policy_digest=digest,
                      reference_profile_status=profile.status if profile else None,
-                     # Legacy blends support paper/research. Production needs
-                     # an explicitly approved strict profile and its separate
-                     # observation/status/TTL and sensitivity requirements.
-                     live_execution_allowed=profile.live_execution_allowed if profile and not trusted else False,
-                     execution_eligible=not reasons and not trusted,
-                     ineligibility_reasons=tuple(dict.fromkeys(reasons)),
+                     # Strict profiles require verified quote evidence. A
+                     # separate exact one-market pilot may explicitly accept
+                     # narrower provider-trusted evidence and a margin.
+                     live_execution_allowed=(profile.live_execution_allowed if profile and not trusted
+                                             else pilot_eligible),
+                     execution_eligible=eligible_for_execution,
+                     ineligibility_reasons=(() if pilot_eligible else tuple(dict.fromkeys([*reasons, *pilot_reasons]))),
                      sensitivity_model=profile.sensitivity_devig if profile else None,
-                     sensitivity_probabilities=sensitivity_result)
+                     sensitivity_probabilities=sensitivity_result,
+                     trusted_pilot_margin_probability=(config.trusted_pilot_policy.uncertainty_margin_probability
+                                                       if pilot_eligible else None))
 
 
 def validate_fair_references(market: Market, fair: FairValue, config: PricingConfig,
@@ -249,9 +268,28 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
     trusted = profile is not None and config.reference_quality_mode == "trusted_provider"
     if fair.reference_profile_id != profile_id or fair.reference_policy_digest != digest:
         raise NoSignal("Reference profile policy changed; recalculation required")
-    if (fair.live_execution_allowed != (profile.live_execution_allowed if profile and not trusted else False)
+    pilot_eligible, _ = (trusted_pilot_reference_check(config, market, fair.references, now)
+                         if trusted else (False, ()))
+    if trusted and pilot_eligible:
+        per_book_sensitivity = [reference.get("sensitivity_probabilities") for reference in fair.references]
+        if (fair.disagreement > config.max_disagreement
+                or any(not isinstance(values, dict) or set(values) != set(market.outcomes)
+                       for values in per_book_sensitivity)):
+            pilot_eligible = False
+        else:
+            try:
+                pilot_eligible = all(max(Decimal(values[outcome]) for values in per_book_sensitivity)
+                    - min(Decimal(values[outcome]) for values in per_book_sensitivity)
+                    <= config.max_disagreement for outcome in market.outcomes)
+            except (ValueError, TypeError, ArithmeticError):
+                pilot_eligible = False
+    if (fair.live_execution_allowed != (profile.live_execution_allowed if profile and not trusted else pilot_eligible)
             or fair.reference_profile_status != (profile.status if profile else None)):
         raise NoSignal("Reference profile permission or status changed")
+    if trusted and (fair.execution_eligible != pilot_eligible
+                    or fair.trusted_pilot_margin_probability != (
+                        config.trusted_pilot_policy.uncertainty_margin_probability if pilot_eligible else None)):
+        raise NoSignal("Trusted pilot authorization or uncertainty allowance changed")
     if fair.market_id != market.id or set(fair.probabilities) != set(market.outcomes):
         raise NoSignal("Fair value does not match the normalized market")
     probabilities = list(fair.probabilities.values())
@@ -305,8 +343,10 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
                 raise NoSignal("Trusted provider poll indicator expired")
             if reference.get("status") in {"suspended", "withdrawn"}:
                 raise NoSignal("Trusted provider selection became unavailable")
-            if fair.execution_eligible or fair.live_execution_allowed:
-                raise NoSignal("Trusted-provider research evidence cannot authorize execution")
+            if fair.execution_eligible and not pilot_eligible:
+                raise NoSignal("Trusted provider references are outside the approved pilot policy")
+            if fair.execution_eligible and reference.get("execution_eligible") is not True:
+                raise NoSignal("Trusted provider reference has no approved pilot evidence")
         elif profile:
             rule = freshness_rule(config, market, reference.get("provider"), bookmaker)
             if fair.execution_eligible and (rule is None or source_time is None

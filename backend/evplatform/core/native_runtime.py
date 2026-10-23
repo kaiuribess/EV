@@ -16,7 +16,7 @@ from pydantic import Field
 from .conflicts import UNRESOLVED, reviewed_correlations, risk_family
 from .models import Contract, Envelope, OrderStatus, utcnow
 from .native_oms import NativeOrder, NativeOrderManager
-from .pricing import NoSignal, fair_value
+from .pricing import NoSignal, fair_value, market_config
 from .readiness import (
     FeedReadiness, LaunchProfile, LiveLimits, MarketReadiness,
     ReadinessBlocker, ReadinessReport, RuntimeReadiness, digest_json, evaluate_readiness,
@@ -289,6 +289,24 @@ class NativeRuntime:
                 order.account_fingerprint != p.account_fingerprint or order.market_id not in p.market_ids or
                 order.strategy not in p.strategy_ids):
             raise RiskRejected("Native order is outside the authorized launch scope")
+        market = getattr(self.engine, "markets", {}).get(order.market_id)
+        if hasattr(self.engine, "markets") and market is None:
+            raise RiskRejected("Native canonical market is unavailable")
+        if market is not None:
+            source_config = market_config(self.engine.settings.pricing, market)
+            if source_config.reference_quality_mode == "trusted_provider":
+                pilot = source_config.trusted_pilot_policy
+                if (order.execution_origin != "manual" or not p.validation_pilot
+                        or p.limits.max_native_order_attempts != 1
+                        or not pilot.enabled or not pilot.owner_approved
+                        or pilot.exact_market_id != order.market_id
+                        or order.reserved_cost > min(pilot.max_debit_usd, pilot.max_loss_usd)):
+                    raise RiskRejected("Trusted-provider pilot permits one scoped manual attempt only")
+                if any(previous.id != order.id and previous.market_id == order.market_id
+                       and previous.venue == order.venue and previous.mode == order.mode
+                       and previous.account_fingerprint == order.account_fingerprint
+                       for previous in self.engine.risk.native_orders.values()):
+                    raise RiskRejected("Trusted-provider pilot attempt already exists in the durable ledger")
         if p.settlement_policy in {"novig_ioc_win_loss_halt_on_exception", "kalshi_ioc_binary_halt_on_exception",
                                    "prophetx_funded_cash_win_loss_halt_on_exception"} and any(
                 previous.id != order.id and previous.venue == order.venue and previous.mode == order.mode
@@ -350,11 +368,18 @@ class NativeRuntime:
             if risk.stake_sizing == "quarter_kelly":
                 from .native_pricing import _settlement_bounds
                 from .stake_sizing import quarter_kelly_budget
-                probabilities = [fair.probabilities[order.outcome]]
+                margin = fair.trusted_pilot_margin_probability or 0
+                probabilities = [fair.probabilities[order.outcome] - margin]
                 if fair.sensitivity_probabilities:
-                    probabilities.append(fair.sensitivity_probabilities[order.outcome])
+                    probabilities.append(fair.sensitivity_probabilities[order.outcome] - margin)
+                if min(probabilities) <= 0:
+                    raise NoSignal("Pilot uncertainty allowance eliminates the modeled winning chance")
                 caps = [v for v in (risk.max_order_stake, risk.live_max_order_stake) if v is not None]
-                sizing = quarter_kelly_budget(book, min(probabilities), _settlement_bounds(market),
+                if market_config(self.engine.settings.pricing, market).reference_quality_mode == "trusted_provider":
+                    pilot = market_config(self.engine.settings.pricing, market).trusted_pilot_policy
+                    caps.extend((pilot.max_debit_usd, pilot.max_loss_usd))
+                sizing = quarter_kelly_budget(book, min(probabilities),
+                    _settlement_bounds(market, winner_only=fair.normal_outcome_policy == "winner_only_binary"),
                     available_cash_usd=self.sizing_cash(order.venue, exclude_order_id=order.id),
                     unit_size_usd=risk.unit_size_usd, max_stake_usd=min(caps) if caps else None,
                     price=order.intent.limit_price, now=utcnow())
@@ -480,7 +505,9 @@ class NativeRuntime:
         await self.engine.bus.publish(Envelope(schema_name="native.signal", source="native_positive_ev", payload=observation))
         for candidate in candidates:
             self.candidates[(candidate.market_id, candidate.venue, candidate.outcome)] = candidate
-            if candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch:
+            if (candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch
+                    and market_config(self.engine.settings.pricing,
+                                      self.engine.markets[market_id]).reference_quality_mode != "trusted_provider"):
                 await self.engine.bus.publish(Envelope(schema_name="trade.native_candidate", source=candidate.strategy, payload=candidate))
 
     def bind_client(self, venue, client):
@@ -689,6 +716,13 @@ class NativeRuntime:
             reference_ages = [r.get("age_ms") for r in refs]
             oldest_reference_age = (max(reference_ages) if reference_ages and all(
                 isinstance(age, (int, float)) and age >= 0 for age in reference_ages) else None)
+            age_basis = "selection_observation"
+            if (market and fair and fair.live_execution_allowed
+                    and market_config(engine.settings.pricing, market).reference_quality_mode == "trusted_provider"):
+                delivery_ages = [r.get("delivery_age_ms") for r in refs]
+                oldest_reference_age = (max(delivery_ages) if delivery_ages and all(
+                    isinstance(age, (int, float)) and age >= 0 for age in delivery_ages) else None)
+                age_basis = "provider_delivery"
             exact_mapping = bool(market and books and all(b.market_fingerprint == market.identity()
                 and b.instrument.settlement_rules_fingerprint == market.identity() and b.instrument.verified
                 and b.instrument.canonical_market_id == market_id and b.instrument.venue == venue
@@ -706,6 +740,7 @@ class NativeRuntime:
                 required_books_present=bool(fair and fair.execution_eligible and
                     (engine.settings.mode != "production" or fair.live_execution_allowed)),
                 oldest_reference_age_ms=oldest_reference_age,
+                reference_age_basis=age_basis,
                 orderbook_age_ms=max(ages) if valid_ages else None,
                 orderbook_synchronized=bool(books) and all(b.synchronized for b in books),
                 market_active=bool(market and market.status not in {"closed", "suspended"} and books and all(b.status == "active" for b in books)),

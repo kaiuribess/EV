@@ -156,7 +156,8 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
 
     A Parlay book/fixture poll and a delivered row are useful research inputs.
     Neither certifies that a particular unchanged selection is still offered.
-    This predicate can *never* grant native execution eligibility.
+    This predicate grants research input eligibility only. A separate exact,
+    owner-approved pilot policy and native risk gates are needed for execution.
     """
     if quote.status in {"suspended", "withdrawn"}:
         return False, ("Sportsbook selection explicitly suspended or withdrawn",), None
@@ -168,7 +169,10 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
     # labeled source-only research estimate. It cannot authorize an order.
     limited_board = quote.verification_reason in {
         "truncated_response", "incomplete_snapshot", "paginated_response_not_atomic"}
-    if limited_board and not (market.extensions.get("research_only") is True
+    pilot = config.trusted_pilot_policy
+    reviewed_pilot_row = (pilot.enabled and pilot.owner_approved
+                          and pilot.exact_market_id == market.id and not market.extensions.get("research_only"))
+    if limited_board and not ((market.extensions.get("research_only") is True or reviewed_pilot_row)
             and quote.provider in {"parlay_rest", "parlay_ws", "parlay_game_ws"}
             and len(market.outcomes) == 2 and set(quote.decimal_odds) == set(market.outcomes)):
         return False, ("Bounded provider board has no complete exact price pair",), None
