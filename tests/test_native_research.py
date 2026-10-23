@@ -313,6 +313,15 @@ def test_runtime_research_comparison_is_read_only_and_requires_live_stream(monke
     assert D(yes["taker_fee_usd"]) == D("0.02")
     assert yes["positive_after_costs"] is False
     assert yes["execution_eligible"] is False and yes["mapping_reviewed"] is False
+    engine.settings.pricing = PricingConfig(trusted_research_margin_probability=D("0.01"),
+        trusted_research_market_margins={market().id: D("0.03")})
+    scoped = NativeRuntime.research_comparisons(runtime, market(), fair)
+    exact = next(item for item in scoped if item["native_market_id"] == ticker and item["side"] == "yes")
+    assert exact["uncertainty_allowance_policy"] == "exact_market_research_scenario"
+    assert exact["uncertainty_allowance_probability"] == "0.03"
+    assert D(exact["net_estimated_profit_usd"]) == (
+        D(exact["fee_adjusted_estimated_profit_usd"]) - D("0.03"))
+    assert exact["execution_eligible"] is False
     monitor.task = SimpleNamespace(done=lambda: True)
     assert NativeRuntime.research_comparisons(runtime, market(), fair) == []
 
