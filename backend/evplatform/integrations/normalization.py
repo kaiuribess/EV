@@ -69,6 +69,9 @@ class SourceOffer:
     source_price_changed_at: datetime | None = None
     provider_reported_price_age_s: Decimal | None = None
     source_stored_at: datetime | None = None
+    # Native selection IDs are evidence tied to this exact book/event/player/
+    # market/period/line. They never define a new canonical market by themselves.
+    source_selection_ids: dict[str, str] = field(default_factory=dict)
     source_status_historical_hint: bool = False
     verification_reason: str | None = None
     market_status_verified: bool = False
@@ -210,10 +213,8 @@ def _parlay_unavailability_reason(row: dict) -> str | None:
     """
     if row.get("action") == "remove":
         return "Explicit source removal"
-    if row.get("suspended") is True or row.get("status") == "suspended":
+    if _explicitly_unavailable(row):
         return "Explicit source suspension"
-    if row.get("available") is False:
-        return "Source quote unavailable"
     fields = {key: row[key] for key in (
         "over_price", "under_price", "home_ml", "away_ml", "price", "price_american", "price_decimal",
     ) if key in row}
@@ -294,7 +295,8 @@ def _parlay_observation(envelope: ProviderEnvelope, row: dict, *, complete: bool
     # guessing seconds/milliseconds from magnitude would manufacture evidence.
     raw_observed = row.get("last_observed")
     observed = parse_timestamp(raw_observed) if isinstance(raw_observed, str) else None
-    verified = (envelope.provider_id != "parlay_rest" and observed is not None
+    verified = ((envelope.provider_id != "parlay_rest" or envelope.kind == "props_snapshot")
+                and observed is not None
                 and row.get("last_update_type") == "collector_observation")
     # The separate Pinnacle current-state stream identifies its own rows with
     # source_ts_ms/last_observed_ms. A generic complete game-board frame never
@@ -325,7 +327,9 @@ def _parlay_observation(envelope: ProviderEnvelope, row: dict, *, complete: bool
             parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")),
         "provider_reported_price_age_s": age,
         "source_stored_at": (parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")
-            if envelope.provider_id == "parlay_rest" and envelope.kind == "snapshot" else None),
+            if envelope.provider_id == "parlay_rest" and envelope.kind == "snapshot" else
+            parse_timestamp(row.get("last_update"), epoch_unit="milliseconds")
+            if envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot" else None),
         "verification_reason": problem or ("quote_bound_collector_observation" if verified else "unverified_observation_clock"),
     }
 
@@ -487,7 +491,7 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
         if not prices:
             continue
         status = "withdrawn" if row.get("action") == "remove" else (
-            "suspended" if row.get("suspended") is True or row.get("status") == "suspended" or row.get("available") is False else "active"
+            "suspended" if _explicitly_unavailable(row) else "active"
         )
         observation = _parlay_observation(envelope, row, complete=len(prices) >= 2)
         # Both FanDuel links are historical OPEN/ACTIVE hints, not proof of
@@ -498,6 +502,9 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
                            and all(_valid_fanduel_link(row.get(f"{side}_link"))
                                    for side in ("over", "under"))
                            and status == "active")
+        selection_ids = {side: row[f"{side}_sid"] for side in ("over", "under")
+                         if side in prices and isinstance(row.get(f"{side}_sid"), str)
+                         and row[f"{side}_sid"].strip()}
         result.append(SourceOffer(
             envelope.provider_id, str(row.get("bookmaker", "")),
             str(row.get("canonical_event_id") or row.get("event_id") or row.get("eventId") or ""),
@@ -512,6 +519,7 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
             **observation,
             market_status_verified=False,
             source_status_historical_hint=historical_link_active,
+            source_selection_ids=selection_ids,
             received_at=envelope.received_at,
         ))
     return result
@@ -945,6 +953,7 @@ class TrustedSourceProjector:
             source_price_changed_at=offer.source_price_changed_at,
             provider_reported_price_age_s=offer.provider_reported_price_age_s,
             source_stored_at=offer.source_stored_at,
+            source_selection_ids=offer.source_selection_ids,
             source_status_historical_hint=offer.source_status_historical_hint,
             observation_verified=offer.observation_verified,
             observation_complete=offer.observation_complete,
@@ -1209,6 +1218,8 @@ class VerifiedProviderMapper:
                      if part.provider_reported_price_age_s is not None), default=None),
                 source_stored_at=_oldest([part.source_stored_at for part in sides.values()]),
                 source_status_historical_hint=all(part.source_status_historical_hint for part in sides.values()),
+                source_selection_ids={name: sid for part in sides.values()
+                    for name, sid in part.source_selection_ids.items()},
                 received_at=_oldest([part.received_at for part in sides.values()]),
                 observation_verified=verified,
                 observation_complete=verified and current_pair and same_observation and acceptable,
@@ -1321,6 +1332,7 @@ class VerifiedProviderMapper:
                 source_price_changed_at=offer.source_price_changed_at,
                 provider_reported_price_age_s=offer.provider_reported_price_age_s,
                 source_stored_at=offer.source_stored_at,
+                source_selection_ids=offer.source_selection_ids,
                 source_status_historical_hint=offer.source_status_historical_hint,
                 verification_reason=offer.verification_reason,
                 source_scope_poll_at=offer.source_scope_poll_at,

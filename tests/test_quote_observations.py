@@ -69,7 +69,7 @@ def test_parlay_fanduel_bilateral_native_links_are_historical_prop_status_hints(
                      under_link="https://sportsbook.fanduel.com/under")
     rest = ProviderEnvelope("parlay_rest", "props_snapshot", [row], NOW, 1)
     offer, = extract_offers(rest)
-    assert not offer.observation_verified and not offer.observation_complete
+    assert offer.observation_verified and offer.observation_complete
     assert not offer.market_status_verified and offer.source_status_historical_hint
     assert not extract_offers(parlay(row))[0].source_status_historical_hint
     for change in ({"under_link": None}, {"over_link": "not-a-url"},

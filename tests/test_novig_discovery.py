@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from decimal import Decimal
 
 import pytest
 
@@ -10,6 +11,7 @@ from evplatform.integrations.novig_discovery import balanced_open_market_ids, op
 from evplatform.plugins.external import NativeMonitor, NovigMonitorConfig
 from evplatform.venues.novig import NovigBook, NovigClient
 from evplatform.venues.common import SequenceGap
+from evplatform.core.models import Market, Settlement
 
 
 NOW = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
@@ -166,6 +168,55 @@ def test_gap_health_identifies_channel_without_exposing_market_or_account_id():
     assert LIVE not in str(health)
     client._record_sequence_gap(SequenceGap(f"{LIVE}:book", None, 15))
     assert client.health_check()["last_sequence_gap_kind"] == "missing_book_order"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_fair", [False, True])
+async def test_incomplete_nfl_prop_prewarms_only_exact_native_research_scope(already_fair):
+    start = datetime(2026, 10, 25, 17, tzinfo=timezone.utc)
+    source = Market(id="research:parlay:nfl-prop", event_id="research:parlay:old-event",
+        event_name="Indianapolis Colts at Minnesota Vikings", sport="football", league="NFL",
+        participants=("Minnesota Vikings", "Indianapolis Colts"), start_time=start,
+        market_type="player_prop", player="Aaron Jones", player_id="Aaron Jones",
+        statistic="receptions", line=Decimal("2.5"), outcomes=("over", "under"),
+        settlement=Settlement(period="FULL"), extensions={
+            "research_only": True, "source_market_key": "player_receptions"})
+    native = {"marketId": LIVE, "eventId": EVENT, "marketType": "RECEPTIONS",
+              "status": "OPEN", "voids": "FMV", "strike": "2.5",
+              "startsTs": int(start.timestamp()*1000),
+              "description": "Aaron Jones 2.5 RECEPTIONS",
+              "outcomes": [{"outcomeId": NEXT, "name": "Over 2.5", "status": "TBD"},
+                           {"outcomeId": CLOSED, "name": "Under 2.5", "status": "TBD"}]}
+    event = {"eventId": EVENT, "league": "NFL", "status": "OPEN_PREGAME",
+             "startsTs": native["startsTs"],
+             "description": "Indianapolis Colts @ Minnesota Vikings"}
+    calls = []
+
+    async def request(method, path):
+        calls.append((method, path))
+        return event
+
+    monitor = SimpleNamespace(manifest=SimpleNamespace(name="novig"),
+        engine=SimpleNamespace(markets={source.id: source}, quotes={source.id: {
+            "f": SimpleNamespace(provider="parlay_rest", bookmaker="fanduel", status="unknown",
+                verification_reason="truncated_response", decimal_odds={"over": 2, "under": 2},
+                source_observed_at=None, observation_verified=False, source_stored_at=NOW),
+            "d": SimpleNamespace(provider="parlay_rest", bookmaker="draftkings", status="unknown",
+                verification_reason="truncated_response", decimal_odds={"over": 2, "under": 2},
+                source_observed_at=None, observation_verified=False, source_stored_at=NOW)}},
+            reference_estimates={}, consensus_estimates=(
+                {source.id: {"independent_book_count": 2}} if already_fair else {})),
+        context=SimpleNamespace(config={"discovery_leagues": ["NFL"], "max_discovered_markets": 16}),
+        client=SimpleNamespace(request=request), research_catalog_at=NOW,
+        research_catalog_rows=[native], research_events={}, research_fee_metadata={},
+        research_matches={}, focused_prop_matches={}, focused_prop_source_ids=[],
+        _last_research_source_ids=frozenset())
+    priority = await NativeMonitor._refresh_research_matches(monitor)
+    assert priority == ([LIVE] if already_fair else [])
+    assert bool(monitor.research_matches) is already_fair
+    assert monitor.focused_prop_source_ids == [source.id]
+    assert {item.native_market_id for item in monitor.focused_prop_matches[source.id]} == {LIVE}
+    assert calls == [("GET", f"/v3/catalog/events/{EVENT}")]
 
 
 def test_missing_remove_diagnostic_distinguishes_zero_update_from_unseen_order():

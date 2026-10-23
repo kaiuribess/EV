@@ -173,6 +173,7 @@ class Quote(TimedData):
     # Parlay REST line_changed_at_ms is the oldest stored served row, not a
     # guaranteed upstream price move or present selection verification.
     source_stored_at: datetime | None = None
+    source_selection_ids: dict[str, str] = Field(default_factory=dict)
     source_status_historical_hint: bool = False
     verification_reason: str | None = None
     # Book/fixture poll evidence is not a selection observation. It is shown

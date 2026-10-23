@@ -722,7 +722,7 @@ def test_source_prop_uses_exact_event_metadata_and_rejects_unknown_period():
     for book in ("fanduel", "pinnacle", "draftkings"):
         rows.append({"event_id": "event-1", "bookmaker": book, "market_key": "player_points",
             "player": "Named Player", "period": "FULL", "line": 24.5,
-            "over_price": -110, "under_price": -110, "last_update": int((NOW-timedelta(minutes=1)).timestamp()*1000)})
+            "over_price": -110, "under_price": -110, "last_update": int((NOW-timedelta(seconds=1)).timestamp()*1000)})
     prop = ProviderEnvelope("parlay_rest", "props_snapshot", rows, NOW, 1,
         published_at=NOW, metadata={"sport": "basketball_nba"})
     mapper(prop)
@@ -745,6 +745,9 @@ def test_source_prop_uses_exact_event_metadata_and_rejects_unknown_period():
     assert len({m.id for m, _ in mapper.research_updates}) == 1
     fair = fair_value(market, [q for _, q in mapper.research_updates], policy, NOW)
     assert len(fair.references) == 3 and not fair.execution_eligible
+    with pytest.raises(NoSignal, match="Insufficient"):
+        fair_value(market, [q.model_copy(update={"source_stored_at": NOW-timedelta(minutes=1)})
+                            for _, q in mapper.research_updates], policy, NOW)
     mapper(ProviderEnvelope("parlay_rest", "props_snapshot", [{**rows[0], "period": "UNKNOWN"}],
         NOW, 2, published_at=NOW, metadata={"sport": "basketball_nba"}))
     assert mapper.research_updates == []

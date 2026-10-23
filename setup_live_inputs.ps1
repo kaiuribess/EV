@@ -99,6 +99,9 @@ Configure-Input 'parlay_rest' @{
     sports = $sports; bookmakers = $books; markets = @('h2h', 'spreads', 'totals');
     include_props = $true; props_limit = 5000;
     poll_interval_seconds = [double]900; session_request_budget = 80000;
+    focused_novig_nfl_props = ($isNative -and $state.mode -eq 'production');
+    focused_props_interval_seconds = 120; focused_props_hourly_credit_budget = 36;
+    focused_props_limit = 200;
     account_tier = 'unknown'
 }
 

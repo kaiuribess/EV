@@ -41,6 +41,10 @@ class ParlayConfig(ProviderConfig):
     props_max_age_seconds: int | None = Field(default=None, ge=1, le=3600)
     stream_limit: int = Field(default=1000, ge=1, le=1000)
     props_limit: int = Field(default=1000, ge=1, le=10000)
+    focused_novig_nfl_props: bool = False
+    focused_props_interval_seconds: int = Field(default=120, ge=60, le=3600)
+    focused_props_hourly_credit_budget: int = Field(default=36, ge=3, le=300)
+    focused_props_limit: int = Field(default=200, ge=1, le=10000)
     watchdog_seconds: float = Field(default=90, ge=10, le=180)
     account_tier: Literal["unknown", "free", "starter", "pro", "business", "enterprise", "scale"] = "unknown"
 
@@ -128,7 +132,8 @@ class ParlayRest(RestProvider):
     async def fetch_props(self, sport: str, **filters: Any) -> ProviderEnvelope:
         # Parlay documents FanDuel per-side links only for stored native OPEN /
         # ACTIVE observations. They are evidence fields, never order URLs here.
-        params: dict[str, Any] = {"limit": self.config.props_limit, "includeLinks": True}
+        params: dict[str, Any] = {"limit": self.config.props_limit, "includeLinks": True,
+                                  "includeSids": True}
         if self.config.props_max_age_seconds is not None:
             params["maxAgeSec"] = self.config.props_max_age_seconds
         params.update(filters)
@@ -141,6 +146,80 @@ class ParlayRest(RestProvider):
             params["bookmakers"] = ",".join(books)
         result = await self.request(f"/v1/sports/{safe_component(sport)}/props", params=params, cost=3)
         return replace(result, kind="props_snapshot", metadata={**result.metadata, "sport": sport})
+
+    async def fetch_focused_props(self, *, event_id: str, player: str, market: str,
+                                  line: str, bookmakers: list[str], limit: int = 200,
+                                  max_pages: int = 2) -> tuple[list[ProviderEnvelope], dict[str, Any]]:
+        """Fetch one exact NFL prop scope, retaining every page's own evidence.
+
+        /props/coverage is free but describes serving-window availability, not
+        a live quote. Pages are not atomic snapshots; never merge them to make
+        a complete or current pair. Caller must validate the event against the
+        free /events catalog before invoking this method.
+        """
+        import re
+
+        from .normalization import number_identity
+
+        if (not re.fullmatch(r"[0-9a-f]{32}", event_id) or not player.strip()
+                or market not in {"player_receptions", "player_receiving_yards", "player_reception_yds"}
+                or number_identity(line) is None or not 1 <= limit <= 10000
+                or not 1 <= max_pages <= 3):
+            raise ValueError("Invalid focused NFL prop identity or request bounds")
+        requested = list(dict.fromkeys(_supported_bookmakers("americanfootball_nfl", bookmakers,
+                                                              game_only=False)))
+        if len(requested) < 2:
+            return [], {"reason": "fewer_than_two_supported_books", "credits_reserved": 0}
+        filters = {"eventId": event_id, "player": player, "markets": market,
+                   "bookmakers": ",".join(requested), "limit": limit}
+        coverage = await self.discover_props_coverage("americanfootball_nfl", **filters)
+        sources = coverage.payload.get("sources", ()) if isinstance(coverage.payload, dict) else ()
+        visible = [row.get("bookmaker") for row in sources if isinstance(row, dict)
+                   and row.get("bookmaker") in requested and row.get("status") == "api_visible"
+                   and type(row.get("api_visible_rows")) is int and row["api_visible_rows"] > 0]
+        if len(set(visible)) < 2:
+            return [], {"reason": "coverage_has_fewer_than_two_books", "coverage_books": sorted(set(visible)),
+                        "credits_reserved": 0}
+        filters["bookmakers"] = ",".join(book for book in requested if book in visible)
+        pages: list[ProviderEnvelope] = []
+        seen_offsets = {0}
+        offset = 0
+        for _ in range(max_pages):
+            frame = await self.fetch_props("americanfootball_nfl", **filters, offset=offset)
+            rows = frame.payload if isinstance(frame.payload, list) else None
+            if rows is None or any(not isinstance(row, dict) for row in rows):
+                raise ProtocolError("Focused prop response has no row array")
+            # Parlay has accepted an obsolete eventId while serving a different
+            # event. Fail the complete request instead of relabeling those rows.
+            if any(row.get("event_id", row.get("eventId")) != event_id for row in rows):
+                raise ProtocolError("Focused prop response ignored the exact event filter")
+            selected = [row for row in rows if row.get("player") == player
+                        and row.get("market_key") == market
+                        and number_identity(row.get("line")) == number_identity(line)
+                        and row.get("period") == "FULL"
+                        and row.get("bookmaker") in visible]
+            pages.append(replace(frame, payload=selected, metadata={**frame.metadata,
+                "focused_scope": {"event_id": event_id, "player": player,
+                                  "market": market, "line": number_identity(line)},
+                "original_row_count": len(rows)}))
+            headers = frame.metadata.get("headers", {})
+            if str(headers.get("x-result-has-more", "")).lower() != "true":
+                break
+            try:
+                next_offset = int(headers["x-next-offset"])
+            except (KeyError, TypeError, ValueError):
+                break
+            if next_offset <= offset or next_offset in seen_offsets:
+                break
+            seen_offsets.add(next_offset)
+            offset = next_offset
+        # A later page cannot turn the earlier response into a frozen board.
+        if len(pages) > 1:
+            pages = [replace(frame, metadata={**frame.metadata, "headers": {
+                **frame.metadata.get("headers", {}), "x-result-has-more": "true"}}) for frame in pages]
+        return pages, {"reason": "fetched", "coverage_books": sorted(set(visible)),
+                       "pages": len(pages), "returned_rows": sum(len(page.payload) for page in pages),
+                       "credits_reserved": 3 * len(pages)}
 
     async def _poll_sport(self, sport: str) -> AsyncIterator[ProviderEnvelope]:
         yield await self.fetch_snapshot(sport)
