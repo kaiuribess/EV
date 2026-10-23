@@ -250,7 +250,7 @@ class ProphetXMonitorConfig(BaseModel):
         description="Authenticated tournament catalogs to refresh for game-market subscriptions")
     discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
     max_discovered_events: int = Field(default=20, ge=1, le=50)
-    max_discovered_prop_subscriptions: int = Field(default=1, ge=0, le=10,
+    max_discovered_prop_subscriptions: int = Field(default=3, ge=0, le=10,
         description="Read-only player prop subtype channels selected from the current V4 catalog")
     account_review: ProphetXAccountReview | None = Field(default=None,
         description="Non-secret account inception/funded-cash evidence; does not authorize orders")
@@ -715,7 +715,7 @@ class NativeMonitor(Plugin):
             market_payloads = [await self.client.discover_markets(selected[start:start+10])
                                for start in range(0, len(selected), 10)]
             props = {}
-            remaining = self.context.config.get("max_discovered_prop_subscriptions", 1)
+            remaining = self.context.config.get("max_discovered_prop_subscriptions", 3)
             for event_id in selected:
                 for payload in market_payloads:
                     rows = payload.get("data", {}).get(event_id, [])
