@@ -132,7 +132,7 @@ def analyze(path: Path) -> dict:
                 health = plugin.get("health") or {}
                 plugin_states[(plugin.get("name"), health.get("status"), health.get("streaming"))] += 1
             live_native_streams = {plugin.get("name") for plugin in sample["plugins"]
-                                   if plugin.get("name") in {"kalshi", "novig"}
+                                   if plugin.get("name") in {"kalshi", "novig", "prophetx", "polymarket_us"}
                                    and plugin.get("enabled") is True
                                    and (plugin.get("health") or {}).get("streaming") is True}
             markets = sample["markets"]

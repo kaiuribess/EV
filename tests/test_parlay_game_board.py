@@ -35,13 +35,30 @@ def test_baseline_is_independent_provider_with_exact_documented_filters():
     assert PROVIDER_FACTORIES["parlay_game_ws"] is ParlayGameBoardWebSocket
     provider = ParlayGameBoardWebSocket({"sports": ["basketball_nba"]}, credential="")
     query = parse_qs(urlsplit(provider.stream_url("basketball_nba")).query)
-    assert query["bookmakers"] == ["pinnacle,fanduel,draftkings,caesars,betonline,bet365"]
+    assert query["bookmakers"] == ["pinnacle,fanduel,draftkings,caesars,bet365"]
     assert query["kinds"] == ["game"]
     assert query["markets"] == ["h2h,spreads,totals"]
     assert query["limit"] == ["1000"]
     # snapshot=complete is a separately restricted native-prop scope. The
     # complete game board is selected by these explicit book/market filters.
     assert "snapshot" not in query
+
+
+async def test_betonline_is_requested_only_for_supported_pregame_game_sports():
+    books = ["fanduel", "betonline"]
+    rest = ParlayRest({"bookmakers": books}, credential="")
+    rest.request = AsyncMock(return_value=ProviderEnvelope(
+        "parlay_rest", "snapshot", [], datetime.now(UTC), 1))
+    await rest.fetch_snapshot("basketball_nba")
+    assert rest.request.await_args.kwargs["params"]["bookmakers"] == "fanduel"
+    await rest.fetch_snapshot("americanfootball_nfl")
+    assert rest.request.await_args.kwargs["params"]["bookmakers"] == "fanduel,betonline"
+    await rest.fetch_props("americanfootball_nfl")
+    assert rest.request.await_args.kwargs["params"]["bookmakers"] == "fanduel"
+    props_stream = ParlayWebSocket({"bookmakers": books, "stream_kinds": ["prop"]}, credential="")
+    assert parse_qs(urlsplit(props_stream.stream_url("americanfootball_nfl")).query)["bookmakers"] == ["fanduel"]
+    game_stream = ParlayGameBoardWebSocket({"bookmakers": books}, credential="")
+    assert parse_qs(urlsplit(game_stream.stream_url("baseball_mlb")).query)["bookmakers"] == ["fanduel,betonline"]
 
 
 @pytest.mark.parametrize("limit", [0, 10001])

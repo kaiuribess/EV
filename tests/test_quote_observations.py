@@ -181,6 +181,23 @@ def test_rest_headers_survive_into_quote_completeness(headers, reason):
     assert offer.verification_reason == reason
 
 
+def test_degraded_book_header_only_excludes_the_named_book():
+    raw = ProviderEnvelope("parlay_rest", "props_snapshot", [
+        parlay_row(bookmaker="fanduel"), parlay_row(bookmaker="pinnacle")], NOW, 1,
+        metadata={"headers": {"x-result-degraded": "pinnacle"}})
+    by_book = {offer.bookmaker: offer for offer in extract_offers(raw)}
+    assert by_book["pinnacle"].verification_reason == "degraded_source"
+    assert by_book["fanduel"].verification_reason != "degraded_source"
+
+
+def test_websocket_price_movement_age_remains_distinct_from_observation_age():
+    raw = parlay(parlay_row(price_age_s=7200, last_observed=None,
+                            last_update_type="price_change"))
+    offer, = extract_offers(raw)
+    assert offer.provider_reported_price_age_s == Decimal("7200")
+    assert offer.source_observed_at is None and not offer.observation_verified
+
+
 def test_fixture_heartbeat_and_topups_never_verify_main_prices():
     event = {"id": "event", "bookmakers": [{"key": "fanduel", "last_update_ms": int(NOW.timestamp()*1000),
              "verified_at": NOW.isoformat(), "is_current": True, "topped_up": True,

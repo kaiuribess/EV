@@ -143,12 +143,20 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
             valid = (trusted_quote_research_eligibility(config, market, q, now)[0] if trusted
                      else quote_eligibility(config, market, q, now)[0])
             if trusted:
-                indicator = (q.source_observed_at if q.observation_verified else
-                             q.source_scope_poll_at if q.source_scope_is_current is True else None)
+                # Compare evidence about this price before a bookmaker/fixture
+                # polling heartbeat. In particular, a fresh REST verified_at
+                # must not displace a newer FanDuel/DraftKings stream row.
+                row_clock = (q.source_observed_at if q.observation_verified else
+                             q.source_stored_at or q.source_time)
+                if row_clock is not None and row_clock > now:
+                    row_clock = None
+                streamed_fast_book = (q.bookmaker in {"fanduel", "draftkings"}
+                                      and q.provider in {"parlay_ws", "parlay_game_ws"})
                 return (valid, bool(q.observation_verified and q.observation_complete),
-                        q.market_status_verified, q.source_scope_is_current is True,
-                        indicator or datetime.min.replace(tzinfo=timezone.utc),
-                        q.received_at, q.quality, config.provider_priority.get(q.provider, 0))
+                        q.market_status_verified,
+                        row_clock or datetime.min.replace(tzinfo=timezone.utc),
+                        streamed_fast_book, q.received_at, q.quality,
+                        config.provider_priority.get(q.provider, 0))
             clock = (q.received_at if trusted else
                      q.source_observed_at if q.observation_verified else q.source_time)
             return valid, clock or datetime.min.replace(tzinfo=timezone.utc), config.provider_priority.get(q.provider, 0)
@@ -208,6 +216,8 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
             eligible = diagnostics[book][0] and book not in conflicts
             evidence.update({"source_observed_at": quote.source_observed_at.isoformat() if quote.source_observed_at else None,
                 "source_price_changed_at": quote.source_price_changed_at.isoformat() if quote.source_price_changed_at else None,
+                "provider_reported_price_age_s": (str(quote.provider_reported_price_age_s)
+                                                  if quote.provider_reported_price_age_s is not None else None),
                 "source_stored_at": quote.source_stored_at.isoformat() if quote.source_stored_at else None,
                 "source_status_historical_hint": quote.source_status_historical_hint,
                 "source_scope_poll_at": quote.source_scope_poll_at.isoformat() if quote.source_scope_poll_at else None,

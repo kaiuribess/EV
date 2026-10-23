@@ -23,7 +23,8 @@ def _quote(row: dict) -> dict:
     keys = (
         "market_id", "provider", "bookmaker", "decimal_odds", "status",
         "received_at", "source_time", "provider_time", "source_observed_at",
-        "source_price_changed_at", "source_stored_at", "source_scope_poll_at",
+        "source_price_changed_at", "provider_reported_price_age_s",
+        "source_stored_at", "source_scope_poll_at",
         "source_scope_is_current", "source_status_historical_hint",
         "observation_verified", "market_status_verified", "verification_reason",
         "trusted_research_usable", "execution_freshness_reasons",
@@ -64,6 +65,7 @@ def compact_state(state: dict, observed_at: str) -> dict:
             continue
         references.append({
             "market_id": row.get("market_id"),
+            "strategy": row.get("strategy"),
             "calculated_at": row.get("calculated_at"),
             "reference_profile_id": row.get("reference_profile_id"),
             "quality_mode": row.get("quality_mode"),
@@ -114,8 +116,8 @@ def main() -> int:
     parser.add_argument("--interval-seconds", type=int, default=30)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    if not (1800 <= args.duration_seconds <= 3600):
-        parser.error("duration must be between 30 and 60 minutes")
+    if not (300 <= args.duration_seconds <= 3600):
+        parser.error("duration must be between 5 and 60 minutes")
     if not (10 <= args.interval_seconds <= 60):
         parser.error("interval must be between 10 and 60 seconds")
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -108,6 +108,30 @@ def test_parlay_stored_row_clock_expires_even_with_fresh_book_heartbeat():
         validate_fair_references(market, fair, config(), NOW+timedelta(seconds=29))
 
 
+def test_newer_fanduel_stream_row_beats_rest_heartbeat_without_changing_weights():
+    original = frame()
+    payload = deepcopy(original.payload)
+    for book in payload[0]["bookmakers"]:
+        book["line_changed_at_ms"] = int((NOW-timedelta(seconds=20)).timestamp()*1000)
+        book["verified_at"] = NOW.isoformat()
+        book["is_current"] = True
+    _, updates = projected(replace(original, payload=payload))
+    market = updates[0][0]
+    rest_quotes = [quote for _, quote in updates]
+    fd_rest = next(q for q in rest_quotes if q.bookmaker == "fanduel")
+    fd_ws = fd_rest.model_copy(update={"provider": "parlay_game_ws",
+        "source_stored_at": None, "source_time": NOW-timedelta(seconds=2),
+        "source_scope_poll_at": None, "source_scope_is_current": None,
+        "received_at": NOW-timedelta(seconds=1)})
+    fair = fair_value(market, [*rest_quotes, fd_ws], config(), NOW)
+    selected = next(ref for ref in fair.references if ref["bookmaker"] == "fanduel")
+    assert selected["provider"] == "parlay_game_ws"
+    assert selected["effective_weight_percent"] == "40.0"
+    older_ws = fd_ws.model_copy(update={"source_time": NOW-timedelta(seconds=25)})
+    fair = fair_value(market, [*rest_quotes, older_ws], config(), NOW)
+    assert next(ref for ref in fair.references if ref["bookmaker"] == "fanduel")["provider"] == "parlay_rest"
+
+
 @pytest.mark.parametrize("adverse", ["degraded", "cached", "topped"])
 def test_parlay_adverse_response_or_source_role_blocks_trusted_research(adverse):
     original = frame()

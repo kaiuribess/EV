@@ -21,6 +21,15 @@ from .base import (
 )
 
 
+_BETONLINE_GAME_SPORTS = {"americanfootball_nfl", "americanfootball_ncaaf", "baseball_mlb"}
+
+
+def _supported_bookmakers(sport: str, requested: list[str], *, game_only: bool) -> list[str]:
+    """Avoid explicitly requesting BetOnline outside its confirmed feed scope."""
+    return [book for book in requested if book.lower() != "betonline"
+            or (game_only and sport in _BETONLINE_GAME_SPORTS)]
+
+
 class ParlayConfig(ProviderConfig):
     regions: list[str] = Field(default_factory=lambda: ["us"])
     include_props: bool = True
@@ -100,9 +109,14 @@ class ParlayRest(RestProvider):
             # Links are evidence metadata; they are never order URLs here.
             "includeLinks": True,
         }
-        if self.config.bookmakers:
-            params["bookmakers"] = ",".join(self.config.bookmakers)
         params.update(filters)
+        requested = str(params.get("bookmakers", ",".join(self.config.bookmakers)))
+        if requested:
+            books = _supported_bookmakers(sport, [book.strip() for book in requested.split(",") if book.strip()],
+                                          game_only=True)
+            if not books:
+                raise UnsupportedOperation("No configured Parlay game-line book supports this sport")
+            params["bookmakers"] = ",".join(books)
         # Conservative local estimate; provider usage headers remain authoritative.
         books = [x for x in str(params.get("bookmakers", "")).split(",") if x]
         regions = [x for x in str(params.get("regions", "us")).split(",") if x]
@@ -117,9 +131,14 @@ class ParlayRest(RestProvider):
         params: dict[str, Any] = {"limit": self.config.props_limit, "includeLinks": True}
         if self.config.props_max_age_seconds is not None:
             params["maxAgeSec"] = self.config.props_max_age_seconds
-        if self.config.bookmakers:
-            params["bookmakers"] = ",".join(self.config.bookmakers)
         params.update(filters)
+        requested = str(params.get("bookmakers", ",".join(self.config.bookmakers)))
+        if requested:
+            books = _supported_bookmakers(sport, [book.strip() for book in requested.split(",") if book.strip()],
+                                          game_only=False)
+            if not books:
+                raise UnsupportedOperation("No configured Parlay prop book supports this sport")
+            params["bookmakers"] = ",".join(books)
         result = await self.request(f"/v1/sports/{safe_component(sport)}/props", params=params, cost=3)
         return replace(result, kind="props_snapshot", metadata={**result.metadata, "sport": sport})
 
@@ -192,7 +211,11 @@ class ParlayWebSocket(ParlayRest):
             "diff": "false",
         }
         if self.config.bookmakers:
-            params["bookmakers"] = ",".join(self.config.bookmakers)
+            books = _supported_bookmakers(sport, self.config.bookmakers,
+                                          game_only=self.config.stream_kinds == ["game"])
+            if not books:
+                raise UnsupportedOperation("No configured Parlay stream book supports this sport and market kind")
+            params["bookmakers"] = ",".join(books)
         if self.config.markets:
             params["markets"] = ",".join(self.config.markets)
         if self.config.stream_kinds:

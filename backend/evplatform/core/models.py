@@ -167,6 +167,9 @@ class Quote(TimedData):
     normal_outcome_verified: bool = False
     normal_outcome_evidence: str | None = None
     source_price_changed_at: datetime | None = None
+    # Parlay WebSocket price_age_s measures time since a price MOVED; it is
+    # not an observation clock or evidence that the outcome is still open.
+    provider_reported_price_age_s: Decimal | None = Field(default=None, ge=0)
     # Parlay REST line_changed_at_ms is the oldest stored served row, not a
     # guaranteed upstream price move or present selection verification.
     source_stored_at: datetime | None = None

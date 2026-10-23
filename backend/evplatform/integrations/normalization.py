@@ -67,6 +67,7 @@ class SourceOffer:
     observation_verified: bool = False
     observation_complete: bool = False
     source_price_changed_at: datetime | None = None
+    provider_reported_price_age_s: Decimal | None = None
     source_stored_at: datetime | None = None
     source_status_historical_hint: bool = False
     verification_reason: str | None = None
@@ -258,8 +259,16 @@ def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | Non
             state = source_roles.get(name)
             if isinstance(state, dict) and state.get("role") in {"degraded", "offline"}:
                 return "degraded_source"
-    if headers.get("x-result-degraded") or headers.get("x-result-degraded-sources"):
-        return "degraded_source"
+    # /props documents x-result-degraded as comma-separated *book keys*.
+    # A failed Pinnacle read must not disqualify a complete FanDuel row from
+    # the same response. Unknown/global header formats remain conservative.
+    degraded = headers.get("x-result-degraded") or headers.get("x-result-degraded-sources")
+    if degraded:
+        affected = {part.strip().lower() for part in str(degraded).split(",") if part.strip()}
+        names = {str(scope.get("bookmaker") or scope.get("key") or "").lower()
+                 for scope in scopes if isinstance(scope, dict)}
+        if not names or affected & names or affected & {"true", "all", "*"}:
+            return "degraded_source"
     if any(scope.get("partial") is True or scope.get("missing_books")
            or scope.get("snapshot_partial_reasons") or scope.get("snapshot_in_progress") is True
            for scope in all_scopes):
@@ -300,12 +309,21 @@ def _parlay_observation(envelope: ProviderEnvelope, row: dict, *, complete: bool
     problem = _observation_problem(envelope, *scopes, row)
     if observed is not None and observed > envelope.received_at:
         problem, verified = "future_observation_clock", False
+    try:
+        age = (Decimal(str(row["price_age_s"])) if envelope.provider_id != "parlay_rest"
+               and not isinstance(row.get("price_age_s"), bool) and row.get("price_age_s") is not None
+               else None)
+        if age is not None and (not age.is_finite() or age < 0):
+            age = None
+    except (InvalidOperation, ValueError):
+        age = None
     return {
         "source_observed_at": observed,
         "observation_verified": verified,
         "observation_complete": verified and complete and problem is None,
         "source_price_changed_at": (None if envelope.provider_id == "parlay_rest" else
             parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")),
+        "provider_reported_price_age_s": age,
         "source_stored_at": (parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")
             if envelope.provider_id == "parlay_rest" and envelope.kind == "snapshot" else None),
         "verification_reason": problem or ("quote_bound_collector_observation" if verified else "unverified_observation_clock"),
@@ -925,6 +943,7 @@ class TrustedSourceProjector:
             market_fingerprint=market.identity(), decimal_odds=odds, status=status,
             source_time=offer.observed_at, source_observed_at=offer.source_observed_at,
             source_price_changed_at=offer.source_price_changed_at,
+            provider_reported_price_age_s=offer.provider_reported_price_age_s,
             source_stored_at=offer.source_stored_at,
             source_status_historical_hint=offer.source_status_historical_hint,
             observation_verified=offer.observation_verified,
@@ -1185,6 +1204,9 @@ class VerifiedProviderMapper:
                 observed_at=_oldest([part.observed_at for part in sides.values()]),
                 source_observed_at=_oldest(timestamps),
                 source_price_changed_at=_oldest([part.source_price_changed_at for part in sides.values()]),
+                provider_reported_price_age_s=max(
+                    (part.provider_reported_price_age_s for part in sides.values()
+                     if part.provider_reported_price_age_s is not None), default=None),
                 source_stored_at=_oldest([part.source_stored_at for part in sides.values()]),
                 source_status_historical_hint=all(part.source_status_historical_hint for part in sides.values()),
                 received_at=_oldest([part.received_at for part in sides.values()]),
@@ -1297,6 +1319,7 @@ class VerifiedProviderMapper:
                 observation_verified=offer.observation_verified,
                 observation_complete=offer.observation_complete,
                 source_price_changed_at=offer.source_price_changed_at,
+                provider_reported_price_age_s=offer.provider_reported_price_age_s,
                 source_stored_at=offer.source_stored_at,
                 source_status_historical_hint=offer.source_status_historical_hint,
                 verification_reason=offer.verification_reason,
