@@ -545,7 +545,7 @@ class NativeRuntime:
                         {"allowance_probability": str(example),
                          "net_estimated_profit_usd": str(after_fee - example*payout),
                          "approved": False} for example in
-                        (Decimal(0), Decimal("0.01"), Decimal("0.02"))]
+                        (Decimal(0), Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))]
                 snapshot = self.account_snapshots.get(venue)
                 cash = (snapshot.balance_usd if snapshot and snapshot.cash_available_verified
                         and (venue != "kalshi" or snapshot.exchange_index == match.exchange_index)

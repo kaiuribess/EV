@@ -253,8 +253,9 @@ class ProphetXClient(NativeTransport):
             if self._ws is not None:
                 await self._ws.close()
 
-    async def discover_sports(self) -> dict:
-        return await self.request("GET", "/mm/get_tournaments")
+    async def discover_sports(self, *, active_events_only: bool = False) -> dict:
+        params = {"has_active_events": "true"} if active_events_only else None
+        return await self.request("GET", "/mm/get_tournaments", params=params)
 
     async def discover_events(self, **params) -> dict:
         return await self.request("GET", "/mm/get_sport_events", params=params)

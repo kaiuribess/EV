@@ -258,6 +258,10 @@ class ProphetXMonitorConfig(BaseModel):
     prop_subtypes: dict[str, list[str]] = Field(default_factory=dict, description="Event ID to discovered prop sub_type values")
     discovery_tournament_ids: list[int] = Field(default_factory=list, max_length=4,
         description="Authenticated tournament catalogs to refresh for game-market subscriptions")
+    discovery_leagues: list[Literal["NFL", "NBA", "MLB", "NHL"]] = Field(default_factory=list, max_length=4,
+        description="Exact active tournament names to discover through the Trading/MM catalog")
+    discovery_lookahead_hours: int = Field(default=30, ge=30, le=168,
+        description="Upcoming event subscription horizon; does not relax quote freshness or identity matching")
     discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
     max_discovered_events: int = Field(default=20, ge=1, le=50)
     max_discovered_prop_subscriptions: int = Field(default=3, ge=0, le=10,
@@ -287,6 +291,13 @@ class ProphetXMonitorConfig(BaseModel):
     def valid_discovery_tournaments(cls, values):
         if any(type(value) is not int or value <= 0 or value > 1_000_000_000 for value in values) or len(set(values)) != len(values):
             raise ValueError("Use distinct positive tournament IDs from native discovery")
+        return values
+
+    @field_validator("discovery_leagues")
+    @classmethod
+    def unique_discovery_leagues(cls, values):
+        if len(set(values)) != len(values):
+            raise ValueError("ProphetX discovery leagues must be unique")
         return values
 
 
@@ -323,6 +334,7 @@ class NativeMonitor(Plugin):
         self._subscribed_event_ids: list[str] = []
         self._subscribed_prop_subtypes: dict[str, list[str]] = {}
         self.discovered_prop_subtypes: dict[str, list[str]] = {}
+        self.discovered_tournaments: dict[str, int] = {}
         self._subscribed_market_ids: list[str] = []
         # Catalog evidence is read-only. It is never fed to NativeBookMapper or
         # used as an executable mapping without a separate exact review.
@@ -359,6 +371,7 @@ class NativeMonitor(Plugin):
         self._subscribed_event_ids = []
         self._subscribed_prop_subtypes = {}
         self.discovered_prop_subtypes = {}
+        self.discovered_tournaments = {}
         self._subscribed_market_ids = []
         self.research_catalog_rows = []
         self.research_catalog_at = None
@@ -415,7 +428,8 @@ class NativeMonitor(Plugin):
                     raise
         elif public_polymarket:
             self.client.health = "public_research"
-        if self.manifest.name == "prophetx" and context.config.get("discovery_tournament_ids"):
+        if self.manifest.name == "prophetx" and (context.config.get("discovery_tournament_ids")
+                                                 or context.config.get("discovery_leagues")):
             await self._refresh_discovery()
         if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
             await self._refresh_novig_discovery()
@@ -459,7 +473,8 @@ class NativeMonitor(Plugin):
         elif context.config.get("market_ids"):
             await self.client.subscribe(context.config["market_ids"])
         self.task = asyncio.create_task(self._run(), name=f"native-monitor:{self.manifest.name}")
-        if self.manifest.name == "prophetx" and context.config.get("discovery_tournament_ids"):
+        if self.manifest.name == "prophetx" and (context.config.get("discovery_tournament_ids")
+                                                 or context.config.get("discovery_leagues")):
             self.discovery_task = asyncio.create_task(self._discover_periodically(), name="prophetx-event-discovery")
         if self.manifest.name == "novig" and context.config.get("discovery_leagues"):
             self.discovery_task = asyncio.create_task(self._discover_novig_periodically(), name="novig-market-discovery")
@@ -820,22 +835,52 @@ class NativeMonitor(Plugin):
             raise
 
     async def _refresh_discovery(self):
-        from ..integrations.prophetx_discovery import open_event_ids
+        from ..integrations.prophetx_discovery import active_tournament_ids, open_event_ids
         from ..core.native_research import _aware
         try:
-            tournaments = self.context.config.get("discovery_tournament_ids", [])
-            payloads = [await self.client.discover_events(tournament_id=tournament_id)
-                        for tournament_id in tournaments]
-            pool = open_event_ids(payloads, now=utcnow(), max_events=50)
-            all_events = {str(row["event_id"]): {**row, "tournament_id": tournament_id}
-                for tournament_id, payload in zip(tournaments, payloads)
-                for row in payload.get("data", {}).get("sport_events", [])
-                if isinstance(row, dict) and str(row.get("event_id")) in pool}
+            config = self.context.config
             engine = getattr(self, "engine", None)
             source_rows = getattr(engine, "consensus_estimates", {})
             known_markets = getattr(engine, "markets", {})
             source_markets = [(known_markets[market_id], row.get("independent_book_count", 0))
                 for market_id, row in source_rows.items() if market_id in known_markets]
+            pinned = list(config.get("discovery_tournament_ids", []))
+            leagues = config.get("discovery_leagues", [])
+            discovered, catalog_error = {}, ""
+            if leagues:
+                try:
+                    payload = await self.client.discover_sports(active_events_only=True)
+                    discovered = active_tournament_ids(payload, leagues)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if not pinned:
+                        raise
+                    catalog_error = type(exc).__name__
+            league_scores = {league: max((int(count) for market, count in source_markets
+                if market.league == league), default=0) for league in leagues}
+            ranked_leagues = sorted(discovered, key=lambda league: (-league_scores[league],
+                                                                      leagues.index(league)))
+            tournaments = list(dict.fromkeys([*pinned, *(discovered[league] for league in ranked_leagues)]))[:4]
+            labels_by_tournament = {native_id: league for league, native_id in discovered.items()}
+            payloads = [await self.client.discover_events(tournament_id=tournament_id)
+                        for tournament_id in tournaments]
+            pool = open_event_ids(payloads, now=utcnow(), max_events=50,
+                                  lookahead_hours=config.get("discovery_lookahead_hours", 30))
+            all_events, ambiguous_ids = {}, set()
+            for tournament_id, payload in zip(tournaments, payloads):
+                for row in payload.get("data", {}).get("sport_events", []):
+                    if not isinstance(row, dict) or str(row.get("event_id")) not in pool:
+                        continue
+                    event_id = str(row["event_id"])
+                    if event_id in all_events and all_events[event_id]["tournament_id"] != tournament_id:
+                        ambiguous_ids.add(event_id)
+                    else:
+                        all_events[event_id] = {**row, "tournament_id": tournament_id,
+                                                "league": labels_by_tournament.get(tournament_id)}
+            for event_id in ambiguous_ids:
+                all_events.pop(event_id, None)
+            pool = [event_id for event_id in pool if event_id in all_events]
             def event_rank(event_id):
                 event = all_events.get(event_id, {})
                 start = _aware(event.get("scheduled"))
@@ -845,7 +890,15 @@ class NativeMonitor(Plugin):
                     and (event.get("league") == market.league or
                          market.league == "NBA" and event.get("tournament_id") == 132)), default=0)
                 return (-int(score >= 3), -score, pool.index(event_id))
-            selected = sorted(pool, key=event_rank)[:self.context.config.get("max_discovered_events", 20)]
+            ranked = sorted(pool, key=event_rank)
+            # Preserve one open event from each explicitly pinned tournament
+            # before using the remaining bounded slots for source-rich leads.
+            retained = [min((event_id for event_id in pool
+                             if all_events.get(event_id, {}).get("tournament_id") == tournament_id),
+                            key=event_rank, default=None) for tournament_id in pinned]
+            selected = [event_id for event_id in retained if event_id is not None]
+            selected.extend(event_id for event_id in ranked if event_id not in selected)
+            selected = selected[:config.get("max_discovered_events", 20)]
             events = {}
             for event_id in selected:
                 if event_id in all_events:
@@ -874,7 +927,7 @@ class NativeMonitor(Plugin):
                                 and row.get("period") in {"full", "full_game", "FULL"}
                                 and str(row.get("line")) == str(market.line)), default=0)
                             prop_candidates.append((-int(score >= 3), -score, event_id, subtype))
-            for _, _, event_id, subtype in sorted(prop_candidates)[:self.context.config.get(
+            for _, _, event_id, subtype in sorted(prop_candidates)[:config.get(
                     "max_discovered_prop_subscriptions", 3)]:
                 props.setdefault(event_id, []).append(subtype)
             if hasattr(self.client, "public_market_data"):
@@ -894,7 +947,9 @@ class NativeMonitor(Plugin):
             # handled independently by the native client.
             return
         self.discovery_status = "current"
-        self.discovery_error_type = ""
+        self.discovery_error_type = catalog_error
+        self.discovered_tournaments = {league: native_id for league, native_id in discovered.items()
+                                       if native_id in tournaments}
         self.discovered_event_ids = selected
         self.discovered_prop_subtypes = props
 
@@ -943,7 +998,8 @@ class NativeMonitor(Plugin):
                     await self.engine.native.on_frame(self.manifest.name, self.client, frame)
                 if (self.manifest.name == "prophetx" and frame.get("type") == "snapshot_required"
                         and self.client.public_market_data.catalog_at is None
-                        and self.context.config.get("discovery_tournament_ids")):
+                        and (self.context.config.get("discovery_tournament_ids")
+                             or self.context.config.get("discovery_leagues"))):
                     # Reconnect clears old depth. Refresh exact REST identity and
                     # status once, then wait for new scoped v2 selection messages.
                     await self._refresh_discovery()
@@ -1104,6 +1160,8 @@ class NativeMonitor(Plugin):
                 **({"discovery_error_type": self.discovery_error_type}
                    if self.manifest.name in {"prophetx", "polymarket_us"} else {}),
                 "discovered_event_count": len(self.discovered_event_ids),
+                **({"discovered_tournaments": getattr(self, "discovered_tournaments", {})}
+                   if self.manifest.name == "prophetx" else {}),
                 "discovered_market_count": (len(self.client.public_market_data.catalog)
                     if self.manifest.name == "prophetx" else len(self.discovered_market_ids)),
                 **({"discovered_prop_subscription_count": sum(map(len, self.discovered_prop_subtypes.values()))}

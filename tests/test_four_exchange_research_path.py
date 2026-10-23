@@ -71,6 +71,28 @@ def test_prophetx_exact_strikes_and_usd_stake_fee_economics():
     assert estimate["positive_after_costs"] and estimate["execution_eligible"] is False
 
 
+def test_prophetx_discovered_nfl_league_reaches_exact_moneyline_matching():
+    now = utcnow()
+    market = source_market(now, id="research:nfl", sport="football", league="NFL",
+        event_name="Pittsburgh Steelers at New Orleans Saints",
+        participants=("New Orleans Saints", "Pittsburgh Steelers"),
+        outcomes=("Pittsburgh Steelers", "New Orleans Saints"))
+    data = ProphetXMarketData()
+    payload = {"data": {"31-event": [{"id": 219, "name": "Moneyline",
+        "type": "moneyline", "sub_type": "moneyline", "status": "active",
+        "selections": [[{"strike_id": "pit-strike", "outcome_id": 4,
+                        "name": "Pittsburgh Steelers", "status": "active"}],
+                       [{"strike_id": "no-strike", "outcome_id": 5,
+                        "name": "New Orleans Saints", "status": "active"}]]}]}}
+    data.replace_catalog([payload], ["31-event"], observed_at=now)
+    events = {"31-event": {"name": market.event_name, "scheduled": market.start_time.isoformat(),
+                           "status": "not_started", "tournament_id": 31, "league": "NFL"}}
+    assert {m.outcome for m in prophetx_matches(market, data.catalog, events, observed_at=now)} == {
+        "Pittsburgh Steelers", "New Orleans Saints"}
+    events["31-event"]["league"] = "NBA"
+    assert prophetx_matches(market, data.catalog, events, observed_at=now) == []
+
+
 def test_prophetx_ambiguous_clock_period_and_prop_fields_do_not_match():
     now = utcnow()
     market, data, events = setup(now)

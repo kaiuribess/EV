@@ -185,4 +185,6 @@ def test_consensus_flows_to_read_only_native_fee_comparison_without_margin(monke
     assert offer["taker_fee_usd"] == "0.02"
     assert offer["net_estimated_profit_usd"] is None
     assert offer["positive_after_costs"] is False and offer["execution_eligible"] is False
-    assert [item["approved"] for item in offer["research_uncertainty_scenarios"]] == [False]*3
+    assert [item["allowance_probability"] for item in offer["research_uncertainty_scenarios"]] == [
+        "0", "0.005", "0.01", "0.02"]
+    assert [item["approved"] for item in offer["research_uncertainty_scenarios"]] == [False]*4

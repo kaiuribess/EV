@@ -278,6 +278,29 @@ def create_app(settings=None):
         except (ValueError, RuntimeError, asyncio.TimeoutError):
             raise HTTPException(502, "ProphetX catalog read or schema validation failed") from None
 
+    @app.get("/api/native/discovery/prophetx/tournaments")
+    async def prophetx_active_tournaments():
+        """Bounded public identity summary using the monitor's existing session."""
+        from .integrations.prophetx_discovery import summarize_tournaments
+        from .plugins.external import NativeMonitor
+        from .venues.common import VenueHTTPError
+
+        record = engine.registry.records.get("prophetx")
+        plugin = record.plugin if record else None
+        client = getattr(plugin, "client", None)
+        if (not record or not record.enabled or not isinstance(plugin, NativeMonitor)
+                or client is None or plugin.task is None or plugin.task.done()
+                or record.health.get("authenticated") is not True):
+            raise HTTPException(409, "A connected ProphetX native monitor is required")
+        try:
+            payload = await asyncio.wait_for(client.discover_sports(active_events_only=True), 15)
+            return summarize_tournaments(payload)
+        except VenueHTTPError as exc:
+            raise HTTPException(502, {"provider_status": exc.status_code,
+                                      "provider_code": exc.code}) from None
+        except (ValueError, RuntimeError, asyncio.TimeoutError):
+            raise HTTPException(502, "ProphetX tournament read or schema validation failed") from None
+
     @app.get("/api/accounts/cash")
     async def reported_cash():
         return monitor_cash.state()
