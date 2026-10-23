@@ -76,6 +76,9 @@ class PricingConfig(BaseModel):
     reference_quality_mode: Literal["strict_verified", "trusted_provider"] = "strict_verified"
     trusted_max_delivery_age_ms: int = Field(default=30000, ge=1000, le=600000)
     trusted_max_indicator_age_ms: int = Field(default=30000, ge=1000, le=600000)
+    # Read-only sensitivity assumption. A missing value means that net EV
+    # after source uncertainty is unknown; it grants no pilot permission.
+    trusted_research_margin_probability: Decimal | None = Field(default=None, ge=0, lt=1)
     trusted_pilot_policy: TrustedPilotPolicy = Field(default_factory=TrustedPilotPolicy)
     reference_profiles: dict[str, ReferenceProfile] = Field(default_factory=dict)
     enabled_reference_profiles: list[str] = Field(default_factory=list)

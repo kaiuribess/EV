@@ -71,6 +71,7 @@ class Engine:
         self.books: dict[str, dict[tuple[str, str], OrderBook]] = {}
         self.opportunities = {}
         self.reference_estimates = {}
+        self.reference_fairs = {}
         self.signals = {}
         # Full raw inputs stay in the audit log. Repeating an unchanged
         # no-candidate evaluation for the same market every feed tick otherwise
@@ -502,6 +503,7 @@ class Engine:
                         market, fair, native_book, self.settings.pricing))
                 except NoSignal as exc:
                     native_rejections.append(str(exc))
+            self.reference_fairs[market_id] = fair
             self.reference_estimates[market_id] = {
                 "market_id": market_id, "event_name": market.event_name,
                 "sport": market.sport, "league": market.league,
@@ -525,6 +527,26 @@ class Engine:
                     else "REFERENCE ESTIMATE")}
         except NoSignal:
             self.reference_estimates.pop(market_id, None)
+            self.reference_fairs.pop(market_id, None)
+
+    def public_reference_estimates(self):
+        """Use current monitored depth without querying a venue or routing orders."""
+        result = []
+        for market_id, row in self.reference_estimates.items():
+            market, fair = self.markets.get(market_id), self.reference_fairs.get(market_id)
+            comparisons = self.native.research_comparisons(market, fair) if market and fair else []
+            all_estimates = [*row.get("native_research_estimates", []), *comparisons]
+            result.append({**row, "native_market_matched": bool(comparisons) or row["native_market_matched"],
+                           "native_research_estimates": all_estimates,
+                           "native_discovery_reason": (None if all_estimates else
+                               "No exact native catalog match for this sport, market family and current event; "
+                               "or monitored executable depth is unavailable"),
+                           "native_match_count": len({(item["venue"], item["native_market_id"])
+                                                      for item in comparisons}),
+                           "status": ("PROVISIONAL POSITIVE EV" if any(
+                               item.get("positive_after_costs") or item.get("positive_estimate")
+                               for item in all_estimates) else row["status"])})
+        return result
 
     async def recalculate(self, market_id, event=None):
         market = self.markets[market_id]
@@ -945,7 +967,7 @@ class Engine:
             "markets": [m.model_dump(mode="json") for m in self.markets.values()],
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
             "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
-            "reference_estimates": list(self.reference_estimates.values()),
+            "reference_estimates": self.public_reference_estimates(),
             "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
             "native_orders": [o.model_dump(mode="json") for o in list(self.risk.native_orders.values())[-200:]],
             "native_signals": [o.model_dump(mode="json") for o in self.native.signals.values()],

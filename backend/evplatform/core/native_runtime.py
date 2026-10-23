@@ -148,6 +148,93 @@ class NativeRuntime:
         profiles = self.profiles_by_venue()
         return profiles.get(venue) if venue is not None else next(iter(profiles.values()), None)
 
+    def research_comparisons(self, market, fair):
+        """Compare research fair values with existing read-only native streams.
+
+        This path constructs dictionaries for display only. It never creates a
+        NativeBook, execution mapping, candidate, intent, or account authority.
+        """
+        from decimal import Decimal, ROUND_FLOOR
+        from .native_research import compare_minimum_lot, kalshi_research_taker_fee, novig_taker_fee
+        from .pricing import NoSignal, market_config, validate_fair_references
+
+        now = utcnow()
+        scoped = market_config(self.engine.settings.pricing, market)
+        try:
+            validate_fair_references(market, fair, self.engine.settings.pricing, now)
+        except NoSignal:
+            return []
+        margin = scoped.trusted_research_margin_probability
+        output = []
+        for venue in ("kalshi", "novig"):
+            record = self.engine.registry.records.get(venue)
+            monitor = record.plugin if record else None
+            client = getattr(monitor, "client", None)
+            if (not record or not record.enabled or client is None
+                    or client.settings.environment != self.engine.settings.mode
+                    or not getattr(monitor, "task", None) or monitor.task.done()
+                    or not client.health_check().get("streaming")
+                    or getattr(monitor, "research_catalog_at", None) is None
+                    or (now-monitor.research_catalog_at).total_seconds() > 2 * monitor.context.config.get(
+                        "discovery_interval_seconds", 300)):
+                continue
+            matches = getattr(monitor, "research_matches", {}).get(market.id, ())
+            if not matches:
+                continue
+            for match in matches:
+                if match.outcome not in fair.probabilities:
+                    continue
+                if venue == "kalshi":
+                    levels = client.book.asks(match.native_market_id, match.side)
+                    metadata = monitor.research_fee_metadata.get(match.native_event_id)
+                    if metadata and (now-metadata["observed_at"]).total_seconds() <= 360:
+                        fee_for = lambda price, qty, match=match, metadata=metadata: kalshi_research_taker_fee(
+                            match, metadata["series"], metadata["event"], metadata["series_changes"],
+                            metadata["event_changes"], price, qty, now=now)
+                    else:
+                        fee_for = lambda price, qty: (_ for _ in ()).throw(ValueError("Kalshi fee metadata missing"))
+                else:
+                    levels = client.book.asks(match.native_market_id, match.opposing_outcome_id)
+                    native = next((row for row in monitor.research_catalog_rows
+                                   if row.get("marketId") == match.native_market_id), None)
+                    event = monitor.research_events.get(match.native_event_id)
+                    fee_for = lambda price, qty, native=native, event=event: novig_taker_fee(
+                        native, event, price, qty)
+                result = compare_minimum_lot(match, fair.probabilities[match.outcome], levels,
+                    fee_for=fee_for, uncertainty_margin_probability=margin, now=now)
+                result["fair_probability"] = str(fair.probabilities[match.outcome])
+                result["reference_profile_id"] = fair.reference_profile_id
+                result["reference_books"] = [ref.get("bookmaker") for ref in fair.references]
+                result["catalog_age_ms"] = (now-match.catalog_observed_at).total_seconds()*1000
+                result["source_quality_mode"] = scoped.reference_quality_mode
+                result["uncertainty_allowance_policy"] = (
+                    "research_assumption" if margin is not None else "unconfigured")
+                snapshot = self.account_snapshots.get(venue)
+                cash = (snapshot.balance_usd if snapshot and snapshot.cash_available_verified
+                        and (venue != "kalshi" or snapshot.exchange_index == match.exchange_index)
+                        else None)
+                result["spendable_cash_usd"] = str(cash) if cash is not None else None
+                result["quarter_kelly_budget_usd"] = None
+                result["quarter_kelly_quantity"] = None
+                if (cash is not None and Decimal(cash) > 0 and result.get("positive_after_costs")
+                        and result.get("normal_payout_usd") and result.get("price") is not None):
+                    # Informational only: the production calculator rechecks
+                    # split-fill fee bounds, minimums, cash, exposure and risk.
+                    p = Decimal(fair.probabilities[match.outcome]) - Decimal(margin)
+                    payout = Decimal(result["normal_payout_usd"])
+                    debit = Decimal(result["cash_cost_usd"]) + Decimal(result["taker_fee_usd"])
+                    full = max(Decimal(0), (p*payout-debit)/(payout-debit)) if payout > debit else Decimal(0)
+                    budget = min(Decimal("1"), Decimal(cash)*Decimal("0.25")*full)
+                    minimum = Decimal(result["comparison_quantity"])
+                    quantity = (budget/debit).to_integral_value(rounding=ROUND_FLOOR)*minimum
+                    result["quarter_kelly_budget_usd"] = str(budget)
+                    result["quarter_kelly_quantity"] = str(quantity if quantity >= minimum else Decimal(0))
+                    if quantity < minimum:
+                        result["reasons"].append("Quarter-Kelly budget is below the comparison lot; no upward rounding")
+                output.append(result)
+        return sorted(output, key=lambda item: Decimal(item["net_estimated_roi"])
+                      if item.get("net_estimated_roi") is not None else Decimal("-Infinity"), reverse=True)
+
     def invalidate_account(self, venue):
         """Fence every in-flight read before removing an obsolete account view."""
         self._account_generations[venue] = self._account_generations.get(venue, 0)+1

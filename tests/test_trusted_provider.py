@@ -573,6 +573,19 @@ def test_source_prop_uses_exact_event_metadata_and_rejects_unknown_period():
     mapper(prop)
     assert len(mapper.research_updates) == 3
     market = mapper.research_updates[0][0]
+    from evplatform.core.native_research import novig_prop_matches
+    native_event_id = "22222222-2222-4222-8222-222222222222"
+    native_market_id = "11111111-1111-4111-8111-111111111111"
+    native = {"marketId": native_market_id, "eventId": native_event_id,
+        "marketType": "POINTS", "status": "OPEN", "voids": "FMV", "strike": "24.5",
+        "startsTs": int(market.start_time.timestamp() * 1000),
+        "description": "Named Player 24.5 POINTS",
+        "outcomes": [{"name": "Over 24.5", "outcomeId": "33333333-3333-4333-8333-333333333333", "status": "TBD"},
+                     {"name": "Under 24.5", "outcomeId": "44444444-4444-4444-8444-444444444444", "status": "TBD"}]}
+    native_event = {"eventId": native_event_id, "league": "NBA", "status": "OPEN_PREGAME",
+        "startsTs": native["startsTs"], "description": "Away @ Home"}
+    assert len(novig_prop_matches(market, [native], {native_event_id: native_event},
+                                  observed_at=NOW)) == 2
     assert market.player == "Named Player" and market.line == Decimal("24.5")
     assert len({m.id for m, _ in mapper.research_updates}) == 1
     fair = fair_value(market, [q for _, q in mapper.research_updates], policy, NOW)

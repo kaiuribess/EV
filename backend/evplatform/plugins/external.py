@@ -215,9 +215,10 @@ class NovigMonitorConfig(NativeMonitorConfig):
         description="Legacy preserves the existing pair. Environment selects separate paper/production trading credentials.")
     discovery_leagues: list[str] = Field(default_factory=list, max_length=8,
         description="Canonical Novig league codes for read-only open-market discovery; empty disables discovery")
-    discovery_market_types: list[str] = Field(default_factory=list, max_length=8,
+    discovery_market_types: list[str] = Field(default_factory=list, max_length=24,
         description="Canonical Novig market-type codes, paired with discovery_leagues")
     discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    discovery_page_size: int = Field(default=500, ge=1, le=5000)
     max_discovered_markets: int = Field(default=50, ge=1, le=100)
 
     @field_validator("discovery_leagues", "discovery_market_types")
@@ -308,6 +309,13 @@ class NativeMonitor(Plugin):
         self.discovered_market_ids: list[str] = []
         self._subscribed_event_ids: list[str] = []
         self._subscribed_market_ids: list[str] = []
+        # Catalog evidence is read-only. It is never fed to NativeBookMapper or
+        # used as an executable mapping without a separate exact review.
+        self.research_catalog_rows: list[dict] = []
+        self.research_catalog_at = None
+        self.research_matches: dict[str, list] = {}
+        self.research_events: dict[str, dict] = {}
+        self.research_fee_metadata: dict[str, dict] = {}
 
     def credential_names(self, config):
         default_profile = getattr(self.config_model(), "credential_profile", "legacy")
@@ -327,6 +335,11 @@ class NativeMonitor(Plugin):
         self.discovered_market_ids = []
         self._subscribed_event_ids = []
         self._subscribed_market_ids = []
+        self.research_catalog_rows = []
+        self.research_catalog_at = None
+        self.research_matches = {}
+        self.research_events = {}
+        self.research_fee_metadata = {}
         if context.config.get("legacy_market_ids"):
             self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
             return
@@ -415,11 +428,28 @@ class NativeMonitor(Plugin):
         try:
             # Market rows omit league. Query each requested league separately
             # so a dense schedule in one sport cannot hide every other sport.
-            rows = [await self.client.discover_markets(
-                league=league, marketType=",".join(config["discovery_market_types"]),
-                limit=500) for league in config["discovery_leagues"]]
+            rows = []
+            for league in config["discovery_leagues"]:
+                params = {"league": league, "marketType": ",".join(config["discovery_market_types"]),
+                          "limit": config.get("discovery_page_size", 500)}
+                league_items = []
+                remaining_cursor = None
+                for _ in range(3):
+                    page = await self.client.discover_markets(**params)
+                    if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+                        raise ValueError("Novig catalog page is incomplete")
+                    league_items.extend(page["items"])
+                    remaining_cursor = page.get("next")
+                    if not remaining_cursor:
+                        break
+                    params["after"] = remaining_cursor
+                rows.append({"items": league_items, "next": remaining_cursor})
             selected, truncated = balanced_open_market_ids(rows, now=utcnow(),
                 max_markets=config.get("max_discovered_markets", 50))
+            self.research_catalog_rows = [market for page in rows for market in page["items"]]
+            self.research_catalog_at = utcnow()
+            priority = await self._refresh_research_matches()
+            selected = list(dict.fromkeys([*priority, *selected]))[:config.get("max_discovered_markets", 50)]
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -440,6 +470,10 @@ class NativeMonitor(Plugin):
             selected, truncated = balanced_open_markets(payloads,
                 series=config["discovery_series"], now=utcnow(),
                 max_markets=config.get("max_discovered_markets", 8))
+            self.research_catalog_rows = [market for page in payloads for market in page["markets"]]
+            self.research_catalog_at = utcnow()
+            priority = await self._refresh_research_matches()
+            selected = list(dict.fromkeys([*priority, *selected]))[:config.get("max_discovered_markets", 8)]
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -448,15 +482,94 @@ class NativeMonitor(Plugin):
         self.discovered_market_ids = selected
         self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
 
+    async def _refresh_research_matches(self):
+        """Use already-fetched catalogs; only exact candidate metadata adds reads."""
+        from ..core.native_research import (NOVIG_PROP_TYPES, kalshi_moneyline_matches,
+            novig_moneyline_matches, novig_prop_matches)
+        if self.manifest.name not in {"kalshi", "novig"} or self.research_catalog_at is None:
+            return []
+        markets = [self.engine.markets[market_id] for market_id in self.engine.reference_estimates
+                   if market_id in self.engine.markets]
+        if self.manifest.name == "novig":
+            # Market list rows expose codes and start but not the two full team
+            # names. Fetch only a bounded set of plausible events and require
+            # the authoritative event description before matching.
+            candidate_ids = []
+            for row in self.research_catalog_rows:
+                if row.get("status") != "OPEN":
+                    continue
+                for market in markets:
+                    if market.market_type not in {"moneyline", "player_prop"} or market.league not in self.context.config.get("discovery_leagues", []):
+                        continue
+                    expected_type = ("MONEY" if market.market_type == "moneyline"
+                                     else NOVIG_PROP_TYPES.get(market.statistic))
+                    if row.get("marketType") != expected_type:
+                        continue
+                    start = row.get("startsTs")
+                    if type(start) is int and abs(start - int(market.start_time.timestamp()*1000)) <= 120000:
+                        candidate_ids.append(row.get("eventId"))
+                        break
+            for event_id in list(dict.fromkeys(candidate_ids))[:32]:
+                if not isinstance(event_id, str) or event_id in self.research_events:
+                    continue
+                try:
+                    response = await self.client.request("GET", f"/v3/catalog/events/{event_id}")
+                    if isinstance(response, dict) and response.get("eventId") == event_id:
+                        self.research_events[event_id] = response
+                except Exception:
+                    continue
+        result, priority = {}, []
+        for market in markets:
+            matches = (kalshi_moneyline_matches(market, self.research_catalog_rows,
+                       observed_at=self.research_catalog_at) if self.manifest.name == "kalshi" else
+                       (novig_moneyline_matches(market, self.research_catalog_rows,
+                        self.research_events, observed_at=self.research_catalog_at)
+                        if market.market_type == "moneyline" else
+                        novig_prop_matches(market, self.research_catalog_rows,
+                            self.research_events, observed_at=self.research_catalog_at)))
+            if matches:
+                result[market.id] = matches
+                priority.extend(item.native_market_id for item in matches)
+        self.research_matches = result
+        if self.manifest.name == "kalshi":
+            events = list(dict.fromkeys(item.native_event_id for matches in result.values() for item in matches))[:8]
+            for event_id in events:
+                if event_id in self.research_fee_metadata:
+                    continue
+                series = event_id.split("-", 1)[0]
+                try:
+                    self.research_fee_metadata[event_id] = {
+                        "series": await self.client.request("GET", f"/series/{series}", authenticated=False),
+                        "event": await self.client.request("GET", f"/events/{event_id}", authenticated=False),
+                        "series_changes": await self.client.request("GET", "/series/fee_changes",
+                            params={"series_ticker": series}, authenticated=False),
+                        "event_changes": await self.client.request("GET", "/events/fee_changes",
+                            params={"event_ticker": event_id}, authenticated=False),
+                        "observed_at": utcnow(),
+                    }
+                except Exception:
+                    self.research_fee_metadata.pop(event_id, None)
+        return list(dict.fromkeys(priority))
+
     async def _discover_kalshi_periodically(self):
         try:
+            elapsed = 0
+            interval = self.context.config.get("discovery_interval_seconds", 300)
             while True:
-                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
-                await self._refresh_kalshi_discovery()
+                step = min(30, interval - elapsed)
+                await asyncio.sleep(step)
+                elapsed += step
+                if elapsed >= interval:
+                    await self._refresh_kalshi_discovery()
+                    elapsed = 0
+                else:
+                    await self._refresh_research_matches()
                 if self.discovery_status == "read_failed":
                     continue
+                research = [item.native_market_id for matches in self.research_matches.values() for item in matches]
                 selected = list(dict.fromkeys([*self.context.config.get("market_ids", []),
-                                               *self.discovered_market_ids]))
+                    *research, *self.discovered_market_ids]))[:len(self.context.config.get("market_ids", []))
+                        + self.context.config.get("max_discovered_markets", 8)]
                 if selected == self._subscribed_market_ids:
                     continue
                 try:
@@ -470,13 +583,23 @@ class NativeMonitor(Plugin):
 
     async def _discover_novig_periodically(self):
         try:
+            elapsed = 0
+            interval = self.context.config.get("discovery_interval_seconds", 300)
             while True:
-                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
-                await self._refresh_novig_discovery()
+                step = min(30, interval - elapsed)
+                await asyncio.sleep(step)
+                elapsed += step
+                if elapsed >= interval:
+                    await self._refresh_novig_discovery()
+                    elapsed = 0
+                else:
+                    await self._refresh_research_matches()
                 if self.discovery_status == "read_failed":
                     continue
+                research = [item.native_market_id for matches in self.research_matches.values() for item in matches]
                 selected = list(dict.fromkeys([*self.context.config.get("market_ids", []),
-                                               *self.discovered_market_ids]))
+                    *research, *self.discovered_market_ids]))[:len(self.context.config.get("market_ids", []))
+                        + self.context.config.get("max_discovered_markets", 50)]
                 if selected == self._subscribed_market_ids:
                     continue
                 try:

@@ -131,6 +131,25 @@ if ($oddspapiKeyConfigured) {
     }
 }
 
+# Read-only native catalogs and books are useful before any execution review.
+# Keep the bounded subscriptions separate from source/research and never add a
+# reviewed mapping or authorization here. The same source setup runs on paper,
+# so native monitors are changed only in the stopped production workspace.
+if ($isNative -and $state.mode -eq 'production') {
+    Configure-Input 'kalshi' @{
+        discovery_series = @('KXNBAGAME', 'KXNFLGAME', 'KXMLBGAME', 'KXNHLGAME');
+        max_discovered_markets = 16
+    }
+    Configure-Input 'novig' @{
+        discovery_leagues = @('NBA', 'NFL', 'MLB', 'NHL');
+        discovery_market_types = @('MONEY', 'POINTS', 'REBOUNDS', 'ASSISTS',
+            'THREE_POINTERS_MADE', 'POINTS_REBOUNDS_ASSISTS', 'PASSING_YARDS',
+            'RUSHING_YARDS', 'RECEIVING_YARDS', 'RECEPTIONS', 'PITCHER_STRIKEOUTS',
+            'HITS', 'TOTAL_BASES', 'RBIS', 'RUNS', 'SHOTS_ON_GOAL');
+        discovery_page_size = 2000; max_discovered_markets = 16
+    }
+}
+
 $current = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 if ($current.pricing.reference_profile_mode -ne 'strict') {
     if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {

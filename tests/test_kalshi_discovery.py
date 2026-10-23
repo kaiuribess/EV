@@ -88,9 +88,12 @@ async def test_monitor_keeps_previous_scope_on_catalog_failure(monkeypatch):
             return {"markets": [row(series, "NEXT", NOW + timedelta(hours=1))], "cursor": ""}
 
     client = Client()
+    async def no_research_matches():
+        return []
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_series": ["KXNBAGAME", "KXNHLGAME"], "max_discovered_markets": 2}),
-        discovery_status="disabled", discovered_market_ids=[])
+        discovery_status="disabled", discovered_market_ids=[],
+        _refresh_research_matches=no_research_matches)
     await NativeMonitor._refresh_kalshi_discovery(monitor)
     assert monitor.discovered_market_ids == ["KXNBAGAME-NEXT", "KXNHLGAME-NEXT"]
     client.fail = True
@@ -126,7 +129,7 @@ async def test_periodic_rotation_only_when_scope_changes(monkeypatch):
     async def one_cycle(_):
         nonlocal cycles
         cycles += 1
-        if cycles > 1:
+        if cycles > 2:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
@@ -141,9 +144,13 @@ async def test_periodic_rotation_only_when_scope_changes(monkeypatch):
         monitor.discovered_market_ids = ["KXNBAGAME-NEXT"]
         monitor.discovery_status = "current"
 
+    async def no_research_matches():
+        return []
+
     monitor = SimpleNamespace(client=Client(), context=SimpleNamespace(config={
         "discovery_interval_seconds": 60, "market_ids": []}),
-        _refresh_kalshi_discovery=refresh, discovery_status="current",
+        _refresh_kalshi_discovery=refresh, _refresh_research_matches=no_research_matches,
+        research_matches={}, discovery_status="current",
         discovered_market_ids=["KXNBAGAME-OLD"], _subscribed_market_ids=["KXNBAGAME-OLD"])
     with pytest.raises(asyncio.CancelledError):
         await NativeMonitor._discover_kalshi_periodically(monitor)

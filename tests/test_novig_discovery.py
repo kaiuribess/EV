@@ -82,9 +82,12 @@ async def test_monitor_read_failure_retains_last_discovered_scope(monkeypatch):
 
     client = Client()
     client.calls = 0
+    async def no_research_matches():
+        return []
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_leagues": ["NBA", "NFL"], "discovery_market_types": ["MONEY"],
-        "max_discovered_markets": 1}), discovery_status="disabled", discovered_market_ids=[])
+        "max_discovered_markets": 1}), discovery_status="disabled", discovered_market_ids=[],
+        _refresh_research_matches=no_research_matches)
     await NativeMonitor._refresh_novig_discovery(monitor)
     assert monitor.discovered_market_ids == [LIVE] and monitor.discovery_status == "truncated"
     client.fail = True
@@ -99,7 +102,7 @@ async def test_market_rotation_uses_reconnect_snapshot_only_after_success(monkey
     async def one_cycle(_):
         nonlocal cycles
         cycles += 1
-        if cycles > 1:
+        if cycles > 2:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
@@ -117,10 +120,14 @@ async def test_market_rotation_uses_reconnect_snapshot_only_after_success(monkey
         monitor.discovered_market_ids = [NEXT]
         monitor.discovery_status = "current"
 
+    async def no_research_matches():
+        return []
+
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_interval_seconds": 60, "market_ids": [LIVE]}),
         discovered_market_ids=[LIVE], _subscribed_market_ids=[LIVE],
-        discovery_status="current", _refresh_novig_discovery=refresh)
+        discovery_status="current", _refresh_novig_discovery=refresh,
+        _refresh_research_matches=no_research_matches, research_matches={})
     with pytest.raises(asyncio.CancelledError):
         await NativeMonitor._discover_novig_periodically(monitor)
     assert client.selections == [[LIVE, NEXT]]
