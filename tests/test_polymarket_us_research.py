@@ -88,14 +88,14 @@ def test_ambiguous_duplicate_market_and_player_prop_do_not_match():
     assert moneyline_matches(prop, [row], observed_at=NOW) == []
 
 
-def test_ten_minute_tip_offset_is_research_only_when_rule_clock_agrees():
+def test_ten_minute_tip_offset_is_unmatched_even_when_rule_clock_agrees():
     row = native_catalog()
     row["rules"] = ("Bulls versus Bucks game originally scheduled for Oct 23, 2026 "
                     "at 2:00PM ET. Overtime is included if played.")
     leads = moneyline_matches(source_market(start_time=START+timedelta(minutes=10),
                                             settlement=Settlement(period="FULL", overtime="unverified")),
                               [row], observed_at=NOW)
-    assert len(leads) == 2 and all(not lead.public()["mapping_reviewed"] for lead in leads)
+    assert leads == []  # Unreviewed start-time disagreement cannot create a lead.
     row["rules"] = row["rules"].replace("2:00PM", "8:00PM")
     assert moneyline_matches(source_market(start_time=START+timedelta(minutes=10)),
                              [row], observed_at=NOW) == []

@@ -180,7 +180,7 @@ async def test_periodic_discovery_changes_stream_scope_only_after_success(monkey
     async def one_cycle(_):
         nonlocal sleeps
         sleeps += 1
-        if sleeps > 1:
+        if sleeps > 12:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
@@ -195,11 +195,14 @@ async def test_periodic_discovery_changes_stream_scope_only_after_success(monkey
     async def refresh():
         monitor.discovered_event_ids = ["200"]
         monitor.discovery_status = "current"
+    async def rematch():
+        return []
 
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_interval_seconds": 60, "event_ids": ["100"], "prop_subtypes": {}}),
         discovered_event_ids=["100"], _subscribed_event_ids=["100"],
-        discovery_status="current", _refresh_discovery=refresh)
+        discovery_status="current", _refresh_discovery=refresh,
+        _refresh_research_matches=rematch)
     with pytest.raises(asyncio.CancelledError):
         await NativeMonitor._discover_periodically(monitor)
     assert client.calls == [(["100", "200"], {})]

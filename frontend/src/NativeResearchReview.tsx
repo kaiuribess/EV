@@ -73,10 +73,10 @@ export function NativeResearchReview({ state, mutate, notify, connected }: Props
       <div className="section-head"><div><h2>Native mapping review</h2><p>Discovery leads and saved drafts are unapproved. Exact identity, rules, fees and payout need owner review before a mapping can be used for execution.</p></div></div>
       {leads.slice(0, 12).map(({ row, offer }) => <div className="setting-row" key={`${row.market_id}:${offer.venue}:${offer.native_market_id}:${offer.native_outcome_id}`}>
         <div><strong>{eventName(row)} · {marketName(row)} · {human(offer.outcome)}</strong>
-          <p>{human(offer.venue)} {text(offer.native_market_id)} / {text(offer.native_outcome_id)} · {text(offer.normal_win_condition)}</p>
-          <small>Start {text(offer.native_start)} · payout ${text(offer.price_denomination_usd)} per contract · rule {text(offer.rules_sha256)} · {text(offer.rules_excerpt)}</small><br />
+          <p>{human(offer.venue)} {text(offer.native_market_id)} / {text(offer.native_outcome_id)}{offer.native_strike_id ? ` / strike ${text(offer.native_strike_id)}` : ''} · {text(offer.normal_win_condition)}</p>
+          <small>Start {text(offer.native_start)} · {offer.venue === 'prophetx' ? 'USD stake / American odds' : `payout $${text(offer.price_denomination_usd)} per contract`} · rule {text(offer.rules_sha256)} · {text(offer.rules_excerpt)}</small><br />
           <small>Fee evidence {text(offer.fee_evidence?.source)} · observed {text(offer.fee_evidence?.observed_at)} · charge phase {text(offer.fee_evidence?.charged, text(offer.fee_evidence?.event_phase))} · coefficient {text(offer.fee_evidence?.coefficient, text(offer.fee_evidence?.series_fee_multiplier))}</small><br />
-          <small>Buy {offer.price == null ? 'depth unavailable' : `${text(offer.price)} · ${text(offer.available_depth_contracts)} contracts`} · fee {offer.taker_fee_usd == null ? 'unverified' : money(offer.taker_fee_usd, 4)} · net {offer.net_estimated_profit_usd == null ? 'allowance unset' : money(offer.net_estimated_profit_usd, 4)}</small>
+          <small>Buy {offer.price == null ? 'depth unavailable' : offer.venue === 'prophetx' ? `${text(offer.american_price)} American · $${text(offer.available_stake_usd)} available stake` : `${text(offer.price)} · ${text(offer.available_depth_contracts)} contracts`} · fee {offer.taker_fee_usd == null ? 'unverified' : money(offer.taker_fee_usd, 4)} · net {offer.net_estimated_profit_usd == null ? 'allowance unset' : money(offer.net_estimated_profit_usd, 4)}</small>
         </div>
         <button className="button" disabled={!connected || busy || state.auto_trade || !state.kill_switch} onClick={() => void saveDraft(row, offer)}>Save unapproved draft</button>
       </div>)}

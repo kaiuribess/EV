@@ -322,6 +322,12 @@ class NativeMonitor(Plugin):
         self.research_events: dict[str, dict] = {}
         self.research_fee_metadata: dict[str, dict] = {}
         self._last_research_source_ids = frozenset()
+        self._market_data_updates = 0
+        self._last_market_data_at = None
+        self._last_valid_book_at = None
+        self._book_at: dict[str, object] = {}
+        self._reconnect_count = 0
+        self._seen_initial_snapshot = False
 
     def credential_names(self, config):
         default_profile = getattr(self.config_model(), "credential_profile", "legacy")
@@ -350,6 +356,12 @@ class NativeMonitor(Plugin):
         self.research_events = {}
         self.research_fee_metadata = {}
         self._last_research_source_ids = frozenset()
+        self._market_data_updates = 0
+        self._last_market_data_at = None
+        self._last_valid_book_at = None
+        self._book_at = {}
+        self._reconnect_count = 0
+        self._seen_initial_snapshot = False
         if context.config.get("legacy_market_ids"):
             self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
             return
@@ -511,8 +523,8 @@ class NativeMonitor(Plugin):
     async def _refresh_research_matches(self):
         """Use already-fetched catalogs; only exact candidate metadata adds reads."""
         from ..core.native_research import (NOVIG_PROP_TYPES, kalshi_moneyline_matches, kalshi_mlb_matches,
-            novig_moneyline_matches, novig_prop_matches)
-        if self.manifest.name not in {"kalshi", "novig", "polymarket_us"} or self.research_catalog_at is None:
+            novig_moneyline_matches, novig_prop_matches, prophetx_matches)
+        if self.manifest.name not in {"kalshi", "novig", "polymarket_us", "prophetx"} or self.research_catalog_at is None:
             return []
         markets = [self.engine.markets[market_id] for market_id in self.engine.reference_estimates
                    if market_id in self.engine.markets]
@@ -557,7 +569,10 @@ class NativeMonitor(Plugin):
                     continue
         result, priority = {}, []
         for market in markets:
-            if self.manifest.name == "polymarket_us":
+            if self.manifest.name == "prophetx":
+                matches = prophetx_matches(market, self.client.public_market_data.catalog,
+                    self.research_events, observed_at=self.research_catalog_at)
+            elif self.manifest.name == "polymarket_us":
                 from ..integrations.polymarket_us_research import moneyline_matches
                 matches = moneyline_matches(market, self.research_catalog_rows,
                                             observed_at=self.research_catalog_at)
@@ -778,10 +793,16 @@ class NativeMonitor(Plugin):
     async def _refresh_discovery(self):
         from ..integrations.prophetx_discovery import open_event_ids
         try:
+            tournaments = self.context.config.get("discovery_tournament_ids", [])
             payloads = [await self.client.discover_events(tournament_id=tournament_id)
-                        for tournament_id in self.context.config.get("discovery_tournament_ids", [])]
+                        for tournament_id in tournaments]
             selected = open_event_ids(payloads, now=utcnow(),
                 max_events=self.context.config.get("max_discovered_events", 20))
+            events = {}
+            for tournament_id, payload in zip(tournaments, payloads):
+                for row in payload.get("data", {}).get("sport_events", []):
+                    if isinstance(row, dict) and str(row.get("event_id")) in selected:
+                        events[str(row["event_id"])] = {**row, "tournament_id": tournament_id}
             market_payloads = [await self.client.discover_markets(selected[start:start+10])
                                for start in range(0, len(selected), 10)]
             props = {}
@@ -807,7 +828,12 @@ class NativeMonitor(Plugin):
                 if not remaining:
                     break
             if hasattr(self.client, "public_market_data"):
-                self.client.public_market_data.replace_catalog(market_payloads, selected, observed_at=utcnow())
+                observed_at = utcnow()
+                self.client.public_market_data.replace_catalog(market_payloads, selected, observed_at=observed_at)
+                self.research_catalog_at = observed_at
+                self.research_events = events
+                if hasattr(self, "engine"):
+                    await NativeMonitor._refresh_research_matches(self)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -830,9 +856,18 @@ class NativeMonitor(Plugin):
 
     async def _discover_periodically(self):
         try:
+            elapsed = 0
+            interval = self.context.config.get("discovery_interval_seconds", 300)
             while True:
-                await asyncio.sleep(self.context.config.get("discovery_interval_seconds", 300))
+                step = min(5, interval - elapsed)
+                await asyncio.sleep(step)
+                elapsed += step
+                if elapsed < interval:
+                    if NativeMonitor._research_match_refresh_due(self, elapsed):
+                        await self._refresh_research_matches()
+                    continue
                 await self._refresh_discovery()
+                elapsed = 0
                 if self.discovery_status != "current":
                     continue
                 selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
@@ -876,8 +911,16 @@ class NativeMonitor(Plugin):
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
                 if frame.get("type") == "transport_invalidated":
+                    self._reconnect_count += 1
+                    self._book_at.clear()
                     self.engine.metrics.counters[f"native_invalidations:{self.manifest.name}"] += 1
                     continue
+                if self.manifest.name == "prophetx" and frame.get("type") == "snapshot_required":
+                    if getattr(self, "_seen_initial_snapshot", False):
+                        self._reconnect_count += 1
+                    self._seen_initial_snapshot = True
+                if hasattr(self, "_book_at"):
+                    NativeMonitor._observe_market_frame(self, frame)
                 self.frames += 1
                 self.engine.metrics.counters[f"native_messages:{self.manifest.name}"] += 1
         except asyncio.CancelledError:
@@ -905,7 +948,43 @@ class NativeMonitor(Plugin):
             await self.management_client.disconnect()
             self.management_client = None
 
-    async def health_check(self):
+    def _observe_market_frame(self, frame: dict):
+        """Count real book payloads, never protocol heartbeats or private data."""
+        subjects = []
+        if self.manifest.name == "kalshi" and frame.get("type") in {"orderbook_snapshot", "orderbook_delta"}:
+            subjects = [frame.get("msg", {}).get("market_ticker")]
+        elif self.manifest.name == "novig":
+            batch = frame.get("snapshot", frame.get("delta", {}))
+            if isinstance(batch, dict):
+                subjects = [key for key, channels in batch.items()
+                    if isinstance(channels, dict) and "book" in channels]
+        elif self.manifest.name == "prophetx" and frame.get("event") == "v2.market_selections":
+            data = frame.get("data", {})
+            subjects = [f"{data.get('sport_event_id')}:{data.get('market_id')}"]
+        elif (self.manifest.name == "polymarket_us" and frame.get("type") == "polymarket_us_monitor"
+                and frame.get("channel") == "markets" and frame.get("kind") == "data"):
+            payload = frame.get("payload", {})
+            data = payload.get("marketData", payload.get("market_data", {}))
+            subjects = [data.get("marketSlug", data.get("market_slug"))] if isinstance(data, dict) else []
+        if subjects:
+            observed = utcnow()
+            self._market_data_updates += 1
+            self._last_market_data_at = observed
+            for subject in subjects:
+                if isinstance(subject, str) and subject:
+                    self._book_at[subject] = observed
+            if any(subject in self.health_snapshot().get("valid_book_ids", ()) for subject in subjects):
+                self._last_valid_book_at = observed
+
+    def research_book_current(self, market_id: str, *, now=None) -> bool:
+        """A market-specific book message must still be recent and connected."""
+        stamp = self._book_at.get(market_id)
+        if stamp is None or self.client is None or self.client.health_check().get("streaming") is not True:
+            return False
+        age = ((now or utcnow())-stamp).total_seconds()
+        return 0 <= age <= 30
+
+    def health_snapshot(self):
         if self.config_error:
             return {"status": "blocked", "state": "configuration_required", "message": self.config_error,
                     "authenticated": False, "streaming": False}
@@ -915,9 +994,58 @@ class NativeMonitor(Plugin):
         blocked = state["state"] in {"credentials_missing", "unauthorized", "access_denied", "geolocation_required", "subscription_rejected",
                                      "session_limit", "auth_outcome_unknown", "auth_refresh_failed"}
         status = "blocked" if blocked else "error" if self.task and self.task.done() else state["state"]
+        now = utcnow()
+        connected = state.get("streaming") is True
+        ages = []
+        if self.manifest.name == "prophetx":
+            view = self.client.public_market_data.snapshot(now=now, connected=connected, limit=10000)
+            current = {f"{row['event_id']}:{row['market_id']}" for row in view["levels"]
+                if row["stream_current"] and row["executable_stake_usd"] != "0"}
+            ages = [row["local_receipt_age_seconds"] for row in view["levels"] if row["stream_current"]]
+        elif self.manifest.name == "polymarket_us" and hasattr(self.client, "rest_books"):
+            from ..integrations.polymarket_us_research import current_book
+            current = set()
+            for row in self.research_catalog_rows:
+                if not isinstance(row, dict) or not isinstance(row.get("slug"), str):
+                    continue
+                book = current_book(row, self.client, now=now,
+                    stream_connected=state.get("market_streaming") is True)
+                if book.get("current") and (book["bids"] or book["offers"]):
+                    current.add(row["slug"])
+                    ages.append(book["source_age_seconds"])
+        elif self.manifest.name in {"kalshi", "novig"} and hasattr(self.client, "book"):
+            current = set()
+            book = self.client.book
+            for market_id, stamp in getattr(self, "_book_at", {}).items():
+                age = (now-stamp).total_seconds()
+                if not connected or not 0 <= age <= 30 or market_id not in book.books:
+                    continue
+                if self.manifest.name == "kalshi":
+                    valid = market_id not in book.invalid and any(book.books[market_id].values())
+                else:
+                    valid = (book.statuses.get(market_id) == "OPEN"
+                        and f"{market_id}:book" not in book.sequences.invalid
+                        and bool(book.books[market_id]))
+                if valid:
+                    current.add(market_id)
+                    ages.append(age)
+        else:
+            current = set()
+        subscription_count = (len(self._subscribed_event_ids) + sum(map(len, self._subscribed_prop_subtypes.values()))
+            if self.manifest.name == "prophetx" else len(getattr(self, "_subscribed_market_ids", []))
+            if self.manifest.name in {"kalshi", "novig", "polymarket_us"} else 0)
         return {**state, "status": status,
                 "message": state.get("reason") or "Native monitor; normalized venue mapping and live preflight required for orders",
                 "frames": self.frames,
+                 "market_data_updates": getattr(self, "_market_data_updates", 0),
+                 "last_market_data_at": self._last_market_data_at.isoformat() if getattr(self, "_last_market_data_at", None) else None,
+                 "last_valid_full_book_at": self._last_valid_book_at.isoformat() if getattr(self, "_last_valid_book_at", None) else None,
+                 "valid_book_count": len(current), "valid_book_ids": sorted(current),
+                 "subscription_count": subscription_count,
+                 "reconnect_count": getattr(self, "_reconnect_count", 0),
+                 "oldest_valid_book_age_seconds": max(ages) if ages else None,
+                 "data_stale": not bool(current),
+                 "last_reported_error": state.get("reason") or getattr(self, "discovery_error_type", "") or None,
                 "discovery_status": self.discovery_status,
                 **({"discovery_error_type": self.discovery_error_type}
                    if self.manifest.name in {"prophetx", "polymarket_us"} else {}),
@@ -931,6 +1059,9 @@ class NativeMonitor(Plugin):
                     "research_matched_market_ids": sorted({item.native_market_id
                         for matches in self.research_matches.values() for item in matches})}
                    if self.manifest.name == "kalshi" else {})}
+
+    async def health_check(self):
+        return NativeMonitor.health_snapshot(self)
 
 
 def register_external(registry, engine):

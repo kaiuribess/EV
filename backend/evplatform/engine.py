@@ -199,6 +199,7 @@ class Engine:
             asyncio.create_task(self._audit(), name="audit-enqueue"),
             asyncio.create_task(self._dashboard_events(), name="dashboard-observer"),
             asyncio.create_task(self._maintenance(), name="freshness-fill-maintenance"),
+            asyncio.create_task(self._health_loop(), name="plugin-health-refresh"),
             asyncio.create_task(self._storage_maintenance(), name="storage-retention"),
             asyncio.create_task(self._settlement_loop(), name="settlement-accounting"),
             asyncio.create_task(self._signal_loop(), name="signal-ledger"),
@@ -570,6 +571,8 @@ class Engine:
                            "native_research_estimates": all_estimates,
                            "native_research_stage": stage,
                            "native_discovery_reason": discovery_reason,
+                           "native_identity_rejections": (self.native.research_identity_rejections(market)
+                               if hasattr(self.native, "research_identity_rejections") else []),
                            "native_match_count": len({(item["venue"], item["native_market_id"])
                                                       for item in comparisons}),
                            "status": ("PROVISIONAL POSITIVE EV" if any(
@@ -785,10 +788,15 @@ class Engine:
             positive = {k for k, c in self.opportunities.items()
                         if c.execution_eligible and c.ev_per_contract >= self.settings.pricing.min_ev}
             self.metrics.update_opportunities(positive, utcnow())
+
+    async def _health_loop(self):
+        """Health reporting must not wait behind pricing or order maintenance."""
+        while True:
+            await asyncio.sleep(1)
             for name, record in self.registry.records.items():
                 if record.enabled:
                     try:
-                        record.health = await record.plugin.health_check()
+                        record.health = await asyncio.wait_for(record.plugin.health_check(), timeout=2)
                     except Exception as exc:
                         record.health = {"status": "error", "message": type(exc).__name__}
 

@@ -88,7 +88,10 @@ class ProphetXMarketData:
                                     except (ValueError, KeyError, TypeError, ArithmeticError):
                                         pass  # malformed REST level is not a live stream book
                     catalog[key] = {"name": str(market.get("name") or "")[:120],
+                                    "type": market.get("type"), "period": market.get("period"),
                                     "status": market.get("status"), "sub_type": market.get("sub_type"),
+                                    "player_id": market.get("player_id"),
+                                    "statistic": market.get("statistic"), "line": market.get("line"),
                                     "strikes": identities}
                     if rest_levels:
                         rest_samples[key] = rest_levels

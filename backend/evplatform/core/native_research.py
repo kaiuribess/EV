@@ -75,6 +75,8 @@ class ResearchNativeMatch:
     normal_win_condition: str
     price_denomination_usd: str
     catalog_observed_at: datetime
+    native_strike_id: str | None = None
+    identity_limitations: tuple[str, ...] = ()
 
     def public(self) -> dict:
         return {**self.__dict__, "source_start": self.source_start.isoformat(),
@@ -402,6 +404,155 @@ def novig_prop_matches(market: Market, rows: list[dict], events: dict[str, dict]
         normal_win_condition=f"{market.player} {outcome} {market.line} {market.statistic}; participation and overtime scope require review",
         price_denomination_usd="0.01", catalog_observed_at=observed_at)
         for outcome in market.outcomes]
+
+
+def prophetx_matches(market: Market, catalog: dict[tuple[str, str], dict],
+                     events: dict[str, dict], *, observed_at: datetime) -> list[ResearchNativeMatch]:
+    """Only exact pregame event/outcome identities; leads grant no order authority.
+
+    Player props need explicit native player/stat/line metadata. A free-text
+    title is not enough to distinguish a different threshold or period.
+    """
+    if (market.status != "scheduled" or market.start_time <= observed_at
+            or len(market.outcomes) != 2 or market.settlement.period.lower() not in {"full", "full_game"}):
+        return []
+    candidates = []
+    for (event_id, market_id), native in catalog.items():
+        event = events.get(event_id)
+        if not isinstance(event, dict) or event.get("status") != "not_started":
+            continue
+        native_start = _aware(event.get("scheduled"))
+        if native_start is None or abs((native_start-market.start_time).total_seconds()) > 120:
+            continue
+        label = event.get("name")
+        if not isinstance(label, str) or label != f"{market.participants[1]} at {market.participants[0]}":
+            continue
+        # Tournament 132 is the observed NBA catalog. Other leagues require
+        # an explicit league label rather than a guessed tournament number.
+        if not (event.get("league") == market.league or
+                market.league == "NBA" and event.get("tournament_id") == 132):
+            continue
+        if native.get("status") != "active" or native.get("period") not in (None, "full", "full_game", "FULL"):
+            continue
+        if market.market_type == "moneyline":
+            if native.get("sub_type") != "moneyline" or native.get("type") not in (None, "moneyline"):
+                continue
+            labels = {outcome: outcome for outcome in market.outcomes}
+        elif market.market_type == "player_prop":
+            if (native.get("player_id") != market.player_id or native.get("statistic") != market.statistic
+                    or native.get("period") not in {"full", "full_game", "FULL"}):
+                continue
+            try:
+                if D(native.get("line")) != market.line:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            labels = {outcome: outcome.title() for outcome in market.outcomes}
+        else:
+            continue
+        strikes = native.get("strikes")
+        if not isinstance(strikes, dict) or len(strikes) != 2:
+            continue
+        mapped = {}
+        for strike_id, identity in strikes.items():
+            if not isinstance(identity, dict) or identity.get("status") in {
+                    "suspended", "inactive", "closed", "withdrawn", "removed"}:
+                break
+            outcome = next((key for key, name in labels.items() if identity.get("name") == name), None)
+            if (outcome is None or outcome in mapped or identity.get("outcome_id") is None
+                    or not isinstance(strike_id, str) or not strike_id):
+                break
+            mapped[outcome] = (strike_id, str(identity["outcome_id"]))
+        if set(mapped) == set(market.outcomes) and len({v[1] for v in mapped.values()}) == 2:
+            candidates.append((event_id, market_id, native_start, native, mapped))
+    # Multiple possible native questions are an ambiguity, not two leads.
+    if len(candidates) != 1:
+        return []
+    event_id, market_id, native_start, native, mapped = candidates[0]
+    rule = f"{event_id}|{market_id}|{native.get('type')}|{native.get('sub_type')}|{native.get('period')}|{sorted(mapped.items())}"
+    limitations = ("Native period is not explicit in the catalog",) if native.get("period") is None else ()
+    return [ResearchNativeMatch(
+        venue="prophetx", source_market_id=market.id, source_event_id=market.event_id,
+        source_market_fingerprint=market.identity(), native_market_id=market_id,
+        native_event_id=event_id, native_outcome_id=mapped[outcome][1],
+        native_strike_id=mapped[outcome][0], side="take", outcome=outcome,
+        opposing_outcome_id=mapped[next(x for x in market.outcomes if x != outcome)][1],
+        exchange_index=None, source_start=market.start_time, native_start=native_start,
+        rules_sha256=hashlib.sha256(rule.encode()).hexdigest(),
+        rules_excerpt=f"ProphetX {native.get('sub_type')} / {native.get('name')}",
+        normal_win_condition=f"{outcome} wins the full-game {market.league} market",
+        price_denomination_usd="stake_usd", catalog_observed_at=observed_at,
+        identity_limitations=limitations) for outcome in market.outcomes]
+
+
+def compare_prophetx_stake_lot(match: ResearchNativeMatch, probability: Decimal,
+                              levels: list[tuple[Decimal, Decimal]], *,
+                              uncertainty_margin_probability: Decimal | None,
+                              fee_rate_on_winnings: Decimal | None,
+                              now: datetime | None = None) -> dict:
+    """Compare one USD of executable stake at American-odds depth.
+
+    The published 2% fee is on *net winnings*, hence expected fees are paid
+    only in the winning branch. Exact account rounding remains unverified.
+    """
+    now = now or utcnow()
+    result = {**match.public(), "calculated_at": now.isoformat(),
+              "quality": "provisional_native_research", "positive_after_costs": False,
+              "reasons": ["ProphetX mapping and fee rounding are not approved for execution",
+                          "Account, quarter-Kelly, risk and owner approval are not established"]}
+    if not levels:
+        return {**result, "rejection": "No current executable stake on this strike"}
+    if not D(0) <= probability <= D(1):
+        return {**result, "rejection": "Invalid fair probability"}
+    if fee_rate_on_winnings is None or not D(0) <= fee_rate_on_winnings <= D(1):
+        return {**result, "rejection": "Applicable ProphetX winnings fee is unknown"}
+    remaining, payout, winnings, best, worst, total_depth = D(1), D(0), D(0), None, None, D(0)
+    for odds, raw_depth in levels:
+        odds, depth = D(odds), D(raw_depth)
+        if (not odds.is_finite() or odds != odds.to_integral_value() or abs(odds) < 100
+                or not depth.is_finite() or depth < 0):
+            return {**result, "rejection": "Invalid American price or executable USD stake"}
+        if best is None:
+            best = depth
+        total_depth += depth
+        take = min(remaining, depth)
+        if take <= 0:
+            continue
+        profit_multiple = odds / 100 if odds > 0 else D(100) / -odds
+        payout += take * (D(1) + profit_multiple)
+        winnings += take * profit_multiple
+        remaining -= take
+        worst = odds
+        if not remaining:
+            break
+    if remaining:
+        return {**result, "available_stake_usd": str(total_depth),
+                "rejection": "Insufficient executable USD stake for the research lot"}
+    expected_fee = probability * winnings * fee_rate_on_winnings
+    gross = probability * payout - D(1)
+    after_fee = gross - expected_fee
+    allowance = None
+    adjusted = None
+    if uncertainty_margin_probability is not None:
+        margin = D(uncertainty_margin_probability)
+        if not D(0) <= margin <= probability:
+            return {**result, "rejection": "Uncertainty allowance exceeds fair win probability"}
+        allowance = margin * (payout - winnings * fee_rate_on_winnings)
+        adjusted = after_fee - allowance
+    else:
+        result["reasons"].append("Source-uncertainty allowance is unconfigured")
+    result.update({"american_price": str(worst), "available_stake_usd": str(total_depth),
+                   "available_at_best_stake_usd": str(best), "comparison_stake_usd": "1",
+                   "cash_cost_usd": "1", "normal_payout_usd": str(payout),
+                   "price": str(D(1)/payout), "gross_estimated_profit_usd": str(gross),
+                   "taker_fee_usd": str(expected_fee),
+                   "fee_adjusted_estimated_profit_usd": str(after_fee),
+                   "uncertainty_allowance_usd": str(allowance) if allowance is not None else None,
+                   "net_estimated_profit_usd": str(adjusted) if adjusted is not None else None,
+                   "net_estimated_roi": str(adjusted / (D(1)+expected_fee)) if adjusted is not None else None,
+                   "positive_after_costs": adjusted is not None and adjusted > 0,
+                   "execution_eligible": False})
+    return result
 
 
 def compare_minimum_lot(match: ResearchNativeMatch, probability: Decimal, levels: list[tuple[Decimal, Decimal]],

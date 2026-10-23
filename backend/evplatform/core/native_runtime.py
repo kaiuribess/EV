@@ -182,7 +182,63 @@ class NativeRuntime:
                 if any(row.get("event_ticker") == expected for row in getattr(kalshi, "research_catalog_rows", [])):
                     return "discovered_unmatched", "The exact Kalshi event is in the catalog, but its outcome, threshold, timing or rule identity did not pass exact research matching"
                 return "not_discovered", "The expected Kalshi event is absent from the current monitored catalog; no native depth was tested"
+        reasons = self.research_identity_rejections(market)
+        if reasons:
+            return "discovered_unmatched", reasons[0]["reason"]
         return "not_discovered", "No exact native market was found in the currently monitored catalogs; public existence and executable depth are separate checks"
+
+    def research_identity_rejections(self, market):
+        """Expose observed schedule/rule conflicts without broadening matches."""
+        if market is None or market.market_type != "moneyline":
+            return []
+        from ..integrations.polymarket_us_research import _clock, _rule_start
+        from .native_research import _aware
+        reasons = []
+        for venue in ("novig", "prophetx", "polymarket_us"):
+            record = self.engine.registry.records.get(venue)
+            monitor = record.plugin if record and record.enabled else None
+            if monitor is None:
+                continue
+            if venue == "prophetx":
+                for event in monitor.research_events.values():
+                    if event.get("name") != f"{market.participants[1]} at {market.participants[0]}":
+                        continue
+                    native_start = _clock(event.get("scheduled"))
+                    if native_start is not None:
+                        delta = abs((native_start-market.start_time).total_seconds())
+                        if delta > 120:
+                            reasons.append({"venue": venue, "reason":
+                                f"ProphetX catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
+            elif venue == "polymarket_us":
+                for row in monitor.research_catalog_rows:
+                    if (row.get("league") != market.league or
+                            {team.get("name") for team in row.get("teams", [])} != set(market.participants)):
+                        continue
+                    native_start = _clock(row.get("market_start"))
+                    rule_start = _rule_start(row.get("rules"))
+                    if native_start is not None and rule_start is not None and native_start != rule_start:
+                        reasons.append({"venue": venue, "reason":
+                            "Polymarket US written-rule time conflicts with its catalog start; market remains unmatched"})
+                    elif native_start is not None:
+                        delta = abs((native_start-market.start_time).total_seconds())
+                        if delta > 120:
+                            reasons.append({"venue": venue, "reason":
+                                f"Polymarket US catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
+            else:
+                for event in monitor.research_events.values():
+                    label = event.get("description", "")
+                    if not isinstance(label, str) or " @ " not in label:
+                        continue
+                    away, home = label.split(" @ ", 1)
+                    if (home, away) != market.participants:
+                        continue
+                    native_start = _aware(event.get("startsTs"))
+                    if native_start is not None:
+                        delta = abs((native_start-market.start_time).total_seconds())
+                        if delta > 120:
+                            reasons.append({"venue": venue, "reason":
+                                f"Novig catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
+        return reasons
 
     def research_comparisons(self, market, fair):
         """Compare research fair values with existing read-only native streams.
@@ -191,7 +247,8 @@ class NativeRuntime:
         NativeBook, execution mapping, candidate, intent, or account authority.
         """
         from decimal import Decimal, ROUND_FLOOR
-        from .native_research import compare_minimum_lot, kalshi_research_taker_fee, novig_taker_fee
+        from .native_research import (compare_minimum_lot, compare_prophetx_stake_lot,
+            kalshi_research_taker_fee, novig_taker_fee)
         from .pricing import NoSignal, market_config, validate_fair_references
 
         now = utcnow()
@@ -203,7 +260,7 @@ class NativeRuntime:
         market_margins = scoped.trusted_research_market_margins
         margin = market_margins.get(market.id, scoped.trusted_research_margin_probability)
         output = []
-        for venue in ("kalshi", "novig", "polymarket_us"):
+        for venue in ("kalshi", "novig", "prophetx", "polymarket_us"):
             record = self.engine.registry.records.get(venue)
             monitor = record.plugin if record else None
             client = getattr(monitor, "client", None)
@@ -225,7 +282,9 @@ class NativeRuntime:
                 if match.outcome not in fair.probabilities:
                     continue
                 if venue == "kalshi":
-                    levels = client.book.asks(match.native_market_id, match.side)
+                    current = getattr(monitor, "research_book_current", None)
+                    levels = (client.book.asks(match.native_market_id, match.side)
+                        if current is None or current(match.native_market_id, now=now) else [])
                     metadata = monitor.research_fee_metadata.get(match.native_event_id)
                     series_response = metadata.get("series") if metadata else None
                     event_response = metadata.get("event") if metadata else None
@@ -246,6 +305,21 @@ class NativeRuntime:
                             metadata["event_changes"], price, qty, now=now)
                     else:
                         fee_for = lambda price, qty: (_ for _ in ()).throw(ValueError("Kalshi fee metadata missing"))
+                elif venue == "prophetx":
+                    view = client.public_market_data.snapshot(now=now, connected=stream_ok, limit=10000)
+                    rows = [row for row in view["levels"] if row["stream_current"]
+                        and row["event_id"] == match.native_event_id
+                        and row["market_id"] == match.native_market_id
+                        and row["strike_id"] == match.native_strike_id
+                        and row["outcome_id"] == match.native_outcome_id
+                        and Decimal(row["executable_stake_usd"]) > 0]
+                    levels = sorted(((Decimal(row["american_price"]),
+                        Decimal(row["executable_stake_usd"])) for row in rows), reverse=True)
+                    fee_evidence = {"source": "ProphetX published 2% fee on net winnings",
+                        "url": "https://www.prophetx.co/lobby/",
+                        "rate_on_winnings": "0.02", "rounding_verified": False,
+                        "book_source": "scoped Talaria v2.market_selections",
+                        "book_receipt_at": max((row["local_receipt_at"] for row in rows), default=None)}
                 elif venue == "polymarket_us":
                     from ..integrations.polymarket_us_research import current_book, direction_levels, taker_fee
                     native = next((row for row in monitor.research_catalog_rows
@@ -263,7 +337,9 @@ class NativeRuntime:
                         "fee_rounding": "nearest cent, half even; one-fill research estimate"}
                     fee_for = lambda price, qty, native=native: taker_fee(native, price, qty)
                 else:
-                    levels = client.book.asks(match.native_market_id, match.opposing_outcome_id)
+                    current = getattr(monitor, "research_book_current", None)
+                    levels = (client.book.asks(match.native_market_id, match.opposing_outcome_id)
+                        if current is None or current(match.native_market_id, now=now) else [])
                     native = next((row for row in monitor.research_catalog_rows
                                    if row.get("marketId") == match.native_market_id), None)
                     event = monitor.research_events.get(match.native_event_id)
@@ -277,8 +353,15 @@ class NativeRuntime:
                         "event_phase": event.get("status") if isinstance(event, dict) else None}
                     fee_for = lambda price, qty, native=native, event=event: novig_taker_fee(
                         native, event, price, qty)
-                result = compare_minimum_lot(match, fair.probabilities[match.outcome], levels,
-                    fee_for=fee_for, uncertainty_margin_probability=margin, now=now)
+                if venue == "prophetx":
+                    result = compare_prophetx_stake_lot(match, fair.probabilities[match.outcome], levels,
+                        fee_rate_on_winnings=Decimal("0.02"),
+                        uncertainty_margin_probability=margin, now=now)
+                    result["native_order_direction"] = "TAKE_STRIKE"
+                    result["fee_estimate_only"] = True
+                else:
+                    result = compare_minimum_lot(match, fair.probabilities[match.outcome], levels,
+                        fee_for=fee_for, uncertainty_margin_probability=margin, now=now)
                 if venue == "polymarket_us":
                     result["native_order_direction"] = "BUY_LONG" if match.side == "long" else "SELL_SHORT"
                     result["instrument_outcome"] = next((s["description"] for s in native["sides"]
@@ -317,7 +400,17 @@ class NativeRuntime:
                 result["spendable_cash_usd"] = str(cash) if cash is not None else None
                 result["quarter_kelly_budget_usd"] = None
                 result["quarter_kelly_quantity"] = None
-                if (cash is not None and Decimal(cash) > 0 and result.get("positive_after_costs")
+                if (venue == "prophetx" and cash is not None and Decimal(cash) > 0
+                        and result.get("positive_after_costs") and margin is not None):
+                    p = Decimal(fair.probabilities[match.outcome]) - Decimal(margin)
+                    win_profit = (Decimal(result["normal_payout_usd"])-Decimal(1))*Decimal("0.98")
+                    fraction = max(Decimal(0), (p*win_profit-(Decimal(1)-p))/win_profit) if win_profit > 0 else Decimal(0)
+                    budget = min(Decimal(1), Decimal(cash)*Decimal("0.25")*fraction,
+                        Decimal(result["available_stake_usd"]))
+                    result["quarter_kelly_budget_usd"] = str(budget)
+                    result["quarter_kelly_stake_usd"] = str(budget)
+                    result["reasons"].append("Informational USD-stake sizing; no ProphetX execution mapping or approval")
+                elif (venue != "prophetx" and cash is not None and Decimal(cash) > 0 and result.get("positive_after_costs")
                         and result.get("normal_payout_usd") and result.get("price") is not None):
                     # Informational only: the production calculator rechecks
                     # split-fill fee bounds, minimums, cash, exposure and risk.

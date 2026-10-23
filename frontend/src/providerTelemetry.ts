@@ -34,6 +34,19 @@ function messageAge(value: unknown, now: number): string {
 // source observation time, mapping, settlement rules, or executability.
 export function providerFacts(health: Record<string, unknown>, now = Date.now()): ProviderFact[] {
   const facts: ProviderFact[] = []
+  if ('valid_book_count' in health) {
+    facts.push({ label: 'Connection', value: String(health.state ?? health.status ?? 'Unknown') })
+    facts.push({ label: 'Last market book', value: messageAge(health.last_market_data_at, now) })
+    facts.push({ label: 'Last valid full book', value: messageAge(health.last_valid_full_book_at, now) })
+    facts.push({ label: 'Valid books', value: count(health.valid_book_count) })
+    facts.push({ label: 'Subscriptions', value: count(health.subscription_count) })
+    facts.push({ label: 'Reconnects', value: count(health.reconnect_count) })
+    facts.push({ label: 'Genuine book updates', value: count(health.market_data_updates) })
+    facts.push({ label: 'Oldest valid book age', value: typeof health.oldest_valid_book_age_seconds === 'number'
+      ? `${health.oldest_valid_book_age_seconds.toFixed(1)} s` : 'Unavailable' })
+    facts.push({ label: 'Data stale', value: health.data_stale === true ? 'Yes' : health.data_stale === false ? 'No' : 'Unknown' })
+    facts.push({ label: 'Last error', value: typeof health.last_reported_error === 'string' ? health.last_reported_error : 'None reported' })
+  }
   if ('last_received_at' in health || 'last_message_time' in health) {
     facts.push({ label: 'Last message', value: messageAge(health.last_received_at ?? health.last_message_time, now) })
   }

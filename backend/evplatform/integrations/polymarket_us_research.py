@@ -104,12 +104,10 @@ def moneyline_matches(market: Market, rows: list[dict], *, observed_at: datetime
             continue
         event_start, native_start = _clock(row.get("event_start")), _clock(row.get("market_start"))
         if (event_start is None or native_start is None or event_start != native_start
-                or abs((native_start-market.start_time.astimezone(timezone.utc)).total_seconds()) > 900):
+                or abs((native_start-market.start_time.astimezone(timezone.utc)).total_seconds()) > 120):
             continue
-        # A 10-minute listed start versus actual tip is observed on the live
-        # NBA feeds. This tolerance creates only an UNAPPROVED research lead.
-        # When the rule text names an exact time, it must corroborate the
-        # native catalog clock; the Chicago listing currently does not.
+        # A different catalog or written-rule time remains unresolved, even
+        # for research; matching team names does not settle the question.
         rule_start = _rule_start(row.get("rules"))
         if rule_start is not None and rule_start != native_start:
             continue
