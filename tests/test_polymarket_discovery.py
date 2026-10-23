@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from evplatform.integrations.polymarket_us_discovery import balanced_open_moneylines, current_open_moneylines
 from evplatform.plugins.external import NativeMonitor
 from evplatform.venues.polymarket_us import PolymarketUSClient, PolymarketUSMonitorConfig
+from evplatform.venues.common import VenueError
 
 
 NOW = datetime(2026, 10, 22, 4, tzinfo=timezone.utc)
@@ -154,6 +155,34 @@ async def test_complete_league_catalog_avoids_redundant_slug_metadata_reads(monk
     assert monitor.discovery_status in {"current", "truncated"}
     assert calls == [("book", "aec-nba-next")]
     assert len(monitor.research_catalog_rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_public_book_rate_limit_keeps_identity_and_allows_stream_scope(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+
+    class Client:
+        async def discover_league_events(self, league):
+            row = event(f"{league}-next", NOW + timedelta(hours=2))
+            market = row["markets"][0]
+            market.update(id=7, description="Full game includes overtime", question="Team A versus Team B",
+                          feeCoefficient="0.0695", orderPriceMinTickSize="0.01", marketSides=[])
+            return [page(league, [row])]
+
+        async def fetch_snapshot(self, slug):
+            raise VenueError("Polymarket US public read rate limited")
+
+    async def no_matches():
+        return []
+
+    monitor = SimpleNamespace(client=Client(), context=SimpleNamespace(config={
+        "discovery_leagues": ["nba"], "max_discovered_markets": 1}),
+        discovery_status="disabled", discovered_market_ids=[],
+        _refresh_research_matches=no_matches)
+    await NativeMonitor._refresh_polymarket_discovery(monitor)
+    assert monitor.discovered_market_ids == ["aec-nba-next"]
+    assert monitor.discovery_status in {"current", "truncated"}
+    assert monitor.discovery_error_type == "rest_snapshot_VenueError"
 
 
 @pytest.mark.asyncio

@@ -700,14 +700,27 @@ class NativeMonitor(Plugin):
                             or current.get("gameStartTime") != listed.get("gameStartTime")):
                         raise ValueError("Polymarket US SDK market identity changed during discovery")
                 catalog.append(catalog_record(league, event, current, observed_at=utcnow()))
-                await self.client.fetch_snapshot(slug)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             self.discovery_status = "read_failed"
+            self.discovery_error_type = type(exc).__name__
             return
         self.research_catalog_rows = catalog
         self.research_catalog_at = utcnow()
+        self.discovery_error_type = ""
+        # The authenticated full stream seeds all selected books. A bounded
+        # public REST sample remains useful without credentials or as recovery,
+        # but exhausting its separate quota must not discard the catalog or
+        # prevent the full WebSocket subscription.
+        for slug in selected[:2]:
+            try:
+                await self.client.fetch_snapshot(slug)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.discovery_error_type = f"rest_snapshot_{type(exc).__name__}"
+                break
         priority = await self._refresh_research_matches()
         self.discovered_market_ids = list(dict.fromkeys([*priority, *selected]))[:config.get("max_discovered_markets", 8)]
         self.discovery_status = "truncated" if truncated else "current" if selected else "empty"
@@ -907,7 +920,7 @@ class NativeMonitor(Plugin):
                 "frames": self.frames,
                 "discovery_status": self.discovery_status,
                 **({"discovery_error_type": self.discovery_error_type}
-                   if self.manifest.name == "prophetx" else {}),
+                   if self.manifest.name in {"prophetx", "polymarket_us"} else {}),
                 "discovered_event_count": len(self.discovered_event_ids),
                 "discovered_market_count": (len(self.client.public_market_data.catalog)
                     if self.manifest.name == "prophetx" else len(self.discovered_market_ids)),
