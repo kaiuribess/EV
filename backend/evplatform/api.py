@@ -419,6 +419,16 @@ def create_app(settings=None):
         engine.registry.configure("positive_ev", pricing.model_dump(mode="json"))
         await engine.storage.save_config("pricing", pricing.model_dump(mode="json"))
         await engine.storage.save_config("risk", risk.model_dump(mode="json"))
+        if set(body) & allowed_pricing:
+            # A new research display window must refresh existing source-only
+            # markets immediately. This pure path never evaluates a native
+            # strategy, publishes a candidate, or arms an execution venue.
+            for index, (market_id, market) in enumerate(list(engine.markets.items())):
+                if market.extensions.get("research_only"):
+                    engine.refresh_reference_estimate(market_id)
+                    engine.schedule_expiration(market_id)
+                    if index % 64 == 63:
+                        await asyncio.sleep(0)
         return engine.state()
 
     @app.websocket("/ws")

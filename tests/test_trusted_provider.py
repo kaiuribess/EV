@@ -4,7 +4,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from fastapi.testclient import TestClient
 
+from evplatform.api import create_app
 from evplatform.core.config import PricingConfig, TrustedPilotPolicy
 from evplatform.core.config import Settings
 from evplatform.core.models import Envelope, utcnow
@@ -307,6 +309,29 @@ async def test_research_delta_does_not_trigger_strict_same_observation_latch(tmp
     stored = engine.quotes[market.id][(first.provider, first.bookmaker)]
     assert stored.verification_reason == "trusted_game_cross_frame_pair"
     assert not engine.risk.orders and engine.risk.kill_switch
+
+
+def test_pricing_settings_refresh_existing_research_without_order_attempt(tmp_path):
+    now = utcnow()
+    _, updates = projected(frame(received=now-timedelta(seconds=45),
+        start=now+timedelta(hours=1)))
+    market = updates[0][0]
+    app = create_app(Settings(_env_file=None, mode="production", live_enabled=False,
+        auto_trade=False, sample_feed_enabled=False,
+        database_path=str(tmp_path / "settings-research.db"), pricing=config()))
+    with TestClient(app) as client:
+        engine = app.state.engine
+        engine.risk.kill_switch = True
+        engine.markets[market.id] = market
+        engine.quotes[market.id] = {(q.provider, q.bookmaker): q.model_copy(update={
+            "source_scope_poll_at": None, "source_scope_is_current": None}) for _, q in updates}
+        assert not engine.reference_estimates
+        response = client.post("/api/settings", headers={"X-EV-Control": "local"},
+            json={"trusted_max_delivery_age_ms": 120000})
+        assert response.status_code == 200
+        assert any(item["market_id"] == market.id for item in response.json()["reference_estimates"])
+        assert not engine.risk.native_orders and not engine.risk.orders
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
 
 
 def test_trusted_pilot_policy_is_disabled_and_requires_scoped_owner_review():

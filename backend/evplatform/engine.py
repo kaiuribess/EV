@@ -485,6 +485,47 @@ class Engine:
                                      (calculated_at - received).total_seconds() * 1000)
         # Non-odds strategies can also subscribe independently to typed bus events in start().
 
+    def refresh_reference_estimate(self, market_id):
+        """Refresh the read-only fair-price display without routing an order."""
+        market = self.markets[market_id]
+        if market.extensions.get("paper_only"):
+            return
+        quotes = list(self.quotes.get(market_id, {}).values())
+        try:
+            fair = fair_value(market, quotes, self.settings.pricing)
+            from .core.native_pricing import research_native_estimate
+            native_research, native_rejections = [], []
+            matching_native = [book for key, book in self.native.books.items() if key[0] == market_id]
+            for native_book in matching_native:
+                try:
+                    native_research.append(research_native_estimate(
+                        market, fair, native_book, self.settings.pricing))
+                except NoSignal as exc:
+                    native_rejections.append(str(exc))
+            self.reference_estimates[market_id] = {
+                "market_id": market_id, "event_name": market.event_name,
+                "sport": market.sport, "league": market.league,
+                "market_type": market.market_type, "player": market.player,
+                "statistic": market.statistic,
+                "line": str(market.line) if market.line is not None else None,
+                "start_time": market.start_time.isoformat(),
+                "probabilities": {k: str(v) for k, v in fair.probabilities.items()},
+                "references": list(fair.references),
+                "model": fair.model, "reference_profile_id": fair.reference_profile_id,
+                "quality_mode": market_config(self.settings.pricing, market).reference_quality_mode,
+                "execution_eligible": fair.execution_eligible and not market.extensions.get("research_only"),
+                "native_market_matched": not market.extensions.get("research_only") and bool(matching_native),
+                "native_research_estimates": native_research,
+                "limitations": list(fair.ineligibility_reasons) + ([
+                    "Source identity only; no reviewed native market mapping"] if market.extensions.get("research_only") else [])
+                    + list(dict.fromkeys(native_rejections)),
+                "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
+                "status": ("PROVISIONAL POSITIVE EV" if any(
+                    estimate["positive_estimate"] for estimate in native_research)
+                    else "REFERENCE ESTIMATE")}
+        except NoSignal:
+            self.reference_estimates.pop(market_id, None)
+
     async def recalculate(self, market_id, event=None):
         market = self.markets[market_id]
         await self.native.recalculate(market_id, event)
@@ -493,41 +534,7 @@ class Engine:
             del self.opportunities[key]
         quotes = list(self.quotes.get(market_id, {}).values())
         books = list(self.books.get(market_id, {}).values())
-        if not market.extensions.get("paper_only"):
-            try:
-                fair = fair_value(market, quotes, self.settings.pricing)
-                from .core.native_pricing import research_native_estimate
-                native_research, native_rejections = [], []
-                matching_native = [book for key, book in self.native.books.items() if key[0] == market_id]
-                for native_book in matching_native:
-                    try:
-                        native_research.append(research_native_estimate(
-                            market, fair, native_book, self.settings.pricing))
-                    except NoSignal as exc:
-                        native_rejections.append(str(exc))
-                self.reference_estimates[market_id] = {
-                    "market_id": market_id, "event_name": market.event_name,
-                    "sport": market.sport, "league": market.league,
-                    "market_type": market.market_type, "player": market.player,
-                    "statistic": market.statistic,
-                    "line": str(market.line) if market.line is not None else None,
-                    "start_time": market.start_time.isoformat(),
-                    "probabilities": {k: str(v) for k, v in fair.probabilities.items()},
-                    "references": list(fair.references),
-                    "model": fair.model, "reference_profile_id": fair.reference_profile_id,
-                    "quality_mode": market_config(self.settings.pricing, market).reference_quality_mode,
-                    "execution_eligible": fair.execution_eligible and not market.extensions.get("research_only"),
-                    "native_market_matched": not market.extensions.get("research_only") and bool(matching_native),
-                    "native_research_estimates": native_research,
-                    "limitations": list(fair.ineligibility_reasons) + ([
-                        "Source identity only; no reviewed native market mapping"] if market.extensions.get("research_only") else [])
-                        + list(dict.fromkeys(native_rejections)),
-                    "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
-                    "status": ("PROVISIONAL POSITIVE EV" if any(
-                        estimate["positive_estimate"] for estimate in native_research)
-                        else "REFERENCE ESTIMATE")}
-            except NoSignal:
-                self.reference_estimates.pop(market_id, None)
+        self.refresh_reference_estimate(market_id)
         if not any(r.enabled and isinstance(r.plugin, StrategyPlugin) for r in self.registry.records.values()):
             self.signals[market_id] = {"status": "NO SIGNAL", "reason": "Strategy disabled"}
             await self._record_signal(market, **self.signals[market_id])
