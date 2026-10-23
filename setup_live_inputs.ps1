@@ -193,8 +193,22 @@ if ($isPaper) {
     # operator; a restart must not silently remove the pilot's risk cap.
 }
 $riskBody = $riskChanges | ConvertTo-Json -Compress
-Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
-    -ContentType 'application/json' -Body $riskBody -TimeoutSec 30 | Out-Null
+try {
+    Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
+        -ContentType 'application/json' -Body $riskBody -TimeoutSec 30 | Out-Null
+} catch {
+    # A busy live scanner can complete an idempotent settings write after the
+    # HTTP client times out. Verify persisted state instead of blindly retrying.
+    if (-not $isNative) { throw }
+    $after = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 30
+    if ($after.auto_trade -ne $false -or $after.kill_switch -ne $true -or
+        $after.risk.block_overlapping_events -ne $true -or
+        $after.risk.block_overlapping_players -ne $true -or
+        $after.risk.available_cash_only -ne $true -or
+        $after.risk.stake_sizing -ne 'quarter_kelly' -or
+        [decimal]$after.risk.unit_size_usd -ne [decimal]5) { throw }
+    Write-Host 'Verified persisted native risk settings after delayed control response.'
+}
 
 if ($isPaper) {
     # A newly started consumer may have missed the game's initial snapshot.
