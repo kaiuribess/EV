@@ -1,5 +1,6 @@
 """Read-only catalog diagnostics never grant market or order authorization."""
 import asyncio
+from collections import defaultdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -203,6 +204,41 @@ async def test_periodic_discovery_changes_stream_scope_only_after_success(monkey
         await NativeMonitor._discover_periodically(monitor)
     assert client.calls == [(["100", "200"], {})]
     assert monitor._subscribed_event_ids == ["100", "200"]
+
+
+@pytest.mark.asyncio
+async def test_recovered_catalog_reconnects_with_events_after_startup_read_failure():
+    class Client:
+        def __init__(self):
+            self.calls = []
+            self.public_market_data = SimpleNamespace(catalog_at=None)
+
+        async def stream_updates(self):
+            yield {"type": "snapshot_required"}
+
+        async def subscribe(self, events, props):
+            self.calls.append((events, props))
+
+    async def observe(*args):
+        return None
+
+    client = Client()
+    async def refresh():
+        monitor.discovery_status = "current"
+        monitor.discovered_event_ids = ["123"]
+        monitor.discovered_prop_subtypes = {"123": ["player_total_points"]}
+        client.public_market_data.catalog_at = datetime(2026, 10, 22, tzinfo=timezone.utc)
+
+    monitor = SimpleNamespace(client=client, manifest=SimpleNamespace(name="prophetx",
+        capabilities={"native_event_forwarding": True}), context=SimpleNamespace(config={
+        "event_ids": [], "prop_subtypes": {}, "discovery_tournament_ids": [132]}),
+        engine=SimpleNamespace(native=SimpleNamespace(on_frame=observe),
+            metrics=SimpleNamespace(counters=defaultdict(int))),
+        discovery_status="read_failed", discovered_event_ids=[], discovered_prop_subtypes={},
+        _subscribed_event_ids=[], _subscribed_prop_subtypes={}, _refresh_discovery=refresh, frames=0)
+    await NativeMonitor._run(monitor)
+    assert client.calls == [(["123"], {"123": ["player_total_points"]})]
+    assert monitor._subscribed_event_ids == ["123"]
 
 
 def test_catalog_endpoint_requires_one_scope_and_connected_monitor(tmp_path, monkeypatch):

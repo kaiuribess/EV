@@ -307,6 +307,7 @@ class NativeMonitor(Plugin):
         self.frames = 0
         self.config_error = ""
         self.discovery_status = "disabled"
+        self.discovery_error_type = ""
         self.discovered_event_ids: list[str] = []
         self.discovered_market_ids: list[str] = []
         self._subscribed_event_ids: list[str] = []
@@ -336,6 +337,7 @@ class NativeMonitor(Plugin):
         await super().start(context)
         self.config_error = ""
         self.discovery_status = "disabled"
+        self.discovery_error_type = ""
         self.discovered_event_ids = []
         self.discovered_market_ids = []
         self._subscribed_event_ids = []
@@ -740,13 +742,15 @@ class NativeMonitor(Plugin):
                 self.client.public_market_data.replace_catalog(market_payloads, selected, observed_at=utcnow())
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             self.discovery_status = "read_failed"
+            self.discovery_error_type = type(exc).__name__
             # Retain the last validated subscription set until an explicit
             # future catalog proves a replacement; stream invalidation is
             # handled independently by the native client.
             return
         self.discovery_status = "current"
+        self.discovery_error_type = ""
         self.discovered_event_ids = selected
         self.discovered_prop_subtypes = props
 
@@ -790,6 +794,17 @@ class NativeMonitor(Plugin):
                     # Reconnect clears old depth. Refresh exact REST identity and
                     # status once, then wait for new scoped v2 selection messages.
                     await self._refresh_discovery()
+                    if self.discovery_status == "current":
+                        selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
+                                                       *self.discovered_event_ids]))
+                        props = NativeMonitor._prophetx_prop_scope(self)
+                        if selected != self._subscribed_event_ids or props != self._subscribed_prop_subtypes:
+                            # A failed startup read registered only private/system
+                            # channels. Close that socket so the next registration
+                            # includes the newly discovered market scope.
+                            await self.client.subscribe(selected, props)
+                            self._subscribed_event_ids = selected
+                            self._subscribed_prop_subtypes = props
                 # Account payloads stay backend-only. Mapping into tradable canonical books
                 # is explicitly separate and requires verified settlement, units, and fees.
                 if frame.get("type") == "transport_invalidated":
@@ -836,6 +851,8 @@ class NativeMonitor(Plugin):
                 "message": state.get("reason") or "Native monitor; normalized venue mapping and live preflight required for orders",
                 "frames": self.frames,
                 "discovery_status": self.discovery_status,
+                **({"discovery_error_type": self.discovery_error_type}
+                   if self.manifest.name == "prophetx" else {}),
                 "discovered_event_count": len(self.discovered_event_ids),
                 "discovered_market_count": (len(self.client.public_market_data.catalog)
                     if self.manifest.name == "prophetx" else len(self.discovered_market_ids)),
