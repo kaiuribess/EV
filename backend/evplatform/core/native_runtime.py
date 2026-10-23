@@ -188,6 +188,19 @@ class NativeRuntime:
                 if venue == "kalshi":
                     levels = client.book.asks(match.native_market_id, match.side)
                     metadata = monitor.research_fee_metadata.get(match.native_event_id)
+                    series_response = metadata.get("series") if metadata else None
+                    event_response = metadata.get("event") if metadata else None
+                    series = series_response.get("series", {}) if isinstance(series_response, dict) else {}
+                    native_event = event_response.get("event", {}) if isinstance(event_response, dict) else {}
+                    series = series if isinstance(series, dict) else {}
+                    native_event = native_event if isinstance(native_event, dict) else {}
+                    fee_evidence = {"source": "Kalshi series/event fee metadata",
+                        "observed_at": metadata["observed_at"].isoformat() if metadata else None,
+                        "series_fee_type": series.get("fee_type"),
+                        "series_fee_multiplier": str(series["fee_multiplier"]) if series.get("fee_multiplier") is not None else None,
+                        "event_fee_type_override": native_event.get("fee_type_override"),
+                        "event_fee_multiplier_override": str(native_event["fee_multiplier_override"])
+                            if native_event.get("fee_multiplier_override") is not None else None}
                     if metadata and (now-metadata["observed_at"]).total_seconds() <= 360:
                         fee_for = lambda price, qty, match=match, metadata=metadata: kalshi_research_taker_fee(
                             match, metadata["series"], metadata["event"], metadata["series_changes"],
@@ -199,10 +212,19 @@ class NativeRuntime:
                     native = next((row for row in monitor.research_catalog_rows
                                    if row.get("marketId") == match.native_market_id), None)
                     event = monitor.research_events.get(match.native_event_id)
+                    raw_fee = native.get("fee") if isinstance(native, dict) else None
+                    native_fee = raw_fee if isinstance(raw_fee, dict) else {}
+                    fee_evidence = {"source": "Novig market fee and event phase",
+                        "observed_at": monitor.research_catalog_at.isoformat(),
+                        "charged": native_fee.get("charged"),
+                        "coefficient": str(native_fee["coefficient"])
+                            if native_fee.get("coefficient") is not None else None,
+                        "event_phase": event.get("status") if isinstance(event, dict) else None}
                     fee_for = lambda price, qty, native=native, event=event: novig_taker_fee(
                         native, event, price, qty)
                 result = compare_minimum_lot(match, fair.probabilities[match.outcome], levels,
                     fee_for=fee_for, uncertainty_margin_probability=margin, now=now)
+                result["fee_evidence"] = fee_evidence
                 result["fair_probability"] = str(fair.probabilities[match.outcome])
                 result["reference_profile_id"] = fair.reference_profile_id
                 result["reference_books"] = [ref.get("bookmaker") for ref in fair.references]

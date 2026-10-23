@@ -311,6 +311,8 @@ def test_runtime_research_comparison_is_read_only_and_requires_live_stream(monke
     yes = next(item for item in result if item["native_market_id"] == ticker and item["side"] == "yes")
     assert yes["price"] == "0.56"
     assert D(yes["taker_fee_usd"]) == D("0.02")
+    assert yes["fee_evidence"]["series_fee_multiplier"] == "1"
+    assert yes["fee_evidence"]["observed_at"] == current.isoformat()
     assert yes["positive_after_costs"] is False
     assert yes["execution_eligible"] is False and yes["mapping_reviewed"] is False
     engine.settings.pricing = PricingConfig(trusted_research_margin_probability=D("0.01"),
@@ -324,6 +326,40 @@ def test_runtime_research_comparison_is_read_only_and_requires_live_stream(monke
     assert exact["execution_eligible"] is False
     monitor.task = SimpleNamespace(done=lambda: True)
     assert NativeRuntime.research_comparisons(runtime, market(), fair) == []
+
+
+def test_novig_review_lead_keeps_exact_fee_phase_evidence(monkeypatch):
+    import evplatform.core.pricing as pricing
+    monkeypatch.setattr(pricing, "validate_fair_references", lambda *_: None)
+    current = utcnow()
+    found = novig_prop_matches(prop_market(), novig_prop_rows(), {E: novig_event()},
+        observed_at=current)
+    monitor = SimpleNamespace(client=SimpleNamespace(
+        settings=SimpleNamespace(environment="production"),
+        book=SimpleNamespace(asks=lambda *_: [(D("0.58"), D("6027"))]),
+        health_check=lambda: {"streaming": True}),
+        task=SimpleNamespace(done=lambda: False),
+        context=SimpleNamespace(config={"discovery_interval_seconds": 300}),
+        research_catalog_at=current, research_matches={prop_market().id: found},
+        research_catalog_rows=novig_prop_rows(), research_events={E: novig_event()})
+    runtime = SimpleNamespace(engine=SimpleNamespace(settings=SimpleNamespace(mode="production",
+        pricing=PricingConfig(trusted_research_margin_probability=D("0.01"))),
+        registry=SimpleNamespace(records={"novig": SimpleNamespace(enabled=True, plugin=monitor)})),
+        account_snapshots={})
+    fair = SimpleNamespace(probabilities={"over": D("0.60"), "under": D("0.40")},
+        reference_profile_id="mlb_prop", references=[{"bookmaker": "pinnacle"}, {"bookmaker": "fanduel"}])
+    result = NativeRuntime.research_comparisons(runtime, prop_market(), fair)
+    over = next(item for item in result if item["outcome"] == "over")
+    assert over["fee_evidence"]["charged"] == "WHEN_LIVE"
+    assert over["fee_evidence"]["coefficient"] == "0.06"
+    assert over["fee_evidence"]["event_phase"] == "OPEN_PREGAME"
+    assert over["taker_fee_usd"] == "0"
+    assert over["normal_payout_usd"] == "1.00"
+    assert over["execution_eligible"] is False
+    monitor.research_catalog_rows[0]["fee"] = None
+    without_fee = NativeRuntime.research_comparisons(runtime, prop_market(), fair)
+    assert all(item["rejection"] == "Applicable native fee metadata is unavailable"
+               for item in without_fee)
 
 
 def test_exact_research_review_draft_persists_without_approving_mapping(tmp_path):

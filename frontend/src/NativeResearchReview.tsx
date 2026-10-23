@@ -75,6 +75,7 @@ export function NativeResearchReview({ state, mutate, notify, connected }: Props
         <div><strong>{eventName(row)} · {marketName(row)} · {human(offer.outcome)}</strong>
           <p>{human(offer.venue)} {text(offer.native_market_id)} / {text(offer.native_outcome_id)} · {text(offer.normal_win_condition)}</p>
           <small>Start {text(offer.native_start)} · payout ${text(offer.price_denomination_usd)} per contract · rule {text(offer.rules_sha256)} · {text(offer.rules_excerpt)}</small><br />
+          <small>Fee evidence {text(offer.fee_evidence?.source)} · observed {text(offer.fee_evidence?.observed_at)} · charge phase {text(offer.fee_evidence?.charged, text(offer.fee_evidence?.event_phase))} · coefficient {text(offer.fee_evidence?.coefficient, text(offer.fee_evidence?.series_fee_multiplier))}</small><br />
           <small>Buy {offer.price == null ? 'depth unavailable' : `${text(offer.price)} · ${text(offer.available_depth_contracts)} contracts`} · fee {offer.taker_fee_usd == null ? 'unverified' : money(offer.taker_fee_usd, 4)} · net {offer.net_estimated_profit_usd == null ? 'allowance unset' : money(offer.net_estimated_profit_usd, 4)}</small>
         </div>
         <button className="button" disabled={!connected || busy || state.auto_trade || !state.kill_switch} onClick={() => void saveDraft(row, offer)}>Save unapproved draft</button>
@@ -83,6 +84,7 @@ export function NativeResearchReview({ state, mutate, notify, connected }: Props
       {drafts.slice(0, 10).map(draft => <details key={draft.draft_id} className="setting-row"><summary>{text(draft.source?.event_name)} · {human(draft.venue)} · {text(draft.native_discovery?.outcome)} · UNAPPROVED</summary>
         <p>Captured {text(draft.captured_at)} · market {text(draft.native_market_id)} · outcome {text(draft.native_outcome_id)}</p>
         <p>Condition: {text(draft.native_discovery?.normal_win_condition)} · rules fingerprint {text(draft.native_discovery?.rules_sha256)}</p>
+        <p>Fee source: {text(draft.native_discovery?.fee_evidence?.source)} · observed {text(draft.native_discovery?.fee_evidence?.observed_at)} · phase {text(draft.native_discovery?.fee_evidence?.event_phase, text(draft.native_discovery?.fee_evidence?.charged))}</p>
         <p>{(draft.review_required ?? []).join(' · ')}</p></details>)}
     </section>
   </>
