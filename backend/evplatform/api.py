@@ -16,6 +16,8 @@ from .core.native_accounting import ExactDecimal
 from .core.settlement_bridge import ExceptionalSettlementBound, estimate_bridge
 from .core.launch_setup import launch_setup, operator_limits_draft
 from .core.manual_native import ManualNativeService
+from .core.paths import runtime_data_dir
+from .core.research_review import read_reviews, review_payload, save_review
 from .core.risk import RiskRejected
 from .core.signals import SignalResultImport
 from .engine import Engine
@@ -86,6 +88,14 @@ class ManualSubmitBody(BaseModel):
     terms_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     proposal_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     approved_max_cost_usd: Decimal = Field(gt=0, allow_inf_nan=False)
+
+
+class NativeResearchReviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_market_id: str = Field(min_length=1)
+    venue: str = Field(pattern="^(kalshi|novig)$")
+    native_market_id: str = Field(min_length=1)
+    native_outcome_id: str = Field(min_length=1)
 
 
 def local_origin(value, port=8000):
@@ -308,6 +318,23 @@ def create_app(settings=None):
             return await manual_native.preview(body.market_id, body.venue, body.outcome, body.max_cost_usd)
         except (RiskRejected, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/native/research-review/drafts")
+    async def native_research_drafts():
+        destination = runtime_data_dir(engine.settings.data_dir) / "native_review_drafts"
+        return {"items": await asyncio.to_thread(read_reviews, destination),
+                "execution_authorized": False}
+
+    @app.post("/api/native/research-review/drafts")
+    async def native_research_draft(body: NativeResearchReviewBody):
+        try:
+            payload = review_payload(engine.state(), **body.model_dump())
+            destination = runtime_data_dir(engine.settings.data_dir) / "native_review_drafts"
+            target = await asyncio.to_thread(save_review, payload, destination)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {"draft_id": target.stem, "status": payload["status"],
+                "execution_authorized": False, "model_approved": False}
 
     @app.post("/api/native/manual/submit")
     async def native_manual_submit(body: ManualSubmitBody):

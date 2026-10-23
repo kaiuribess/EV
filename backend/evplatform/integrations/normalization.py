@@ -67,6 +67,8 @@ class SourceOffer:
     observation_verified: bool = False
     observation_complete: bool = False
     source_price_changed_at: datetime | None = None
+    source_stored_at: datetime | None = None
+    source_status_historical_hint: bool = False
     verification_reason: str | None = None
     market_status_verified: bool = False
     # A provider's book/fixture poll is useful for health review but does not
@@ -241,6 +243,21 @@ def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | Non
     # that the cached board still represents currently offered outcomes.
     if headers.get("x-parlay-stale"):
         return "stale_cached_board"
+    # X-Provider-State is per source, not per selection. Its adverse roles
+    # still disqualify the corresponding book from time-sensitive pricing.
+    try:
+        provider_state = json.loads(headers.get("x-provider-state", "{}"))
+        source_roles = provider_state.get("src", {}) if isinstance(provider_state, dict) else {}
+    except (TypeError, ValueError):
+        source_roles = {}
+    if isinstance(source_roles, dict):
+        for scope in scopes:
+            if not isinstance(scope, dict):
+                continue
+            name = scope.get("bookmaker") or scope.get("key")
+            state = source_roles.get(name)
+            if isinstance(state, dict) and state.get("role") in {"degraded", "offline"}:
+                return "degraded_source"
     if headers.get("x-result-degraded") or headers.get("x-result-degraded-sources"):
         return "degraded_source"
     if any(scope.get("partial") is True or scope.get("missing_books")
@@ -268,7 +285,18 @@ def _parlay_observation(envelope: ProviderEnvelope, row: dict, *, complete: bool
     # guessing seconds/milliseconds from magnitude would manufacture evidence.
     raw_observed = row.get("last_observed")
     observed = parse_timestamp(raw_observed) if isinstance(raw_observed, str) else None
-    verified = observed is not None and row.get("last_update_type") == "collector_observation"
+    verified = (envelope.provider_id != "parlay_rest" and observed is not None
+                and row.get("last_update_type") == "collector_observation")
+    # The separate Pinnacle current-state stream identifies its own rows with
+    # source_ts_ms/last_observed_ms. A generic complete game-board frame never
+    # inherits this observation from a heartbeat or nearby Pinnacle row.
+    current_state = (envelope.provider_id != "parlay_rest" and envelope.kind == "odds_update"
+                     and row.get("bookmaker") == "pinnacle"
+                     and row.get("source_ts_ms") is not None
+                     and row.get("last_observed_ms") is not None)
+    if current_state:
+        observed = parse_timestamp(row["last_observed_ms"], epoch_unit="milliseconds")
+        verified = observed is not None and row.get("action") != "remove" and row.get("available") is True
     problem = _observation_problem(envelope, *scopes, row)
     if observed is not None and observed > envelope.received_at:
         problem, verified = "future_observation_clock", False
@@ -276,7 +304,10 @@ def _parlay_observation(envelope: ProviderEnvelope, row: dict, *, complete: bool
         "source_observed_at": observed,
         "observation_verified": verified,
         "observation_complete": verified and complete and problem is None,
-        "source_price_changed_at": parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds"),
+        "source_price_changed_at": (None if envelope.provider_id == "parlay_rest" else
+            parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")),
+        "source_stored_at": (parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")
+            if envelope.provider_id == "parlay_rest" and envelope.kind == "snapshot" else None),
         "verification_reason": problem or ("quote_bound_collector_observation" if verified else "unverified_observation_clock"),
     }
 
@@ -306,19 +337,16 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                         raise ValueError("Duplicate outcome in market")
                     prices[name] = decimal_price(outcome["price"], odds_format)
                     points[name] = number_identity(outcome.get("point"))
-                # Whole-book liveness is not per-market verification. Parlay's
-                # main reference and cookbook give conflicting oldest-price vs
-                # freshest-poll meanings for book.last_update_ms, so it cannot
-                # establish this market's source observation clock.
+                # Support confirmed book.line_changed_at_ms is the oldest
+                # stored served row. market.last_update has a different and
+                # ambiguous scope, so it cannot fill a missing stored clock.
                 observed = parse_timestamp(market.get("last_update"))
+                stored = parse_timestamp(book.get("line_changed_at_ms"), epoch_unit="milliseconds")
                 status = ("suspended" if any(_explicitly_unavailable(scope)
                     for scope in (event, book, market, *outcomes)) else "active")
-                # /odds?includeLinks=true carries links on individual FanDuel
-                # outcomes only for a matching recently observed native quote
-                # whose market and runner were OPEN/ACTIVE. Require every side
-                # of this exact main line. This verifies status only: no
-                # quote-bound observation clock is supplied by the game shape.
-                native_status = (
+                # Links certify a stored OPEN/ACTIVE observation, potentially
+                # five minutes old; they do not prove present market status.
+                historical_link_active = (
                     envelope.provider_id == "parlay_rest"
                     and envelope.kind == "snapshot"
                     and book.get("key") == "fanduel"
@@ -332,10 +360,13 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                     str(market["key"]), None, None, market.get("period"), points, prices,
                     observed, envelope.published_at, status,
                     {**_row_context(market), **event_context},
-                    **(_parlay_observation(envelope, market, complete=len(prices) >= 2,
-                                           scopes=(event, book))
+                    **({**_parlay_observation(envelope, market, complete=len(prices) >= 2,
+                                             scopes=(event, book)), "source_stored_at": stored}
                        if envelope.provider_id.startswith("parlay") else {}),
-                    market_status_verified=native_status,
+                    # A FanDuel link reports OPEN/ACTIVE at the stored
+                    # observation, potentially minutes ago, not now.
+                    market_status_verified=False,
+                    source_status_historical_hint=historical_link_active,
                     source_scope_poll_at=poll_at,
                     source_scope_is_current=poll_current,
                 ))
@@ -441,16 +472,13 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
             "suspended" if row.get("suspended") is True or row.get("status") == "suspended" or row.get("available") is False else "active"
         )
         observation = _parlay_observation(envelope, row, complete=len(prices) >= 2)
-        # /props?includeLinks=true emits FanDuel side links only when the
-        # stored native market was OPEN and that runner ACTIVE. Require both
-        # sides, a complete collector-bound observation and the documented
-        # REST shape. A single link does not certify the opposing price.
-        status_verified = (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
+        # Both FanDuel links are historical OPEN/ACTIVE hints, not proof of
+        # current selection availability. A single link proves neither side.
+        historical_link_active = (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
                            and row.get("bookmaker") == "fanduel" and has_totals and not has_outcome
                            and not has_moneyline and set(prices) == {"over", "under"}
                            and all(_valid_fanduel_link(row.get(f"{side}_link"))
                                    for side in ("over", "under"))
-                           and observation["observation_verified"] and observation["observation_complete"]
                            and status == "active")
         result.append(SourceOffer(
             envelope.provider_id, str(row.get("bookmaker", "")),
@@ -464,7 +492,8 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
              **({"scheduled_start": row["commence_time"]} if "commence_time" in row else {}),
              **({"event_sport": envelope.metadata["sport"]} if envelope.metadata.get("sport") else {})},
             **observation,
-            market_status_verified=status_verified,
+            market_status_verified=False,
+            source_status_historical_hint=historical_link_active,
             received_at=envelope.received_at,
         ))
     return result
@@ -896,6 +925,8 @@ class TrustedSourceProjector:
             market_fingerprint=market.identity(), decimal_odds=odds, status=status,
             source_time=offer.observed_at, source_observed_at=offer.source_observed_at,
             source_price_changed_at=offer.source_price_changed_at,
+            source_stored_at=offer.source_stored_at,
+            source_status_historical_hint=offer.source_status_historical_hint,
             observation_verified=offer.observation_verified,
             observation_complete=offer.observation_complete,
             market_status_verified=offer.market_status_verified,
@@ -1151,6 +1182,8 @@ class VerifiedProviderMapper:
                 observed_at=_oldest([part.observed_at for part in sides.values()]),
                 source_observed_at=_oldest(timestamps),
                 source_price_changed_at=_oldest([part.source_price_changed_at for part in sides.values()]),
+                source_stored_at=_oldest([part.source_stored_at for part in sides.values()]),
+                source_status_historical_hint=all(part.source_status_historical_hint for part in sides.values()),
                 received_at=_oldest([part.received_at for part in sides.values()]),
                 observation_verified=verified,
                 observation_complete=verified and current_pair and same_observation and acceptable,
@@ -1261,6 +1294,8 @@ class VerifiedProviderMapper:
                 observation_verified=offer.observation_verified,
                 observation_complete=offer.observation_complete,
                 source_price_changed_at=offer.source_price_changed_at,
+                source_stored_at=offer.source_stored_at,
+                source_status_historical_hint=offer.source_status_historical_hint,
                 verification_reason=offer.verification_reason,
                 source_scope_poll_at=offer.source_scope_poll_at,
                 source_scope_is_current=offer.source_scope_is_current,

@@ -208,6 +208,8 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
             eligible = diagnostics[book][0] and book not in conflicts
             evidence.update({"source_observed_at": quote.source_observed_at.isoformat() if quote.source_observed_at else None,
                 "source_price_changed_at": quote.source_price_changed_at.isoformat() if quote.source_price_changed_at else None,
+                "source_stored_at": quote.source_stored_at.isoformat() if quote.source_stored_at else None,
+                "source_status_historical_hint": quote.source_status_historical_hint,
                 "source_scope_poll_at": quote.source_scope_poll_at.isoformat() if quote.source_scope_poll_at else None,
                 "source_scope_is_current": quote.source_scope_is_current,
                 "provider_delivery_at": quote.provider_time.isoformat() if quote.provider_time else None,
@@ -334,9 +336,13 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
                 receipt = datetime.fromisoformat(reference["local_receipt_at"])
                 poll = (datetime.fromisoformat(reference["source_scope_poll_at"])
                         if reference.get("source_scope_poll_at") else None)
+                stored = (datetime.fromisoformat(reference["source_stored_at"])
+                          if reference.get("source_stored_at") else None)
                 observed = (datetime.fromisoformat(reference["source_observed_at"])
                             if reference.get("observation_verified") and reference.get("source_observed_at")
                             else None)
+                if any(stamp.tzinfo is None for stamp in (receipt, poll, stored, observed) if stamp is not None):
+                    raise ValueError("Naive trusted provider clock")
             except (TypeError, ValueError, KeyError) as exc:
                 raise NoSignal("Trusted provider delivery evidence is unavailable") from exc
             delivery_age = (now - receipt).total_seconds() * 1000
@@ -348,6 +354,9 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
                 raise NoSignal("Verified sportsbook observation indicator expired")
             if poll is not None and not 0 <= (now - poll).total_seconds() * 1000 <= config.trusted_max_indicator_age_ms:
                 raise NoSignal("Trusted provider poll indicator expired")
+            if reference.get("provider") == "parlay_rest" and stored is not None and not 0 <= (
+                    now - stored).total_seconds() * 1000 <= config.trusted_max_indicator_age_ms:
+                raise NoSignal("Parlay stored price-row indicator expired")
             if reference.get("status") in {"suspended", "withdrawn"}:
                 raise NoSignal("Trusted provider selection became unavailable")
             if fair.execution_eligible and not pilot_eligible:

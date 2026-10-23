@@ -79,6 +79,9 @@ class PricingConfig(BaseModel):
     # Read-only sensitivity assumption. A missing value means that net EV
     # after source uncertainty is unknown; it grants no pilot permission.
     trusted_research_margin_probability: Decimal | None = Field(default=None, ge=0, lt=1)
+    # Exact-market research scenarios. These never authorize the live pilot;
+    # its separately reviewed uncertainty_margin_probability remains required.
+    trusted_research_market_margins: dict[str, Decimal] = Field(default_factory=dict)
     trusted_pilot_policy: TrustedPilotPolicy = Field(default_factory=TrustedPilotPolicy)
     reference_profiles: dict[str, ReferenceProfile] = Field(default_factory=dict)
     enabled_reference_profiles: list[str] = Field(default_factory=list)
@@ -86,6 +89,9 @@ class PricingConfig(BaseModel):
 
     @model_validator(mode="after")
     def positive_weights(self):
+        if any(not key.startswith("research:") or len(key) > 160 or not value.is_finite()
+               or not 0 <= value < 1 for key, value in self.trusted_research_market_margins.items()):
+            raise ValueError("Research allowances require exact research market IDs and finite probabilities")
         if (len(set(self.enabled_reference_profiles)) != len(self.enabled_reference_profiles)
                 or set(self.enabled_reference_profiles) - set(self.reference_profiles)):
             raise ValueError("Enabled reference profiles must name distinct registered profiles")

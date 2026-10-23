@@ -207,6 +207,68 @@ def test_research_margin_is_separate_from_owner_pilot_authorization():
     assert config.trusted_pilot_policy.owner_approved is False
 
 
+def test_exact_market_research_allowance_does_not_approve_pilot():
+    config = PricingConfig(trusted_research_market_margins={market().id: D("0.01")})
+    assert config.trusted_research_market_margins[market().id] == D("0.01")
+    assert config.trusted_pilot_policy.enabled is False
+    with pytest.raises(ValueError, match="exact research market"):
+        PricingConfig(trusted_research_market_margins={"basketball:moneyline": D("0.01")})
+
+
+def test_historical_jeudy_pregame_novig_economics_at_one_dollar_payout():
+    match = next(item for item in novig_prop_matches(prop_market(), novig_prop_rows(),
+        {E: novig_event()}, observed_at=NOW) if item.outcome == "over")
+    fair = D("0.600847487482864325318460014")
+    result = compare_minimum_lot(match, fair, [(D("0.58"), D("6027"))],
+        fee_for=lambda p, q: novig_taker_fee(novig_prop_rows()[0], novig_event(), p, q),
+        uncertainty_margin_probability=None, now=NOW)
+    assert result["comparison_quantity"] == "100"
+    assert result["normal_payout_usd"] == "1.00"
+    assert D(result["cash_cost_usd"]) == D("0.58")
+    assert D(result["taker_fee_usd"]) == 0
+    assert D(result["fee_adjusted_estimated_profit_usd"]) == fair-D("0.58")
+    assert D(result["fee_adjusted_estimated_profit_usd"])/D("100") == (fair-D("0.58"))/D("100")
+    assert result["net_estimated_profit_usd"] is None
+    with_allowance = compare_minimum_lot(match, fair, [(D("0.58"), D("6027"))],
+        fee_for=lambda p, q: novig_taker_fee(novig_prop_rows()[0], novig_event(), p, q),
+        uncertainty_margin_probability=D("0.03"), now=NOW)
+    assert D(with_allowance["net_estimated_profit_usd"]) < 0
+
+
+def test_expired_research_archive_keeps_original_prices_but_cannot_execute():
+    from collections import deque
+    from evplatform.engine import Engine
+
+    engine = object.__new__(Engine)
+    engine.research_history = deque(maxlen=100)
+    engine._last_current_research = {market().id: {"market_id": market().id,
+        "calculated_at": NOW.isoformat(), "native_market_matched": True,
+        "native_research_estimates": [{"price": "0.58", "calculated_at": NOW.isoformat(),
+                                       "positive_after_costs": True}]}}
+    engine._archive_research(market().id, "Verified sportsbook observation indicator expired")
+    archived = engine.research_history[0]
+    assert archived["calculated_at"] == NOW.isoformat()
+    assert archived["native_research_estimates"][0]["price"] == "0.58"
+    assert archived["historical"] is True and archived["execution_eligible"] is False
+    assert archived["native_research_estimates"][0]["execution_eligible"] is False
+    assert market().id not in engine._last_current_research
+
+
+def test_new_sportsbook_source_market_triggers_cached_catalog_rematch():
+    from evplatform.plugins.external import NativeMonitor
+    monitor = object.__new__(NativeMonitor)
+    monitor.engine = SimpleNamespace(reference_estimates={})
+    monitor._last_research_source_ids = frozenset()
+    assert monitor._research_match_refresh_due(5) is False
+    monitor.engine.reference_estimates[market().id] = {"market_id": market().id}
+    assert monitor._research_match_refresh_due(5) is True
+    monitor._last_research_source_ids = frozenset({market().id})
+    assert monitor._research_match_refresh_due(5) is False
+    assert monitor._research_match_refresh_due(30) is True
+    monitor.engine.reference_estimates.clear()
+    assert monitor._research_match_refresh_due(5) is True
+
+
 def test_depth_or_fee_gap_never_becomes_positive_research_signal():
     match = kalshi_moneyline_matches(market(), kalshi_rows(), observed_at=NOW)[0]
     insufficient = compare_minimum_lot(match, D("0.9"),
@@ -279,3 +341,33 @@ def test_exact_research_review_draft_persists_without_approving_mapping(tmp_path
         review_payload(state, **(arguments | {"native_market_id": "other"}))
     with pytest.raises(ValueError, match="disarmed"):
         review_payload(state | {"kill_switch": False}, **arguments)
+
+
+def test_research_review_api_saves_only_unapproved_draft(tmp_path):
+    from fastapi.testclient import TestClient
+    from evplatform.api import create_app
+    from evplatform.core.config import Settings
+
+    app = create_app(Settings(_env_file=None, mode="production", live_enabled=False,
+        auto_trade=False, database_path=str(tmp_path / "api.db"), data_dir=str(tmp_path / "data")))
+    match = kalshi_moneyline_matches(market(), kalshi_rows(), observed_at=NOW)[0]
+    lead = {**match.public(), "quality": "provisional_native_research",
+            "price": "0.56", "mapping_reviewed": False, "execution_eligible": False}
+    state = {"mode": "production", "auto_trade": False, "kill_switch": True,
+        "timestamp": NOW.isoformat(), "reference_estimates": [{"market_id": market().id,
+            "event_name": market().event_name, "start_time": START.isoformat(),
+            "probabilities": {"Atlanta Hawks": "0.5734"},
+            "native_research_estimates": [lead]}]}
+    body = {"source_market_id": market().id, "venue": "kalshi",
+        "native_market_id": lead["native_market_id"],
+        "native_outcome_id": lead["native_outcome_id"]}
+    with TestClient(app) as client:
+        app.state.engine.state = lambda: state
+        assert client.post("/api/native/research-review/drafts", json=body).status_code == 403
+        response = client.post("/api/native/research-review/drafts",
+            headers={"X-EV-Control": "local"}, json=body)
+        assert response.status_code == 200
+        assert response.json()["execution_authorized"] is False
+        listed = client.get("/api/native/research-review/drafts").json()["items"]
+        assert len(listed) == 1 and listed[0]["status"] == "unapproved_research_draft"
+        assert client.get("/api/native/orders").json()["orders"] == []

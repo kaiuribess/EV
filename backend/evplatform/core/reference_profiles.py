@@ -182,6 +182,10 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
         "incomplete_or_cross_frame_outcomes", "unsynchronized_outcomes",
     }:
         return False, ("Provider reported incomplete, cached, or degraded price evidence",), None
+    if quote.provider == "parlay_rest" and quote.source_stored_at is not None:
+        stored_age = (now - quote.source_stored_at).total_seconds() * 1000
+        if not 0 <= stored_age <= config.trusted_max_indicator_age_ms:
+            return False, ("Parlay stored price rows are expired or future-dated",), delivery_age
     for stamp, label in ((quote.source_observed_at if quote.observation_verified else None,
                           "quote observation"), (quote.source_scope_poll_at, "book/fixture poll")):
         if stamp is not None:
@@ -193,6 +197,10 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
         caveats.append("Provider board coverage is bounded or paginated; only this complete price pair was used")
     if not quote.observation_verified or quote.source_observed_at is None:
         caveats.append("Exact selection observation age unknown")
+    if quote.provider == "parlay_rest" and quote.source_stored_at is None:
+        caveats.append("Parlay stored price-row age unknown")
+    if quote.source_status_historical_hint:
+        caveats.append("FanDuel links indicate historical OPEN/ACTIVE status only")
     if not quote.market_status_verified or quote.status == "unknown":
         caveats.append("Selection active status unverified")
     if quote.source_scope_poll_at is None:

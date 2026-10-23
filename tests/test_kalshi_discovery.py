@@ -129,7 +129,7 @@ async def test_periodic_rotation_only_when_scope_changes(monkeypatch):
     async def one_cycle(_):
         nonlocal cycles
         cycles += 1
-        if cycles > 2:
+        if cycles > 12:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)

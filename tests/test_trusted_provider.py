@@ -1,7 +1,9 @@
 """Provider-trusted probabilities are real-source research, never order permission."""
 from dataclasses import replace
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -77,6 +79,53 @@ def test_trusted_two_book_probability_keeps_unknown_quote_age_and_status():
     assert any("Exact selection observation age unknown" in reason for reason in fair.ineligibility_reasons)
     assert all(r["source_price_changed_at"] is None or r["source_price_changed_at"] != r["source_observed_at"]
                for r in fair.references)
+
+
+def test_parlay_stored_row_clock_expires_even_with_fresh_book_heartbeat():
+    fresh = frame()
+    payload = deepcopy(fresh.payload)
+    for book in payload[0]["bookmakers"]:
+        book["verified_at"] = NOW.isoformat()
+        book["is_current"] = True
+        book["line_changed_at_ms"] = int((NOW-timedelta(seconds=2)).timestamp()*1000)
+    current = replace(fresh, payload=payload)
+    _, updates = projected(current)
+    market = updates[0][0]
+    quotes = [quote for _, quote in updates]
+    fair = fair_value(market, quotes, config(), NOW)
+    assert all(ref["source_stored_at"] == (NOW-timedelta(seconds=2)).isoformat()
+               for ref in fair.references)
+    assert all(ref["source_price_changed_at"] is None for ref in fair.references)
+    assert all(ref["source_scope_poll_at"] is None or ref["source_scope_poll_at"] == NOW.isoformat()
+               for ref in fair.references)
+    stale_payload = deepcopy(payload)
+    stale_payload[0]["bookmakers"][0]["line_changed_at_ms"] = int(
+        (NOW-timedelta(seconds=31)).timestamp()*1000)
+    _, stale_updates = projected(replace(fresh, payload=stale_payload))
+    with pytest.raises(NoSignal, match="Insufficient"):
+        fair_value(market, [quote for _, quote in stale_updates], config(), NOW)
+    with pytest.raises(NoSignal, match="stored price-row indicator expired"):
+        validate_fair_references(market, fair, config(), NOW+timedelta(seconds=29))
+
+
+@pytest.mark.parametrize("adverse", ["degraded", "cached", "topped"])
+def test_parlay_adverse_response_or_source_role_blocks_trusted_research(adverse):
+    original = frame()
+    payload = deepcopy(original.payload)
+    headers = {}
+    if adverse == "degraded":
+        headers["x-provider-state"] = json.dumps({"src": {"pinnacle": {"role": "degraded"},
+            "fanduel": {"role": "primary"}}})
+    elif adverse == "cached":
+        headers["x-parlay-stale"] = "board_query_timeout"
+    else:
+        payload[0]["bookmakers"][0]["topped_up"] = True
+    bad = replace(original, payload=payload, metadata={**original.metadata, "headers": headers})
+    _, updates = projected(bad)
+    assert any(quote.verification_reason in {
+        "degraded_source", "stale_cached_board", "retained_top_up"} for _, quote in updates)
+    with pytest.raises(NoSignal, match="Insufficient"):
+        fair_value(updates[0][0], [quote for _, quote in updates], config(), NOW)
 
 
 def test_trusted_delivery_expires_without_relabeling_cached_price():
@@ -412,6 +461,7 @@ def approved_pilot_case():
     quotes = [quote.model_copy(update={
         "normal_outcome_verified": True,
         "normal_outcome_evidence": "OFFLINE reviewed ordinary winner identity",
+        "source_stored_at": NOW - timedelta(seconds=1),
         "source_scope_poll_at": NOW - timedelta(seconds=1),
         "source_scope_is_current": True,
     }) for quote in quotes]

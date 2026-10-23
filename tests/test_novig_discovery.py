@@ -102,7 +102,7 @@ async def test_market_rotation_uses_reconnect_snapshot_only_after_success(monkey
     async def one_cycle(_):
         nonlocal cycles
         cycles += 1
-        if cycles > 2:
+        if cycles > 12:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)

@@ -230,6 +230,20 @@ def test_documented_parlay_quote_observation_can_follow_an_unchanged_price():
         complete=True)["observation_verified"]
 
 
+def test_pinnacle_current_state_observation_is_not_inherited_by_cached_board_or_removal():
+    now = datetime(2026, 10, 22, 19, 3, 48, tzinfo=timezone.utc)
+    row = {"bookmaker": "pinnacle", "source_ts_ms": int(now.timestamp()*1000),
+           "last_observed_ms": int((now-timedelta(seconds=1)).timestamp()*1000),
+           "available": True}
+    update = ProviderEnvelope("parlay_game_ws", "odds_update", {}, now, 0)
+    evidence = _parlay_observation(update, row, complete=True)
+    assert evidence["observation_verified"] and evidence["observation_complete"]
+    cached = ProviderEnvelope("parlay_game_ws", "initial_state", {}, now, 0)
+    assert not _parlay_observation(cached, row, complete=True)["observation_verified"]
+    removed = {**row, "available": False, "action": "remove"}
+    assert not _parlay_observation(update, removed, complete=True)["observation_verified"]
+
+
 def test_odds_papi_inactive_opposing_side_rejects_complete_pair():
     frame = recorded_frame()
     payload = json.loads(json.dumps(frame.payload))

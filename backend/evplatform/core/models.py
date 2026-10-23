@@ -167,13 +167,18 @@ class Quote(TimedData):
     normal_outcome_verified: bool = False
     normal_outcome_evidence: str | None = None
     source_price_changed_at: datetime | None = None
+    # Parlay REST line_changed_at_ms is the oldest stored served row, not a
+    # guaranteed upstream price move or present selection verification.
+    source_stored_at: datetime | None = None
+    source_status_historical_hint: bool = False
     verification_reason: str | None = None
     # Book/fixture poll evidence is not a selection observation. It is shown
     # separately and cannot make a quote strictly eligible.
     source_scope_poll_at: datetime | None = None
     source_scope_is_current: bool | None = None
 
-    @field_validator("source_observed_at", "source_price_changed_at", "source_scope_poll_at")
+    @field_validator("source_observed_at", "source_price_changed_at", "source_stored_at",
+                     "source_scope_poll_at")
     @classmethod
     def aware_observation_clock(cls, value):
         if value is not None and value.tzinfo is None:

@@ -72,6 +72,8 @@ class Engine:
         self.opportunities = {}
         self.reference_estimates = {}
         self.reference_fairs = {}
+        self.research_history = deque(maxlen=100)
+        self._last_current_research = {}
         self.signals = {}
         # Full raw inputs stay in the audit log. Repeating an unchanged
         # no-candidate evaluation for the same market every feed tick otherwise
@@ -514,6 +516,7 @@ class Engine:
                 "probabilities": {k: str(v) for k, v in fair.probabilities.items()},
                 "references": list(fair.references),
                 "model": fair.model, "reference_profile_id": fair.reference_profile_id,
+                "reference_disagreement_probability": str(fair.disagreement),
                 "quality_mode": market_config(self.settings.pricing, market).reference_quality_mode,
                 "execution_eligible": fair.execution_eligible and not market.extensions.get("research_only"),
                 "native_market_matched": not market.extensions.get("research_only") and bool(matching_native),
@@ -525,9 +528,22 @@ class Engine:
                 "status": ("PROVISIONAL POSITIVE EV" if any(
                     estimate["positive_estimate"] for estimate in native_research)
                     else "REFERENCE ESTIMATE")}
-        except NoSignal:
+        except NoSignal as exc:
+            self._archive_research(market_id, str(exc))
             self.reference_estimates.pop(market_id, None)
             self.reference_fairs.pop(market_id, None)
+
+    def _archive_research(self, market_id, reason):
+        """Retain the last evaluated evidence with its original clocks, never as a live offer."""
+        previous = self._last_current_research.pop(market_id, None)
+        if previous is None:
+            return
+        self.research_history.append({**previous, "historical": True,
+            "status": "EXPIRED RESEARCH", "expiration_reason": reason,
+            "expired_at": utcnow().isoformat(), "execution_eligible": False,
+            "native_market_matched": False,
+            "native_research_estimates": [{**offer, "historical": True,
+                "execution_eligible": False} for offer in previous["native_research_estimates"]]})
 
     def public_reference_estimates(self):
         """Use current monitored depth without querying a venue or routing orders."""
@@ -537,11 +553,12 @@ class Engine:
             if market and fair and market_config(self.settings.pricing, market).reference_quality_mode == "trusted_provider":
                 try:
                     validate_fair_references(market, fair, self.settings.pricing, utcnow())
-                except NoSignal:
+                except NoSignal as exc:
+                    self._archive_research(market_id, str(exc))
                     continue  # Keep the historical audit record, not a stale live card.
             comparisons = self.native.research_comparisons(market, fair) if market and fair else []
             all_estimates = [*row.get("native_research_estimates", []), *comparisons]
-            result.append({**row, "native_market_matched": bool(comparisons) or row["native_market_matched"],
+            displayed = {**row, "native_market_matched": bool(comparisons) or row["native_market_matched"],
                            "native_research_estimates": all_estimates,
                            "native_discovery_reason": (None if all_estimates else
                                "No exact native catalog match for this sport, market family and current event; "
@@ -550,7 +567,10 @@ class Engine:
                                                       for item in comparisons}),
                            "status": ("PROVISIONAL POSITIVE EV" if any(
                                item.get("positive_after_costs") or item.get("positive_estimate")
-                               for item in all_estimates) else row["status"])})
+                               for item in all_estimates) else row["status"])}
+            if row["quality_mode"] == "trusted_provider":
+                self._last_current_research[market_id] = displayed
+            result.append(displayed)
         return result
 
     async def recalculate(self, market_id, event=None):
@@ -918,8 +938,11 @@ class Engine:
                            if quote.observation_verified and quote.source_observed_at else None)
         poll_age = ((utcnow() - quote.source_scope_poll_at).total_seconds() * 1000
                     if quote.source_scope_poll_at else None)
+        stored_age = ((utcnow() - quote.source_stored_at).total_seconds() * 1000
+                      if quote.source_stored_at else None)
         return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": observation_age,
-                "scope_poll_age_ms": poll_age, "delivery_age_ms": (utcnow() - quote.received_at).total_seconds() * 1000,
+                "scope_poll_age_ms": poll_age, "stored_price_age_ms": stored_age,
+                "delivery_age_ms": (utcnow() - quote.received_at).total_seconds() * 1000,
                 "trusted_research_usable": trusted and eligible,
                 "execution_freshness_reasons": reasons if strict else (),
                 "paper_comparison_usable": paper_usable,
@@ -973,6 +996,7 @@ class Engine:
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
             "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
             "reference_estimates": self.public_reference_estimates(),
+            "research_history": list(reversed(self.research_history))[:50],
             "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
             "native_orders": [o.model_dump(mode="json") for o in list(self.risk.native_orders.values())[-200:]],
             "native_signals": [o.model_dump(mode="json") for o in self.native.signals.values()],

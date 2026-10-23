@@ -64,13 +64,14 @@ def test_observation_is_distinct_from_retained_clock_price_change_and_delivery()
     assert not quote.market_status_verified
 
 
-def test_parlay_fanduel_bilateral_native_links_certify_only_that_rest_prop_observation():
+def test_parlay_fanduel_bilateral_native_links_are_historical_prop_status_hints():
     row = parlay_row(over_link="https://sportsbook.fanduel.com/over",
                      under_link="https://sportsbook.fanduel.com/under")
     rest = ProviderEnvelope("parlay_rest", "props_snapshot", [row], NOW, 1)
     offer, = extract_offers(rest)
-    assert offer.observation_verified and offer.observation_complete and offer.market_status_verified
-    assert not extract_offers(parlay(row))[0].market_status_verified  # WS has no documented link contract.
+    assert not offer.observation_verified and not offer.observation_complete
+    assert not offer.market_status_verified and offer.source_status_historical_hint
+    assert not extract_offers(parlay(row))[0].source_status_historical_hint
     for change in ({"under_link": None}, {"over_link": "not-a-url"},
                    {"over_link": "https://"}, {"under_link": "https://user:pass@example.com/"},
                    {"under_link": "https://fanduel.com.evil.invalid/under"},
@@ -79,12 +80,14 @@ def test_parlay_fanduel_bilateral_native_links_certify_only_that_rest_prop_obser
         candidate, = extract_offers(ProviderEnvelope("parlay_rest", "props_snapshot",
             [{**row, **change}], NOW, 1))
         assert not candidate.market_status_verified
+        if not set(change) <= {"last_observed", "last_update_type"}:
+            assert not candidate.source_status_historical_hint
     partial, = extract_offers(ProviderEnvelope("parlay_rest", "props_snapshot",
         [row], NOW, 1, metadata={"headers": {"x-result-truncated": "true"}}))
     assert not partial.market_status_verified
 
 
-def test_parlay_game_links_certify_each_fanduel_side_status_but_not_quote_clock():
+def test_parlay_game_links_only_hint_historical_fanduel_status():
     event = {"id": "native-event", "home_team": "Home", "away_team": "Away",
              "bookmakers": [{"key": "fanduel", "markets": [{"key": "h2h",
                  "last_update": (NOW - timedelta(seconds=2)).isoformat(),
@@ -99,7 +102,7 @@ def test_parlay_game_links_certify_each_fanduel_side_status_but_not_quote_clock(
         return extract_offers(envelope)[0]
 
     valid = offer_for(event)
-    assert valid.market_status_verified
+    assert not valid.market_status_verified and valid.source_status_historical_hint
     assert not valid.observation_verified and not valid.observation_complete
     assert "link" not in valid.context
 

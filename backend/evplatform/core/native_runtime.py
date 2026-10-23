@@ -164,7 +164,8 @@ class NativeRuntime:
             validate_fair_references(market, fair, self.engine.settings.pricing, now)
         except NoSignal:
             return []
-        margin = scoped.trusted_research_margin_probability
+        market_margins = scoped.trusted_research_market_margins
+        margin = market_margins.get(market.id, scoped.trusted_research_margin_probability)
         output = []
         for venue in ("kalshi", "novig"):
             record = self.engine.registry.records.get(venue)
@@ -208,7 +209,9 @@ class NativeRuntime:
                 result["catalog_age_ms"] = (now-match.catalog_observed_at).total_seconds()*1000
                 result["source_quality_mode"] = scoped.reference_quality_mode
                 result["uncertainty_allowance_policy"] = (
-                    "research_assumption" if margin is not None else "unconfigured")
+                    "exact_market_research_scenario" if market.id in market_margins else
+                    "global_research_assumption" if margin is not None else "unconfigured")
+                result["uncertainty_allowance_probability"] = str(margin) if margin is not None else None
                 snapshot = self.account_snapshots.get(venue)
                 cash = (snapshot.balance_usd if snapshot and snapshot.cash_available_verified
                         and (venue != "kalshi" or snapshot.exchange_index == match.exchange_index)

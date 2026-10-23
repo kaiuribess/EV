@@ -22,7 +22,8 @@ from evplatform.integrations.parlay import ParlayRest
 def summarize(envelope, *, max_age_s: int = 120) -> dict:
     offers = extract_offers(envelope)
     by_book = defaultdict(lambda: {"offers": 0, "two_sided": 0, "clock_verified": 0,
-                                   "status_verified": 0, "both_verified": 0})
+                                   "status_verified": 0, "both_verified": 0,
+                                   "stored_row_recent": 0, "historical_status_hint": 0})
     for offer in offers:
         counts = by_book[offer.bookmaker]
         counts["offers"] += 1
@@ -35,9 +36,13 @@ def summarize(envelope, *, max_age_s: int = 120) -> dict:
         counts["clock_verified"] += clock
         counts["status_verified"] += status
         counts["both_verified"] += clock and status
+        stored_age = ((envelope.received_at - offer.source_stored_at).total_seconds()
+                      if offer.source_stored_at is not None else None)
+        counts["stored_row_recent"] += stored_age is not None and 0 <= stored_age <= max_age_s
+        counts["historical_status_hint"] += offer.source_status_historical_hint
     return {"offer_count": len(offers), "by_book": dict(sorted(by_book.items())),
             "both_status_and_recent_observation_count": sum(row["both_verified"] for row in by_book.values()),
-            "note": "Quote evidence is not event identity, settlement equivalence, fair value, liquidity, or order authorization."}
+            "note": "Stored row age and FanDuel links are not current quote or status verification; no REST offer is execution certified."}
 
 
 async def probe(sport: str, books: list[str], markets: list[str], *, max_age_s: int = 120) -> dict:

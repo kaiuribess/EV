@@ -74,6 +74,8 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
                 "future_observation_clock", "incomplete_or_cross_frame_outcomes",
                 "unsynchronized_outcomes", "trusted_game_cross_frame_pair"}:
             reasons.append(f"{book}: provider row is cached, degraded or assembled across frames")
+        if ref.get("provider") == "parlay_rest":
+            age(ref.get("source_stored_at"), f"{book} stored price row", policy.max_indicator_age_ms)
         age(ref.get("local_receipt_at"), f"{book} delivery",
             min(config.trusted_max_delivery_age_ms, policy.max_indicator_age_ms))
         if ref.get("source_scope_poll_at") is not None:

@@ -316,6 +316,7 @@ class NativeMonitor(Plugin):
         self.research_matches: dict[str, list] = {}
         self.research_events: dict[str, dict] = {}
         self.research_fee_metadata: dict[str, dict] = {}
+        self._last_research_source_ids = frozenset()
 
     def credential_names(self, config):
         default_profile = getattr(self.config_model(), "credential_profile", "legacy")
@@ -340,6 +341,7 @@ class NativeMonitor(Plugin):
         self.research_matches = {}
         self.research_events = {}
         self.research_fee_metadata = {}
+        self._last_research_source_ids = frozenset()
         if context.config.get("legacy_market_ids"):
             self.config_error = "Confirm the migrated ProphetX IDs in event_ids or prop_subtypes, then clear legacy_market_ids"
             return
@@ -490,6 +492,7 @@ class NativeMonitor(Plugin):
             return []
         markets = [self.engine.markets[market_id] for market_id in self.engine.reference_estimates
                    if market_id in self.engine.markets]
+        source_ids = frozenset(market.id for market in markets)
         if self.manifest.name == "novig":
             # Market list rows expose codes and start but not the two full team
             # names. Fetch only a bounded set of plausible events and require
@@ -531,6 +534,7 @@ class NativeMonitor(Plugin):
                 result[market.id] = matches
                 priority.extend(item.native_market_id for item in matches)
         self.research_matches = result
+        self._last_research_source_ids = source_ids
         if self.manifest.name == "kalshi":
             events = list(dict.fromkeys(item.native_event_id for matches in result.values() for item in matches))[:8]
             for event_id in events:
@@ -551,18 +555,26 @@ class NativeMonitor(Plugin):
                     self.research_fee_metadata.pop(event_id, None)
         return list(dict.fromkeys(priority))
 
+    def _research_match_refresh_due(self, elapsed: int) -> bool:
+        engine = getattr(self, "engine", None)
+        return (elapsed % 30 == 0 or engine is not None and
+                frozenset(engine.reference_estimates) != self._last_research_source_ids)
+
     async def _discover_kalshi_periodically(self):
         try:
             elapsed = 0
             interval = self.context.config.get("discovery_interval_seconds", 300)
             while True:
-                step = min(30, interval - elapsed)
+                # Matching uses the cached catalog. A fresh source market need
+                # not wait a full 30 seconds before a native subscription is
+                # considered; this does not extend source or book freshness.
+                step = min(5, interval - elapsed)
                 await asyncio.sleep(step)
                 elapsed += step
                 if elapsed >= interval:
                     await self._refresh_kalshi_discovery()
                     elapsed = 0
-                else:
+                elif NativeMonitor._research_match_refresh_due(self, elapsed):
                     await self._refresh_research_matches()
                 if self.discovery_status == "read_failed":
                     continue
@@ -586,13 +598,13 @@ class NativeMonitor(Plugin):
             elapsed = 0
             interval = self.context.config.get("discovery_interval_seconds", 300)
             while True:
-                step = min(30, interval - elapsed)
+                step = min(5, interval - elapsed)
                 await asyncio.sleep(step)
                 elapsed += step
                 if elapsed >= interval:
                     await self._refresh_novig_discovery()
                     elapsed = 0
-                else:
+                elif NativeMonitor._research_match_refresh_due(self, elapsed):
                     await self._refresh_research_matches()
                 if self.discovery_status == "read_failed":
                     continue
