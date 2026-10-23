@@ -2,6 +2,7 @@
 import asyncio
 import os
 import time
+from dataclasses import replace
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -129,6 +130,8 @@ class ProviderBridge(InputPlugin):
                         if event_id is None:
                             self._focused_status = {"state": "current_parlay_event_identity_unresolved"}
                             continue
+                        event = next(row for row in events if isinstance(row, dict)
+                                     and row.get("id") == event_id)
                         key = market.extensions.get("source_market_key")
                         if key not in {"player_receptions", "player_receiving_yards", "player_reception_yds"}:
                             continue
@@ -152,7 +155,11 @@ class ProviderBridge(InputPlugin):
                         finally:
                             budget.charge(now, scope, self.client.quota.billable_requests - before)
                         for frame in frames:
-                            await self._publish_mapped(frame)
+                            await self._publish_mapped(replace(frame, metadata={**frame.metadata,
+                                "focused_event": {"id": event_id,
+                                    "home_team": event["home_team"],
+                                    "away_team": event["away_team"],
+                                    "commence_time": event["commence_time"]}}))
                         self._focused_status = {"state": detail["reason"],
                             "native_leads": len(targets), "returned_rows": detail.get("returned_rows", 0),
                             "pages": detail.get("pages", 0),

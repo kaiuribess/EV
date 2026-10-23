@@ -970,6 +970,30 @@ class TrustedSourceProjector:
         from evplatform.core.pricing import market_config
         from evplatform.core.reference_profiles import profile_for_market
         updates = []
+        # Focused REST prop rows may omit fixture names and start. The exact
+        # /events lookup supplies identity context only; it never supplies a
+        # quote observation clock or active-selection attestation.
+        focused_event = envelope.metadata.get("focused_event")
+        if (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
+                and isinstance(focused_event, dict)):
+            event_id = focused_event.get("id")
+            names = [focused_event.get("home_team"), focused_event.get("away_team")]
+            start = parse_timestamp(focused_event.get("commence_time"))
+            sport = envelope.metadata.get("sport")
+            if (offers and isinstance(event_id, str) and isinstance(sport, str)
+                    and all(isinstance(name, str) and name.strip() for name in names)
+                    and names[0] != names[1] and start is not None
+                    and all(offer.event_id == event_id for offer in offers)):
+                event_key = sport, event_id
+                evidence = {"scheduled_start": start.isoformat(),
+                            "participants": names, "event_sport": sport}
+                existing = self.events.get(event_key)
+                if event_key not in self.ambiguous_events:
+                    if existing is None or existing == evidence:
+                        self.events[event_key] = evidence
+                    else:
+                        self.events.pop(event_key, None)
+                        self.ambiguous_events.add(event_key)
         if envelope.kind in {"feed_invalidated", "disconnected", "reconnect", "initial_state"}:
             sport = envelope.metadata.get("sport") or (
                 envelope.payload.get("sport") if isinstance(envelope.payload, dict) else None)

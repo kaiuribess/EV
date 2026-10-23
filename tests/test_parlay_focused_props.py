@@ -6,7 +6,9 @@ import httpx
 import pytest
 
 from evplatform.integrations.base import ProtocolError, ProviderEnvelope
-from evplatform.integrations.normalization import VerifiedProviderMapper, extract_offers
+from evplatform.core.config import PricingConfig
+from evplatform.integrations.normalization import (TrustedSourceProjector,
+    VerifiedProviderMapper, extract_offers)
 from evplatform.integrations.parlay import ParlayRest
 from evplatform.integrations.parlay_focused_props import (FocusedCreditWindow,
     exact_parlay_event_id, needs_focused_references)
@@ -183,3 +185,28 @@ def test_focused_health_snapshot_reports_live_usage_not_startup_state():
     assert result["focused_novig_nfl_props"] == bridge._focused_status
     assert result["quota"] == {"requests": 4}
     assert result["mapped_quotes"] == 7
+
+
+def test_focused_event_lookup_supplies_identity_only_for_exact_prop_rows():
+    bare = {key: value for key, value in row().items()
+            if key not in {"home_team", "away_team", "commence_time"}}
+    mapper = VerifiedProviderMapper()
+    mapper.research_projector = TrustedSourceProjector(lambda: PricingConfig(
+        reference_profile_mode="strict", reference_quality_mode="trusted_provider",
+        multi_book_consensus_enabled=True))
+    context = {"id": EVENT, "home_team": "Minnesota Vikings",
+               "away_team": "Indianapolis Colts", "commence_time": "2026-10-25T17:00:00Z"}
+    frame = ProviderEnvelope("parlay_rest", "props_snapshot",
+        [bare, {**bare, "bookmaker": "draftkings"}], NOW, 1,
+        metadata={"sport": "americanfootball_nfl", "focused_event": context})
+    assert mapper(frame) == []  # no reviewed execution/source mapping
+    assert len(mapper.research_updates) == 2
+    assert len({market.id for market, _ in mapper.research_updates}) == 1
+    assert all(quote.verification_reason == "unverified_observation_clock"
+               and not quote.market_status_verified and not quote.observation_verified
+               for _, quote in mapper.research_updates)
+    wrong = ProviderEnvelope("parlay_rest", "props_snapshot",
+        [{**bare, "event_id": "0"*32}], NOW, 2,
+        metadata={"sport": "americanfootball_nfl", "focused_event": context})
+    mapper(wrong)
+    assert mapper.research_updates == []
