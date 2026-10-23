@@ -241,6 +241,9 @@ async def test_dynamic_tournaments_include_source_rich_nfl_and_retain_pinned_nba
     assert set(monitor.discovered_event_ids) == {str(nfl["event_id"]), str(nba["event_id"])}
     assert monitor.research_events[str(nfl["event_id"])]["league"] == "NFL"
     assert monitor.discovered_tournaments == {"NFL": 31, "NBA": 132, "MLB": 109, "NHL": 234}
+    monitor._subscribed_event_ids = [str(nba["event_id"])]
+    await NativeMonitor._refresh_discovery(monitor, preserve_scope=True)
+    assert monitor.discovered_event_ids == [str(nba["event_id"])]
 
 
 @pytest.mark.asyncio
@@ -323,7 +326,8 @@ async def test_recovered_catalog_reconnects_with_events_after_startup_read_failu
         return None
 
     client = Client()
-    async def refresh():
+    async def refresh(*, preserve_scope=False):
+        assert preserve_scope is True
         monitor.discovery_status = "current"
         monitor.discovered_event_ids = ["123"]
         monitor.discovered_prop_subtypes = {"123": ["player_total_points"]}
@@ -354,7 +358,8 @@ async def test_reconnect_catalog_refresh_does_not_block_talaria_message_loop():
             await refresh_started.wait()
             yield {"event": "pusher:ping"}
 
-    async def refresh():
+    async def refresh(*, preserve_scope=False):
+        assert preserve_scope is True
         refresh_started.set()
         await release_refresh.wait()
         monitor.discovery_status = "read_failed"

@@ -836,14 +836,14 @@ class NativeMonitor(Plugin):
         except asyncio.CancelledError:
             raise
 
-    async def _refresh_discovery(self):
+    async def _refresh_discovery(self, *, preserve_scope=False):
         lock = getattr(self, "_discovery_lock", None)
         if lock is None:  # Lightweight offline monitor fixtures.
-            return await NativeMonitor._refresh_discovery_once(self)
+            return await NativeMonitor._refresh_discovery_once(self, preserve_scope=preserve_scope)
         async with lock:
-            return await NativeMonitor._refresh_discovery_once(self)
+            return await NativeMonitor._refresh_discovery_once(self, preserve_scope=preserve_scope)
 
-    async def _refresh_discovery_once(self):
+    async def _refresh_discovery_once(self, *, preserve_scope=False):
         from ..integrations.prophetx_discovery import active_tournament_ids, open_event_ids
         from ..core.native_research import _aware
         try:
@@ -900,13 +900,20 @@ class NativeMonitor(Plugin):
                          market.league == "NBA" and event.get("tournament_id") == 132)), default=0)
                 return (-int(score >= 3), -score, pool.index(event_id))
             ranked = sorted(pool, key=event_rank)
-            # Preserve one open event from each explicitly pinned tournament
-            # before using the remaining bounded slots for source-rich leads.
-            retained = [min((event_id for event_id in pool
-                             if all_events.get(event_id, {}).get("tournament_id") == tournament_id),
-                            key=event_rank, default=None) for tournament_id in pinned]
-            selected = [event_id for event_id in retained if event_id is not None]
-            selected.extend(event_id for event_id in ranked if event_id not in selected)
+            existing = getattr(self, "_subscribed_event_ids", [])
+            if preserve_scope and existing:
+                # Reconnect is for repairing the already registered channels,
+                # not reranking a volatile fair-price set into another socket
+                # close. The periodic scheduler owns subscription rotation.
+                selected = [event_id for event_id in existing if event_id in all_events]
+            else:
+                # Preserve one open event from each explicitly pinned tournament
+                # before using the remaining bounded slots for source-rich leads.
+                retained = [min((event_id for event_id in pool
+                                 if all_events.get(event_id, {}).get("tournament_id") == tournament_id),
+                                key=event_rank, default=None) for tournament_id in pinned]
+                selected = [event_id for event_id in retained if event_id is not None]
+                selected.extend(event_id for event_id in ranked if event_id not in selected)
             selected = selected[:config.get("max_discovered_events", 20)]
             events = {}
             for event_id in selected:
@@ -971,7 +978,7 @@ class NativeMonitor(Plugin):
 
     async def _recover_prophetx_catalog(self):
         try:
-            await self._refresh_discovery()
+            await self._refresh_discovery(preserve_scope=True)
             if self.discovery_status != "current":
                 return
             selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
