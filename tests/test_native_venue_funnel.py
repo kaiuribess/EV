@@ -63,3 +63,22 @@ def test_funnel_rejects_expired_catalog_and_disconnected_stream(monkeypatch):
     assert runtime.research_venue_funnel(source_market(), [])["kalshi"]["stage"] == "catalog_expired"
     record.plugin.research_catalog_at = utcnow()
     assert runtime.research_venue_funnel(source_market(), [])["kalshi"]["stage"] == "stream_unavailable"
+
+
+def test_cached_polymarket_catalog_explains_time_conflict_without_mapping():
+    market = source_market()
+    row = {"league": "NBA", "market_type": "SPORTS_MARKET_TYPE_MONEYLINE",
+        "teams": [{"name": "Home"}, {"name": "Away"}],
+        "event_start": market.start_time.isoformat(),
+        "market_start": (market.start_time+timedelta(minutes=5)).isoformat(),
+        "status": "MARKET_STATUS_OPEN", "active": True}
+    reason = NativeRuntime._research_catalog_identity_reason(market, "polymarket_us",
+        SimpleNamespace(research_catalog_rows=[row]))
+    assert reason == "Native event and market start times conflict"
+
+
+def test_cached_prophetx_event_does_not_infer_missing_prop_identity():
+    market = source_market(prop=True)
+    reason = NativeRuntime._research_catalog_identity_reason(market, "prophetx",
+        SimpleNamespace(research_events={"event": {"name": market.event_name}}))
+    assert "exact player, statistic, threshold and explicit period" in reason

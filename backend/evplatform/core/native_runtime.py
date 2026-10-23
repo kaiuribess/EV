@@ -284,8 +284,10 @@ class NativeRuntime:
             matches = getattr(monitor, "research_matches", {}).get(market.id, ())
             if not matches:
                 conflict = next((item["reason"] for item in conflicts if item["venue"] == venue), None)
-                result[venue] = {"stage": "identity_rejected" if conflict else "not_discovered",
-                    "reason": conflict or "No exact event/outcome/period/threshold identity in the bounded native catalog",
+                catalog_reason = self._research_catalog_identity_reason(market, venue, monitor)
+                result[venue] = {"stage": "identity_rejected" if conflict or catalog_reason else "not_discovered",
+                    "reason": conflict or catalog_reason or
+                        "No exact event/outcome/period/threshold identity in the bounded native catalog",
                     "catalog_observed_at": catalog_at.isoformat()}
                 continue
             subscribed = getattr(monitor, "_subscribed_event_ids", ()) if venue == "prophetx" else (
@@ -324,6 +326,56 @@ class NativeRuntime:
                 "exact_native_matches": len(matches), "subscribed": in_scope,
                 "comparison_directions": len(offers)}
         return result
+
+    @staticmethod
+    def _research_catalog_identity_reason(market, venue, monitor):
+        """Diagnose already-cached catalog rows; this grants no mapping."""
+        if venue == "polymarket_us" and market.market_type == "moneyline":
+            from ..integrations.polymarket_us_research import _clock, _rule_start
+            rows = [row for row in getattr(monitor, "research_catalog_rows", ())
+                if row.get("league") == market.league and row.get("market_type") ==
+                    "SPORTS_MARKET_TYPE_MONEYLINE" and
+                    {team.get("name") for team in (row.get("teams") or ())} == set(market.participants)]
+            if not rows:
+                return None
+            if len(rows) != 1:
+                return "Multiple native moneylines name the same teams; exact question is ambiguous"
+            row = rows[0]
+            event_start, native_start = _clock(row.get("event_start")), _clock(row.get("market_start"))
+            if event_start is None or native_start is None:
+                return "Native event or market start time is missing"
+            if event_start != native_start:
+                return "Native event and market start times conflict"
+            if abs((native_start-market.start_time).total_seconds()) > 120:
+                return "Native start differs from sportsbook start beyond the exact-match window"
+            if (rule_start := _rule_start(row.get("rules"))) is not None and rule_start != native_start:
+                return "Native written-rule start conflicts with the catalog"
+            if row.get("status") != "MARKET_STATUS_OPEN" or not row.get("active"):
+                return "Native market is not affirmatively open"
+            sides = row.get("sides") or ()
+            if (len(sides) != 2 or {side.get("long") for side in sides} != {True, False}
+                    or not all(side.get("tradable") for side in sides)):
+                return "Native LONG/SHORT side identities or tradability are incomplete"
+            return "Native question, written rules, or team-side identity failed exact matching"
+        if venue == "prophetx":
+            events = [event for event in getattr(monitor, "research_events", {}).values()
+                if event.get("name") == market.event_name]
+            if not events:
+                return None
+            if market.market_type == "player_prop":
+                return "Event is discovered, but no active two-strike prop has the exact player, statistic, threshold and explicit period"
+            return "Event is discovered, but no active two-strike market has the exact normal winner identity"
+        if venue == "novig" and market.market_type == "player_prop":
+            from .native_research import NOVIG_PROP_TYPES
+            expected = NOVIG_PROP_TYPES.get(market.statistic)
+            rows = [row for row in getattr(monitor, "research_catalog_rows", ())
+                if row.get("marketType") == expected and type(row.get("startsTs")) is int
+                and abs(row["startsTs"]-int(market.start_time.timestamp()*1000)) <= 120000]
+            if rows and not getattr(monitor, "research_events", {}):
+                return "Plausible prop catalog rows exist, but authoritative native event details are unavailable"
+            if rows:
+                return "Plausible prop catalog rows exist, but player, statistic, threshold, period or opposing sides do not match exactly"
+        return None
 
     def research_comparisons(self, market, fair, *, pricing_config=None):
         """Compare research fair values with existing read-only native streams.
