@@ -283,18 +283,24 @@ def research_native_estimate(market: Market, fair: FairValue, book: NativeBook,
     if payout <= 0 or debit <= 0:
         raise NoSignal("Native cash units do not support a minimum-lot comparison")
     outcome = instrument.outcome
-    expected_profit = fair.probabilities[outcome] * payout - cost - fee_cap
-    sensitivity_profit = (fair.sensitivity_probabilities[outcome] * payout - cost - fee_cap
+    def estimated_fee(probability):
+        return (probability * fee_cap if book.fee_bound.fee_payment_timing == "winnings_only"
+                else fee_cap)
+    expected_fee = estimated_fee(fair.probabilities[outcome])
+    expected_profit = fair.probabilities[outcome] * payout - cost - expected_fee
+    sensitivity_profit = (fair.sensitivity_probabilities[outcome] * payout - cost
+                          - estimated_fee(fair.sensitivity_probabilities[outcome])
                           if fair.sensitivity_probabilities else None)
     return {"market_id": market.id, "venue": instrument.venue,
             "native_market_id": instrument.instrument_id, "outcome": outcome,
             "price": str(level.price), "minimum_quantity": str(quantity),
             "available_at_best_price": str(level.quantity),
             "cash_cost_usd": str(cost), "conservative_fee_usd": str(fee_cap),
+            "expected_fee_usd": str(expected_fee),
             "fee_payment_timing": book.fee_bound.fee_payment_timing,
             "maximum_debit_usd": str(debit), "normal_winning_payout_usd": str(payout),
             "maximum_loss_usd": str(debit),
-            "expected_profit_usd": str(expected_profit), "roi": str(expected_profit / (cost + fee_cap)),
+            "expected_profit_usd": str(expected_profit), "roi": str(expected_profit / (cost + expected_fee)),
             "sensitivity_expected_profit_usd": str(sensitivity_profit) if sensitivity_profit is not None else None,
             "positive_estimate": expected_profit > 0 and (sensitivity_profit is None or sensitivity_profit > 0),
             "quality_mode": config.reference_quality_mode,
@@ -315,21 +321,30 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
     if not payout or not cost:
         raise NoSignal("Native order size is below representable cash bounds")
     non_decisive = bounds.non_decisive_probability()
-    # Refunded cost earns no edge; retain the entire fee cap even when a
-    # venue might return some fees. Use the worse endpoint for negative edges.
+    # Refunded cost earns no edge. For a verified winnings-only fee, the
+    # conservative fee bound is incurred on a win, not on a loss; all other
+    # fee timing remains the old full-cap assumption.
     def profit_at(p):
         binary_profit = p * payout - cost
-        return min(binary_profit, (1 - non_decisive) * binary_profit) - intent.max_fee_usd
+        fee = p * intent.max_fee_usd if intent.fee_payment_timing == "winnings_only" else intent.max_fee_usd
+        return min(binary_profit, (1 - non_decisive) * binary_profit) - fee
     expected_profit = profit_at(probability)
     ev = expected_profit / payout
-    roi = expected_profit / intent.maximum_economic_cost_usd
+    expected_cost = cost + (probability * intent.max_fee_usd
+                            if intent.fee_payment_timing == "winnings_only" else intent.max_fee_usd)
+    roi = expected_profit / expected_cost
     sensitivity_p = (fair.sensitivity_probabilities[intent.instrument.outcome] - margin
                      if fair.sensitivity_probabilities else None)
     if sensitivity_p is not None and not 0 <= sensitivity_p <= 1:
         raise NoSignal("Pilot uncertainty allowance exceeds sensitivity probability")
     sensitivity_profit = profit_at(sensitivity_p) if sensitivity_p is not None else None
     sensitivity_ev = sensitivity_profit / payout if sensitivity_profit is not None else None
-    sensitivity_roi = sensitivity_profit / intent.maximum_economic_cost_usd if sensitivity_profit is not None else None
+    sensitivity_cost = None
+    if sensitivity_p is not None:
+        sensitivity_fee = (sensitivity_p * intent.max_fee_usd
+                           if intent.fee_payment_timing == "winnings_only" else intent.max_fee_usd)
+        sensitivity_cost = cost + sensitivity_fee
+    sensitivity_roi = sensitivity_profit / sensitivity_cost if sensitivity_profit is not None else None
     qualified = ev >= config.min_ev and roi >= config.min_roi and (
         sensitivity_ev is None or sensitivity_ev >= config.min_ev and sensitivity_roi >= config.min_roi)
     reasons = () if qualified else ("Both primary and sensitivity models must meet native EV and ROI thresholds",)

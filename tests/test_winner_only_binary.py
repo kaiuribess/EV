@@ -14,7 +14,8 @@ from evplatform.core.models import Market, Quote, Settlement
 from evplatform.core.native_accounting import NativeInstrument, NativePriceBand
 from evplatform.core.native_pricing import (
     NativeBook, NativeFeeBound, NativeLevel, instrument_fingerprint,
-    WinnerOnlyNormalOutcome, _settlement_bounds, native_opportunity, settlement_fingerprint,
+    WinnerOnlyNormalOutcome, _settlement_bounds, native_opportunity,
+    research_native_estimate, settlement_fingerprint,
 )
 from evplatform.core.pricing import NoSignal, fair_value, validate_fair_references
 from evplatform.core.reference_profiles import ProfileSelector, ReferenceFreshnessRule, ReferenceProfile
@@ -116,6 +117,33 @@ def test_normal_binary_families_use_same_pricing_engine(market):
         - candidate.intent.maximum_cost_usd - candidate.intent.max_fee_usd)
     assert candidate.roi == candidate.expected_profit_usd / candidate.intent.reserved_cost_usd
     assert all(not row["settlement_equivalence_verified"] for row in fair.references)
+
+
+def test_prophetx_winnings_only_fee_is_probability_weighted_in_research():
+    market = market_case()
+    quotes, config = strict_case(market, odds={"home": D("1.5"), "away": D("2.25")})
+    fair = fair_value(market, quotes, config, NOW)
+    instrument = NativeInstrument(venue="prophetx", instrument_id="fixture-strike",
+        canonical_market_id=market.id, outcome="home", native_outcome="fixture-home",
+        quantity_unit="usd_stake", price_format="american", payout_per_unit_usd=None,
+        quantity_step="1", minimum_quantity="1", minimum_order_cost_usd="1",
+        order_minimum_verified=True, order_minimum_source="OFFLINE $1 minimum fixture",
+        cash_quantum_usd="0.01", verified=True, source="OFFLINE exact identity fixture",
+        settlement_rules_fingerprint=settlement_fingerprint(market))
+    fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
+        per_unit_usd="0.02", per_fill_usd="0", fixed_order_usd="0",
+        fee_payment_timing="winnings_only", verified=True, source="OFFLINE fee cap fixture",
+        observed_at=NOW-timedelta(minutes=1), valid_until=NOW+timedelta(minutes=1))
+    book = NativeBook(instrument=instrument, market_fingerprint=market.identity(),
+        asks=(NativeLevel(price="100", quantity="5"),), fee_bound=fee,
+        source_time=NOW-timedelta(milliseconds=100), received_at=NOW,
+        revision=1, synchronized=True)
+    result = research_native_estimate(market, fair, book, config, now=NOW)
+    p = fair.probabilities["home"]
+    assert D(result["expected_fee_usd"]) == p * D("0.02")
+    assert D(result["expected_profit_usd"]) == p * D("1.98") - 1
+    assert result["maximum_debit_usd"] == result["maximum_loss_usd"] == "1"
+    assert not result["execution_eligible"]
 
 
 def test_three_way_soccer_draw_is_in_probability_distribution():

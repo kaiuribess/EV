@@ -59,7 +59,13 @@ def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_
         # Match size may be much smaller than the NEW order minimum. Reserve
         # for a cash rounding loss on every smallest legal partial match.
         gross = ins.minimum_split_payout(quantity, price) / quantity
-        unit_cost = economic_cost / quantity
+        if book.fee_bound.fee_payment_timing == "winnings_only":
+            # The maximum fee is paid only when the outcome wins. Keep the
+            # full bound on that branch, with no fictitious fee on a loss.
+            gross -= (economic_cost - cost) / quantity
+            unit_cost = cost / quantity
+        else:
+            unit_cost = economic_cost / quantity
         p = probability * (1 - bounds.non_decisive_probability())
         fraction = max(D(0), min(D(1), (p * gross - unit_cost) / (gross - unit_cost))) if gross > unit_cost else D(0)
         budget = cash * D("0.25") * fraction

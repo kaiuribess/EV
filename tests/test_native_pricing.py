@@ -340,7 +340,9 @@ def test_prophetx_one_dollar_limit_keeps_win_fee_in_ev_but_not_debit(market, quo
     found = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
         mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
     assert found.intent.quantity == D("1") and found.intent.reserved_cost_usd == D("1")
-    assert found.intent.max_fee_usd == D(".02") and found.expected_profit_usd == D(".18")
+    assert found.intent.max_fee_usd == D(".02") and found.expected_profit_usd == D(".188")
+    assert abs(found.sizing.full_kelly_fraction - D(".188") / D(".98")) < D("1e-26")
+    assert found.roi == D(".188") / D("1.012")
     assert found.sizing.minimum_cost_with_fees_usd == D("1.02")
     assert found.sizing.minimum_upfront_debit_usd == D("1")
     with pytest.raises(NoSignal, match="minimum upfront debit"):
@@ -354,6 +356,11 @@ def test_prophetx_one_dollar_limit_keeps_win_fee_in_ev_but_not_debit(market, quo
 
 
 def test_prophetx_one_dollar_no_forced_kelly_and_fee_negative_reject(market, quotes):
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes, fair_probability=".505")
+    before_fee = fair.probabilities["home"] * D("2") - D("1")
+    negative = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+        mode="sandbox", stake_sizing="capped", now=now)
+    assert before_fee > 0 and negative.expected_profit_usd < 0 and not negative.qualified
     m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes, fair_probability=".509")
     with pytest.raises(NoSignal, match="below the verified native minimum"):
         native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
