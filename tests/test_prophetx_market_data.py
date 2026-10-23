@@ -66,6 +66,7 @@ def test_prop_scope_must_match_catalog_and_exact_strike_identity():
     data = seeded()
     data.apply(frame(300, subtype="player_to_record_a_double_double"), received_at=NOW)
     assert data.snapshot(now=NOW, connected=True)["current_player_prop_markets"] == 1
+    assert data.snapshot(now=NOW, connected=True, limit=1)["current_player_prop_samples"][0]["executable_stake_usd"] != "0"
     wrong_scope = frame(300, subtype="player_total_points")
     data.apply(wrong_scope, received_at=NOW)
     assert data.rejected_frames == 1

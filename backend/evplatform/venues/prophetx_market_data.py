@@ -236,5 +236,7 @@ class ProphetXMarketData:
                                              if r["stream_current"] and r["channel_scope_sub_type"] is None}),
                 "current_player_prop_markets": len({(r["event_id"], r["market_id"]) for r in rows
                                                     if r["stream_current"] and r["channel_scope_sub_type"] is not None}),
+                "current_player_prop_samples": [r for r in rows
+                                                if r["stream_current"] and r["channel_scope_sub_type"] is not None][:5],
                 "levels": rows[:limit], "truncated": len(rows) > limit,
                 "read_only": True, "execution_mapping_verified": False}
