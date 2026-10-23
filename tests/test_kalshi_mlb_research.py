@@ -126,6 +126,11 @@ def test_research_diagnostics_distinguish_catalog_mapping_depth_expiry_and_net_e
     positive = [{"net_estimated_profit_usd": "0.01"}]
     assert NativeRuntime.research_discovery_status(runtime, market, negative)[0] == "nonpositive_net_ev"
     assert NativeRuntime.research_discovery_status(runtime, market, positive)[0] == "provisional_positive"
+    no_allowance = [{"fee_adjusted_estimated_profit_usd": "-0.007"},
+                    {"fee_adjusted_estimated_profit_usd": "-0.02"}]
+    assert NativeRuntime.research_discovery_status(runtime, market, no_allowance)[0] == "nonpositive_net_ev"
+    mixed_unknown = [*negative, {"price": "0.5", "fee_adjusted_estimated_profit_usd": "0.02"}]
+    assert NativeRuntime.research_discovery_status(runtime, market, mixed_unknown)[0] == "economics_unavailable"
 
 
 def test_five_series_config_remains_bounded():

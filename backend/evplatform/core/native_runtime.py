@@ -155,10 +155,13 @@ class NativeRuntime:
 
         if comparisons:
             priced = [item for item in comparisons if item.get("net_estimated_profit_usd") is not None]
-            if priced:
-                if any(Decimal(item["net_estimated_profit_usd"]) > 0 for item in priced):
-                    return "provisional_positive", "Current native depth has a positive research estimate after fees and the configured uncertainty allowance; mapping and execution remain unapproved"
+            if any(Decimal(item["net_estimated_profit_usd"]) > 0 for item in priced):
+                return "provisional_positive", "Current native depth has a positive research estimate after fees and the configured uncertainty allowance; mapping and execution remain unapproved"
+            if len(priced) == len(comparisons):
                 return "nonpositive_net_ev", "Valid simultaneous references and native depth were compared; no direction has positive net estimated EV after fees and the configured uncertainty allowance"
+            if all(item.get("fee_adjusted_estimated_profit_usd") is not None and
+                   Decimal(item["fee_adjusted_estimated_profit_usd"]) <= 0 for item in comparisons):
+                return "nonpositive_net_ev", "Every fee-adjusted estimate is nonpositive; any nonnegative source-uncertainty allowance can only reduce it further (allowance is not configured)"
             if any(item.get("rejection") == "No synchronized executable opposing bid depth" for item in comparisons):
                 return "matched_no_depth", "An exact native discovery lead exists, but its monitored book has no synchronized executable opposing bid depth"
             if any(item.get("price") is not None for item in comparisons):
