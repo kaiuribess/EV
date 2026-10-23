@@ -31,6 +31,7 @@ from .plugins.positive_ev import PositiveEV
 from .plugins.native_positive_ev import NativePositiveEV
 from .plugins.parlay_paper import ParlayPaperEV, ParlayPaperInput
 from .plugins.oddize_paper import OddizePaperInput
+from .plugins.oddize_research import OddizeResearchInput
 
 
 class Notice(Contract):
@@ -72,8 +73,11 @@ class Engine:
         self.opportunities = {}
         self.reference_estimates = {}
         self.reference_fairs = {}
+        self.consensus_estimates = {}
+        self.consensus_fairs = {}
         self.research_history = deque(maxlen=100)
         self._last_current_research = {}
+        self._last_current_consensus = {}
         self.signals = {}
         # Full raw inputs stay in the audit log. Repeating an unchanged
         # no-candidate evaluation for the same market every feed tick otherwise
@@ -100,6 +104,7 @@ class Engine:
             and not self.settings.sample_feed_enabled))
         self.registry.register(ParlayPaperInput(self), enabled=False)
         self.registry.register(OddizePaperInput(self), enabled=False)
+        self.registry.register(OddizeResearchInput(self), enabled=(self.settings.mode == "production"))
         self.registry.register(self.paper, enabled=True)
         self.registry.configure("synthetic_schedule", {"interval": self.settings.demo_interval, "seed": self.settings.demo_seed})
         self.registry.configure("positive_ev", self.settings.pricing.model_dump(mode="json"))
@@ -306,8 +311,11 @@ class Engine:
         identity = market.identity()
         now_monotonic = time.monotonic()
         input_presence = (bool(self.quotes.get(market.id)), bool(self.books.get(market.id)))
-        estimate = self.reference_estimates.get(market.id)
-        estimate_fingerprint = (tuple(sorted(estimate["probabilities"].items())) if estimate else None)
+        sharp = self.reference_estimates.get(market.id)
+        consensus = self.consensus_estimates.get(market.id)
+        estimate_fingerprint = (
+            tuple(sorted(sharp["probabilities"].items())) if sharp else None,
+            tuple(sorted(consensus["probabilities"].items())) if consensus else None)
         previous = self._signal_audit_state.get(market.id)
         if (status in {"NO SIGNAL", "RESEARCH ONLY"} and previous is not None
                 and previous[0] == identity and previous[1] == status
@@ -508,7 +516,7 @@ class Engine:
                     native_rejections.append(str(exc))
             self.reference_fairs[market_id] = fair
             self.reference_estimates[market_id] = {
-                "market_id": market_id, "event_name": market.event_name,
+                "market_id": market_id, "strategy": "sharp_books", "event_name": market.event_name,
                 "sport": market.sport, "league": market.league,
                 "market_type": market.market_type, "player": market.player,
                 "statistic": market.statistic,
@@ -533,10 +541,51 @@ class Engine:
             self._archive_research(market_id, str(exc))
             self.reference_estimates.pop(market_id, None)
             self.reference_fairs.pop(market_id, None)
+        self.refresh_consensus_estimate(market_id)
 
-    def _archive_research(self, market_id, reason):
+    def refresh_consensus_estimate(self, market_id):
+        """Price a second, order-isolated research strategy from the same quotes."""
+        market = self.markets[market_id]
+        if market.extensions.get("paper_only"):
+            return
+        from .core.multi_book_consensus import consensus_fair_value, leave_one_book_out
+
+        try:
+            fair, _, weighting = consensus_fair_value(market,
+                list(self.quotes.get(market_id, {}).values()), self.settings.pricing)
+            self.consensus_fairs[market_id] = fair
+            self.consensus_estimates[market_id] = {
+                "market_id": market_id, "strategy": "multi_book_consensus",
+                "event_name": market.event_name, "sport": market.sport,
+                "league": market.league, "market_type": market.market_type,
+                "player": market.player, "statistic": market.statistic,
+                "line": str(market.line) if market.line is not None else None,
+                "start_time": market.start_time.isoformat(),
+                "probabilities": {key: str(value) for key, value in fair.probabilities.items()},
+                "references": list(fair.references), "model": fair.model,
+                "reference_profile_id": fair.reference_profile_id,
+                "weighting_basis": weighting, "independent_book_count": len(fair.references),
+                "book_corroboration": "three_or_more" if len(fair.references) >= 3 else "two_book_baseline",
+                "reference_disagreement_probability": str(fair.disagreement),
+                "leave_one_book_out": leave_one_book_out(fair),
+                "quality_mode": "trusted_provider", "execution_eligible": False,
+                "native_market_matched": False, "native_research_estimates": [],
+                "limitations": ["Research only; no consensus strategy execution approval",
+                    "Unknown active status and quote-observation age remain explicit per book",
+                    "Book weights are research assumptions, not calibrated probabilities"],
+                "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
+                "status": "REFERENCE ESTIMATE",
+            }
+        except NoSignal as exc:
+            self._archive_research(market_id, str(exc), strategy="multi_book_consensus")
+            self.consensus_estimates.pop(market_id, None)
+            self.consensus_fairs.pop(market_id, None)
+
+    def _archive_research(self, market_id, reason, *, strategy="sharp_books"):
         """Retain the last evaluated evidence with its original clocks, never as a live offer."""
-        previous = self._last_current_research.pop(market_id, None)
+        cache = (self._last_current_research if strategy == "sharp_books" else
+                 self._last_current_consensus)
+        previous = cache.pop(market_id, None)
         if previous is None:
             return
         self.research_history.append({**previous, "historical": True,
@@ -551,15 +600,31 @@ class Engine:
     def public_reference_estimates(self):
         """Use current monitored depth without querying a venue or routing orders."""
         result = []
-        for market_id, row in self.reference_estimates.items():
-            market, fair = self.markets.get(market_id), self.reference_fairs.get(market_id)
-            if market and fair and market_config(self.settings.pricing, market).reference_quality_mode == "trusted_provider":
+        for strategy, estimates, fairs in (("multi_book_consensus", getattr(self, "consensus_estimates", {}),
+                                            getattr(self, "consensus_fairs", {})),
+                                           ("sharp_books", self.reference_estimates,
+                                            self.reference_fairs)):
+          for market_id, row in estimates.items():
+            market, fair = self.markets.get(market_id), fairs.get(market_id)
+            pricing = getattr(getattr(self, "settings", None), "pricing", None)
+            if strategy == "multi_book_consensus" and market:
+                from .core.multi_book_consensus import consensus_scope
                 try:
-                    validate_fair_references(market, fair, self.settings.pricing, utcnow())
+                    pricing, _ = consensus_scope(market,
+                        list(self.quotes.get(market_id, {}).values()), pricing)
                 except NoSignal as exc:
-                    self._archive_research(market_id, str(exc))
+                    self._archive_research(market_id, str(exc), strategy=strategy)
+                    continue
+            if market and fair and pricing is not None and (strategy == "multi_book_consensus" or
+                    market_config(self.settings.pricing, market).reference_quality_mode == "trusted_provider"):
+                try:
+                    validate_fair_references(market, fair, pricing, utcnow())
+                except NoSignal as exc:
+                    self._archive_research(market_id, str(exc), strategy=strategy)
                     continue  # Keep the historical audit record, not a stale live card.
-            comparisons = self.native.research_comparisons(market, fair) if market and fair else []
+            comparisons = (self.native.research_comparisons(market, fair, pricing_config=pricing)
+                if strategy == "multi_book_consensus" and market and fair else
+                self.native.research_comparisons(market, fair) if market and fair else [])
             # A discovery lead's prior calculation can outlive its native
             # stream. Keep reviewed native mappings on their existing path.
             research_lead = bool(market and market.extensions.get("research_only"))
@@ -580,7 +645,9 @@ class Engine:
                                for item in all_estimates) else
                                "REFERENCE ESTIMATE" if research_lead else row["status"])}
             if row["quality_mode"] == "trusted_provider":
-                self._last_current_research[market_id] = displayed
+                cache = (self._last_current_consensus if strategy == "multi_book_consensus" else
+                         self._last_current_research)
+                cache[market_id] = displayed
             result.append(displayed)
         return result
 

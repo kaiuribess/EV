@@ -64,7 +64,10 @@ class ProviderBridge(InputPlugin):
                         provider_id="parlay_game_ws", kind="feed_invalidated",
                         payload={"sport": sport}, received_at=now, metadata={"sport": sport})))
         oddize_paper = self.engine.registry.records.get("oddize_paper_input")
-        if self.manifest.name == "oddize_rest" and oddize_paper and oddize_paper.enabled:
+        oddize_research = self.engine.registry.records.get("oddize_research_input")
+        if (self.manifest.name == "oddize_rest" and
+                ((oddize_paper and oddize_paper.enabled) or
+                 (oddize_research and oddize_research.enabled))):
             await self.context.bus.publish(Envelope(schema_name="provider.frame",
                 source=self.manifest.name, payload=ProviderFrame(
                     provider_id="oddize_rest", kind="feed_invalidated", payload={},
@@ -83,14 +86,21 @@ class ProviderBridge(InputPlugin):
                 # paper-only consumers; opening duplicate provider sockets can
                 # hit account connection limits and split snapshot state.
                 paper = self.engine.registry.records.get("parlay_paper_input")
-                if (self.manifest.name == "parlay_game_ws" and paper and paper.enabled):
+                oddize_research = self.engine.registry.records.get("oddize_research_input")
+                if (self.manifest.name == "parlay_game_ws" and
+                        ((paper and paper.enabled) or
+                         (oddize_research and oddize_research.enabled and
+                          raw.kind in {"initial_state", "feed_invalidated", "disconnected", "reconnect"}))):
                     await self.context.bus.publish(Envelope(schema_name="provider.frame",
                         source=self.manifest.name, payload=ProviderFrame(
                             provider_id=raw.provider_id, kind=raw.kind, payload=raw.payload,
                             received_at=raw.received_at, published_at=raw.published_at,
                             snapshot_complete=raw.snapshot_complete, metadata=raw.metadata)))
                 oddize_paper = self.engine.registry.records.get("oddize_paper_input")
-                if (self.manifest.name == "oddize_rest" and oddize_paper and oddize_paper.enabled
+                oddize_research = self.engine.registry.records.get("oddize_research_input")
+                if (self.manifest.name == "oddize_rest"
+                        and ((oddize_paper and oddize_paper.enabled)
+                             or (oddize_research and oddize_research.enabled))
                         and raw.kind in {"snapshot", "feed_invalidated"}):
                     await self.context.bus.publish(Envelope(schema_name="provider.frame",
                         source=self.manifest.name, payload=ProviderFrame(
@@ -526,7 +536,8 @@ class NativeMonitor(Plugin):
             novig_moneyline_matches, novig_prop_matches, prophetx_matches)
         if self.manifest.name not in {"kalshi", "novig", "polymarket_us", "prophetx"} or self.research_catalog_at is None:
             return []
-        markets = [self.engine.markets[market_id] for market_id in self.engine.reference_estimates
+        research_ids = set(self.engine.reference_estimates) | set(getattr(self.engine, "consensus_estimates", {}))
+        markets = [self.engine.markets[market_id] for market_id in research_ids
                    if market_id in self.engine.markets]
         source_ids = frozenset(market.id for market in markets)
         if self.manifest.name == "kalshi":
@@ -615,7 +626,8 @@ class NativeMonitor(Plugin):
     def _research_match_refresh_due(self, elapsed: int) -> bool:
         engine = getattr(self, "engine", None)
         return (elapsed % 30 == 0 or engine is not None and
-                frozenset(engine.reference_estimates) != self._last_research_source_ids)
+                frozenset(set(engine.reference_estimates) |
+                          set(getattr(engine, "consensus_estimates", {}))) != self._last_research_source_ids)
 
     async def _discover_kalshi_periodically(self):
         try:

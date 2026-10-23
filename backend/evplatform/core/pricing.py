@@ -168,7 +168,7 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
     missing = set(config.required_books) - set(by_book)
     if missing:
         raise NoSignal("Required reference unavailable: " + ", ".join(sorted(missing)))
-    if profile and not set(profile.required_any_anchor) & set(by_book):
+    if profile and profile.required_any_anchor and not set(profile.required_any_anchor) & set(by_book):
         raise NoSignal("No required reference-profile anchor is available")
     probabilities = {book: devig(q.decimal_odds, config.devig_method) for book, q in by_book.items()}
     disagreement = max(max(p[outcome] for p in probabilities.values()) -
@@ -389,7 +389,7 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
         books.add(bookmaker)
     if len(books) < config.min_references or set(config.required_books) - books:
         raise NoSignal("Independent reference requirements are no longer satisfied")
-    if profile and not set(profile.required_any_anchor) & books:
+    if profile and profile.required_any_anchor and not set(profile.required_any_anchor) & books:
         raise NoSignal("Required reference-profile anchor is no longer available")
     if not fair.disagreement.is_finite() or fair.disagreement < 0 or (
             (profile is None or fair.execution_eligible) and fair.disagreement > config.max_disagreement):

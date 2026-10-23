@@ -52,7 +52,9 @@ class ReferenceProfile(BaseModel):
     selectors: tuple[ProfileSelector, ...] = Field(min_length=1)
     phase: Literal["pregame"] = "pregame"
     weights_percent: dict[str, Decimal]
-    required_any_anchor: tuple[str, ...] = Field(min_length=1)
+    # Empty is permitted only for a separately labeled research consensus.
+    # Existing sharp profiles retain their configured anchor requirements.
+    required_any_anchor: tuple[str, ...] = ()
     min_distinct_books: int = Field(ge=1)
     status: str = Field(min_length=1)
     live_execution_allowed: bool = False
@@ -69,6 +71,8 @@ class ReferenceProfile(BaseModel):
             raise ValueError("Profile weights must be finite, positive and sum to 100")
         if self.min_distinct_books > len(self.weights_percent):
             raise ValueError("Profile quorum exceeds its eligible bookmaker count")
+        if not self.required_any_anchor and (self.status != "research_only" or self.live_execution_allowed):
+            raise ValueError("Anchor-free profiles must remain explicitly research-only")
         if len(set(self.required_any_anchor)) != len(self.required_any_anchor) or set(self.required_any_anchor) - set(self.weights_percent):
             raise ValueError("Anchors must be distinct eligible canonical bookmakers")
         if len({selector.key() for selector in self.selectors}) != len(self.selectors):

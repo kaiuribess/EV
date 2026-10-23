@@ -287,6 +287,7 @@ documentation. Their exact scope and evidence are in:
 - [Oddize free REST setup and actual validation](docs/ODDIZE.md)
 - [Signal history, grading and safety controls](docs/SIGNAL_TRACKING.md)
 - [Native launch checks and configuration](docs/GO_LIVE.md)
+- [Multi-book consensus research and limitations](docs/MULTI_BOOK_CONSENSUS.md)
 
 Every live provider is disabled by default and independent of the demo. Enabling
 a provider with no credentials reports a blocked state rather than crashing or

@@ -74,6 +74,14 @@ class PricingConfig(BaseModel):
     # provider estimates remain research-only unless the exact one-market
     # pilot is separately approved; they never inherit strict permission.
     reference_quality_mode: Literal["strict_verified", "trusted_provider"] = "strict_verified"
+    # An independent read-only strategy. It never changes the reference
+    # profile used by the central execution engine.
+    multi_book_consensus_enabled: bool = False
+    multi_book_consensus_books: list[str] = Field(default_factory=lambda: [
+        "fanduel", "draftkings", "caesars", "bet365", "betmgm", "betonline",
+        "pinnacle", "circa", "bookmaker", "ballys", "betrivers", "espnbet",
+        "hardrock", "pointsbet", "betparx", "sporttrade", "betway",
+    ])
     trusted_max_delivery_age_ms: int = Field(default=30000, ge=1000, le=600000)
     trusted_max_indicator_age_ms: int = Field(default=30000, ge=1000, le=600000)
     # Read-only sensitivity assumption. A missing value means that net EV
@@ -95,6 +103,9 @@ class PricingConfig(BaseModel):
         if (len(set(self.enabled_reference_profiles)) != len(self.enabled_reference_profiles)
                 or set(self.enabled_reference_profiles) - set(self.reference_profiles)):
             raise ValueError("Enabled reference profiles must name distinct registered profiles")
+        if (len(set(self.multi_book_consensus_books)) != len(self.multi_book_consensus_books)
+                or any(not book or book != book.strip() for book in self.multi_book_consensus_books)):
+            raise ValueError("Consensus books must be distinct reviewed sportsbook identities")
         selectors = [selector.key() for name in self.enabled_reference_profiles
                      for selector in self.reference_profiles[name].selectors]
         if len(selectors) != len(set(selectors)):

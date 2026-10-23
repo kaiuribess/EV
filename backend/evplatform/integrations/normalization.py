@@ -988,13 +988,16 @@ class TrustedSourceProjector:
                 continue
             market, quote = projected
             config = market_config(self.pricing_getter(), market)
-            if config.reference_quality_mode != "trusted_provider" or config.reference_profile_mode != "strict":
+            if config.reference_profile_mode != "strict" or not (
+                    config.reference_quality_mode == "trusted_provider"
+                    or config.multi_book_consensus_enabled):
                 continue
-            try:
-                if profile_for_market(config, market, envelope.received_at) is None:
+            if not config.multi_book_consensus_enabled:
+                try:
+                    if profile_for_market(config, market, envelope.received_at) is None:
+                        continue
+                except ValueError:
                     continue
-            except ValueError:
-                continue
             prior = self.active.get(key)
             if prior is not None and prior[0].id != market.id:
                 updates.append((prior[0], prior[1].model_copy(update={"status": "withdrawn"})))

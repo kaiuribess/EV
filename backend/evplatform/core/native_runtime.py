@@ -240,7 +240,7 @@ class NativeRuntime:
                                 f"Novig catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
         return reasons
 
-    def research_comparisons(self, market, fair):
+    def research_comparisons(self, market, fair, *, pricing_config=None):
         """Compare research fair values with existing read-only native streams.
 
         This path constructs dictionaries for display only. It never creates a
@@ -252,9 +252,10 @@ class NativeRuntime:
         from .pricing import NoSignal, market_config, validate_fair_references
 
         now = utcnow()
-        scoped = market_config(self.engine.settings.pricing, market)
+        pricing_config = pricing_config or self.engine.settings.pricing
+        scoped = market_config(pricing_config, market)
         try:
-            validate_fair_references(market, fair, self.engine.settings.pricing, now)
+            validate_fair_references(market, fair, pricing_config, now)
         except NoSignal:
             return []
         market_margins = scoped.trusted_research_market_margins
@@ -389,10 +390,25 @@ class NativeRuntime:
                 result["reference_books"] = [ref.get("bookmaker") for ref in fair.references]
                 result["catalog_age_ms"] = (now-match.catalog_observed_at).total_seconds()*1000
                 result["source_quality_mode"] = scoped.reference_quality_mode
+                result["reference_strategy"] = (
+                    "multi_book_consensus" if fair.reference_profile_id == "multi_book_consensus"
+                    else "sharp_books")
+                result["independent_book_count"] = len(fair.references)
                 result["uncertainty_allowance_policy"] = (
                     "exact_market_research_scenario" if market.id in market_margins else
                     "global_research_assumption" if margin is not None else "unconfigured")
                 result["uncertainty_allowance_probability"] = str(margin) if margin is not None else None
+                if fair.reference_profile_id == "multi_book_consensus" and result.get(
+                        "fee_adjusted_estimated_profit_usd") is not None:
+                    # Illustrations only. None of these authorizes execution or
+                    # supplies a default live allowance.
+                    after_fee = Decimal(result["fee_adjusted_estimated_profit_usd"])
+                    payout = Decimal(result["normal_payout_usd"])
+                    result["research_uncertainty_scenarios"] = [
+                        {"allowance_probability": str(example),
+                         "net_estimated_profit_usd": str(after_fee - example*payout),
+                         "approved": False} for example in
+                        (Decimal(0), Decimal("0.01"), Decimal("0.02"))]
                 snapshot = self.account_snapshots.get(venue)
                 cash = (snapshot.balance_usd if snapshot and snapshot.cash_available_verified
                         and (venue != "kalshi" or snapshot.exchange_index == match.exchange_index)

@@ -1,0 +1,97 @@
+"""Read-only, provider-trusted sportsbook consensus; never an order policy.
+
+The execution engine continues to use the configured sharp/strict profile.
+This module builds a separate exact-market profile from eligible sportsbook
+pairs and deliberately disables the one-market trusted pilot authorization.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+
+from .config import PricingConfig
+from .models import Market, Quote, utcnow
+from .pricing import NoSignal, fair_value, market_config
+from .reference_profiles import (ProfileSelector, ReferenceProfile,
+                                 trusted_quote_research_eligibility)
+
+SOURCES = frozenset({"parlay_rest", "parlay_ws", "parlay_game_ws", "oddize_rest"})
+
+
+def consensus_scope(market: Market, quotes: list[Quote], config: PricingConfig,
+                    now: datetime | None = None) -> tuple[PricingConfig, str]:
+    """Return an isolated pricing policy and an honest weighting description."""
+    now = now or utcnow()
+    scoped = market_config(config, market)
+    if not scoped.multi_book_consensus_enabled:
+        raise NoSignal("Multi-book consensus research is disabled")
+    if market.status != "scheduled" or market.start_time <= now:
+        raise NoSignal("Multi-book consensus currently supports pregame markets only")
+    allowed = set(scoped.multi_book_consensus_books)
+    eligible = {quote.bookmaker for quote in quotes
+        if quote.provider in SOURCES and quote.bookmaker in allowed
+        and quote.market_id == market.id and quote.market_fingerprint == market.identity()
+        and set(quote.decimal_odds) == set(market.outcomes)
+        and trusted_quote_research_eligibility(scoped, market, quote, now)[0]}
+    if len(eligible) < 2:
+        raise NoSignal("Fewer than two complete, eligible independent sportsbook pairs")
+    # Research priors are reused only when they cover *every* contributing
+    # book. Otherwise equal weights avoid inventing a ranking for new books.
+    priors = [(name, scoped.reference_profiles[name]) for name in scoped.enabled_reference_profiles
+        if any(selector.matches(market) for selector in scoped.reference_profiles[name].selectors)]
+    if len(priors) > 1:
+        raise NoSignal("Ambiguous research weight profiles")
+    prior_name, prior = priors[0] if priors else (None, None)
+    if prior is not None and eligible <= set(prior.weights_percent):
+        raw = {book: prior.weights_percent[book] for book in sorted(eligible)}
+        weighting = f"research_prior:{prior_name}"
+    else:
+        raw = {book: Decimal(1) for book in sorted(eligible)}
+        weighting = "neutral_equal_books_unranked"
+    total = sum(raw.values())
+    weights = {book: value * 100 / total for book, value in raw.items()}
+    # Decimal thirds do not sum to exactly 100 after finite division.
+    last = next(reversed(weights))
+    weights[last] += Decimal(100) - sum(weights.values())
+    selector = ProfileSelector(sport=market.sport, league=market.league,
+        market_type=market.market_type, statistic=market.statistic)
+    profile = ReferenceProfile(selectors=(selector,), weights_percent=weights,
+        required_any_anchor=(), min_distinct_books=2, status="research_only",
+        live_execution_allowed=False, note="No mandatory sharp-book anchor; never execution approved",
+        primary_devig=prior.primary_devig if prior else scoped.devig_method,
+        sensitivity_devig=prior.sensitivity_devig if prior else "proportional")
+    pilot = scoped.trusted_pilot_policy.model_copy(update={"enabled": False, "owner_approved": False})
+    research = scoped.model_copy(update={
+        "reference_profile_mode": "strict", "reference_quality_mode": "trusted_provider",
+        "reference_profiles": {"multi_book_consensus": profile},
+        "enabled_reference_profiles": ["multi_book_consensus"],
+        "eligible_books": sorted(eligible), "required_books": [], "weights": weights,
+        "min_references": 2, "trusted_pilot_policy": pilot, "market_overrides": {},
+    })
+    return research, weighting
+
+
+def consensus_fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
+                         now: datetime | None = None):
+    now = now or utcnow()
+    research, weighting = consensus_scope(market, quotes, config, now)
+    filtered = [quote for quote in quotes if quote.provider in SOURCES
+                and quote.bookmaker in research.eligible_books]
+    fair = fair_value(market, filtered, research, now)
+    if fair.execution_eligible or fair.live_execution_allowed:
+        raise NoSignal("Research consensus cannot authorize execution")
+    return fair, research, weighting
+
+
+def leave_one_book_out(fair) -> dict[str, dict[str, str]]:
+    """Sensitivity to dropping one book, using already devigged evidence."""
+    result = {}
+    for removed in fair.references:
+        remaining = [reference for reference in fair.references if reference is not removed]
+        if not remaining:
+            continue
+        total = sum(Decimal(reference["weight"]) for reference in remaining)
+        result[removed["bookmaker"]] = {outcome: str(sum(
+            Decimal(reference["probabilities"][outcome]) * Decimal(reference["weight"])
+            for reference in remaining) / total) for outcome in fair.probabilities}
+    return result
