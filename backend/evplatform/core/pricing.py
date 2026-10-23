@@ -334,11 +334,18 @@ def validate_fair_references(market: Market, fair: FairValue, config: PricingCon
                 receipt = datetime.fromisoformat(reference["local_receipt_at"])
                 poll = (datetime.fromisoformat(reference["source_scope_poll_at"])
                         if reference.get("source_scope_poll_at") else None)
+                observed = (datetime.fromisoformat(reference["source_observed_at"])
+                            if reference.get("observation_verified") and reference.get("source_observed_at")
+                            else None)
             except (TypeError, ValueError, KeyError) as exc:
                 raise NoSignal("Trusted provider delivery evidence is unavailable") from exc
             delivery_age = (now - receipt).total_seconds() * 1000
             if not 0 <= delivery_age <= config.trusted_max_delivery_age_ms:
                 raise NoSignal("Trusted provider delivery evidence expired")
+            if reference.get("observation_verified") and observed is None:
+                raise NoSignal("Verified sportsbook observation time is missing")
+            if observed is not None and not 0 <= (now - observed).total_seconds() * 1000 <= config.trusted_max_indicator_age_ms:
+                raise NoSignal("Verified sportsbook observation indicator expired")
             if poll is not None and not 0 <= (now - poll).total_seconds() * 1000 <= config.trusted_max_indicator_age_ms:
                 raise NoSignal("Trusted provider poll indicator expired")
             if reference.get("status") in {"suspended", "withdrawn"}:

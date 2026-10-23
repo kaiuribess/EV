@@ -20,7 +20,7 @@ from .core.native_oms import NativeOrder, NativeSettlement
 from .core.native_pricing import NativeBook, NativeCandidate
 from .core.native_runtime import NativeRuntime, NativeSignalObservation
 from .core.plugins import ExecutionVenue, InputPlugin, PluginContext, PluginRegistry, StrategyPlugin
-from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, resolved_reference_policy, worst_fee
+from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, resolved_reference_policy, validate_fair_references, worst_fee
 from .core.reference_profiles import freshness_rule, quote_eligibility, trusted_quote_research_eligibility
 from .core.risk import RiskEngine, RiskRejected
 from .core.signals import ResultProvenance, SignalLedger, SignalObservation, SignalResultImport
@@ -534,6 +534,11 @@ class Engine:
         result = []
         for market_id, row in self.reference_estimates.items():
             market, fair = self.markets.get(market_id), self.reference_fairs.get(market_id)
+            if market and fair and market_config(self.settings.pricing, market).reference_quality_mode == "trusted_provider":
+                try:
+                    validate_fair_references(market, fair, self.settings.pricing, utcnow())
+                except NoSignal:
+                    continue  # Keep the historical audit record, not a stale live card.
             comparisons = self.native.research_comparisons(market, fair) if market and fair else []
             all_estimates = [*row.get("native_research_estimates", []), *comparisons]
             result.append({**row, "native_market_matched": bool(comparisons) or row["native_market_matched"],

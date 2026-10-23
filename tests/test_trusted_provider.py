@@ -13,7 +13,7 @@ from evplatform.core.models import Envelope, utcnow
 from evplatform.core.native_accounting import NativeInstrument, NativePriceBand
 from evplatform.core.native_pricing import (NativeBook, NativeFeeBound, NativeLevel,
     instrument_fingerprint, native_opportunity, research_native_estimate)
-from evplatform.core.pricing import NoSignal, fair_value
+from evplatform.core.pricing import NoSignal, fair_value, validate_fair_references
 from evplatform.core.reference_profiles import ProfileSelector, ReferenceProfile
 from evplatform.engine import Engine
 from evplatform.integrations.base import ProviderEnvelope
@@ -84,6 +84,20 @@ def test_trusted_delivery_expires_without_relabeling_cached_price():
     market = updates[0][0]
     with pytest.raises(NoSignal, match="Insufficient"):
         fair_value(market, [q for _, q in updates], config(), NOW+timedelta(seconds=31))
+
+
+def test_cached_trusted_fair_expires_when_verified_source_indicator_ages_out():
+    _, updates = projected(frame())
+    market = updates[0][0]
+    quotes = [quote.model_copy(update={"source_scope_poll_at": None,
+              "source_observed_at": NOW-timedelta(seconds=1) if index == 0 else None,
+              "observation_verified": index == 0})
+              for index, (_, quote) in enumerate(updates)]
+    scoped = config().model_copy(update={"trusted_max_indicator_age_ms": 5000})
+    fair = fair_value(market, quotes, scoped, NOW)
+    validate_fair_references(market, fair, scoped, NOW+timedelta(seconds=2))
+    with pytest.raises(NoSignal, match="observation indicator expired"):
+        validate_fair_references(market, fair, scoped, NOW+timedelta(seconds=6))
 
 
 def test_research_game_delivery_window_can_be_scoped_without_changing_strict_ttl():
@@ -596,7 +610,7 @@ def test_source_prop_uses_exact_event_metadata_and_rejects_unknown_period():
 
 
 @pytest.mark.asyncio
-async def test_research_reference_reaches_dashboard_without_native_order(tmp_path):
+async def test_research_reference_reaches_dashboard_without_native_order(tmp_path, monkeypatch):
     now = utcnow()
     engine = Engine(Settings(_env_file=None, mode="production", live_enabled=False,
         auto_trade=False, sample_feed_enabled=False, database_path=str(tmp_path / "research.db"),
@@ -613,3 +627,5 @@ async def test_research_reference_reaches_dashboard_without_native_order(tmp_pat
     assert state["opportunities"] == [] and state["native_opportunities"] == []
     assert state["auto_trade"] is False and state["kill_switch"] is True
     assert state["orders"] == [] and state["native_orders"] == []
+    monkeypatch.setattr("evplatform.engine.utcnow", lambda: now+timedelta(seconds=31))
+    assert engine.public_reference_estimates() == []
