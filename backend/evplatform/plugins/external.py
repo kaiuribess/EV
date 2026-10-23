@@ -493,6 +493,16 @@ class NativeMonitor(Plugin):
         markets = [self.engine.markets[market_id] for market_id in self.engine.reference_estimates
                    if market_id in self.engine.markets]
         source_ids = frozenset(market.id for market in markets)
+        if self.manifest.name == "kalshi":
+            # A short-lived fair set should not spend its overlap window
+            # waiting for the exact native threshold's first book snapshot.
+            # Structural prewarming grants no source eligibility or mapping.
+            prewarm = sorted((market for market in self.engine.markets.values()
+                if market.id not in source_ids and market.extensions.get("research_only")
+                and market.league == "MLB" and market.market_type in {"moneyline", "total"}
+                and market.status == "scheduled" and market.start_time > self.research_catalog_at),
+                key=lambda market: (market.start_time, market.id))
+            markets.extend(prewarm[:self.context.config.get("max_discovered_markets", 8)])
         if self.manifest.name == "novig":
             # Market list rows expose codes and start but not the two full team
             # names. Fetch only a bounded set of plausible events and require
@@ -538,7 +548,8 @@ class NativeMonitor(Plugin):
         self.research_matches = result
         self._last_research_source_ids = source_ids
         if self.manifest.name == "kalshi":
-            events = list(dict.fromkeys(item.native_event_id for matches in result.values() for item in matches))[:8]
+            events = list(dict.fromkeys(item.native_event_id for market_id, matches in result.items()
+                if market_id in source_ids for item in matches))[:8]
             for event_id in events:
                 if event_id in self.research_fee_metadata:
                     continue

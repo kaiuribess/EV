@@ -137,6 +137,7 @@ def test_existing_monitor_selects_exact_mlb_catalog_rows_for_native_subscription
     game, total = source_market(), source_market("total", id="research:parlay:tbmil-total")
     monitor = SimpleNamespace(manifest=SimpleNamespace(name="kalshi"),
         research_catalog_at=OBSERVED, research_catalog_rows=[*game_rows(), *total_rows()],
+        context=SimpleNamespace(config={"max_discovered_markets": 16}),
         engine=SimpleNamespace(reference_estimates={game.id: {}, total.id: {}},
                                markets={game.id: game, total.id: total}),
         research_events={}, research_fee_metadata={GAME: {}, TOTAL: {}},
@@ -145,6 +146,43 @@ def test_existing_monitor_selects_exact_mlb_catalog_rows_for_native_subscription
     assert set(monitor.research_matches) == {game.id, total.id}
     assert set(priority) == {f"{GAME}-TB", f"{GAME}-MIL", f"{TOTAL}-7"}
     assert len(priority) == 3  # Both YES/NO directions share the same monitored ticker.
+
+
+def test_monitor_prewarms_exact_total_without_fair_or_fee_requests():
+    game, total = source_market(), source_market("total", id="research:parlay:tbmil-total")
+    series = ["KXNBAGAME", "KXNFLGAME", "KXMLBGAME", "KXNHLGAME", "KXMLBTOTAL"]
+    catalogs = {name: {"markets": [], "cursor": ""} for name in series}
+    for row in [*game_rows(), *total_rows()]:
+        row["occurrence_datetime"] = "2026-10-24T03:00:00Z"
+        catalogs[row["event_ticker"].split("-", 1)[0]]["markets"].append(row)
+    for name in ("KXNBAGAME", "KXNFLGAME", "KXNHLGAME"):
+        catalogs[name]["markets"] = [{"ticker": f"{name}-OTHER-{i}",
+            "event_ticker": f"{name}-OTHER", "status": "active", "market_type": "binary",
+            "occurrence_datetime": "2026-10-24T03:00:00Z"} for i in range(10)]
+
+    class PublicClient:
+        async def discover_markets(self, *, series_ticker, **_):
+            return catalogs[series_ticker]
+
+        async def request(self, *_args, **_kwargs):
+            raise AssertionError("No fee metadata is needed before a fair reference exists")
+
+    monitor = SimpleNamespace(manifest=SimpleNamespace(name="kalshi"), client=PublicClient(),
+        context=SimpleNamespace(config={"discovery_series": series, "max_discovered_markets": 16}),
+        research_catalog_at=None, research_catalog_rows=[], research_events={},
+        research_fee_metadata={}, research_matches={},
+        engine=SimpleNamespace(reference_estimates={}, markets={game.id: game, total.id: total}),
+        _last_research_source_ids=frozenset(), discovered_market_ids=[], discovery_status="disabled")
+
+    async def refresh():
+        return await NativeMonitor._refresh_research_matches(monitor)
+
+    monitor._refresh_research_matches = refresh
+    asyncio.run(NativeMonitor._refresh_kalshi_discovery(monitor))
+    assert f"{TOTAL}-7" in monitor.discovered_market_ids
+    assert monitor.discovered_market_ids[:3] == [f"{GAME}-TB", f"{GAME}-MIL", f"{TOTAL}-7"]
+    assert monitor.research_fee_metadata == {}
+    assert set(monitor.research_matches) == {game.id, total.id}
 
 
 def test_monitor_health_exposes_exact_catalog_and_subscription_scope_read_only():
