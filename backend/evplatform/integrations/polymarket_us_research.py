@@ -7,8 +7,10 @@ here creates an execution mapping or grants account authority.
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_EVEN
+from zoneinfo import ZoneInfo
 
 from ..core.models import Market
 from ..core.native_research import ResearchNativeMatch
@@ -24,6 +26,28 @@ def _clock(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
+
+
+_RULE_CLOCK = re.compile(
+    r"\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?) "
+    r"(?P<day>\d{1,2}), (?P<year>\d{4}) at (?P<hour>\d{1,2})"
+    r"(?::(?P<minute>\d{2}))?(?P<ampm>AM|PM) ET\b", re.IGNORECASE)
+
+
+def _rule_start(value: object) -> datetime | None:
+    """Read only an explicit Eastern rule clock; absence stays unreviewed."""
+    match = _RULE_CLOCK.search(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    try:
+        month = datetime.strptime(match["month"][:3].title(), "%b").month
+        hour = int(match["hour"]) % 12 + (12 if match["ampm"].upper() == "PM" else 0)
+        return datetime(int(match["year"]), month, int(match["day"]), hour,
+                        int(match["minute"] or "0"),
+                        tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def catalog_record(league: str, event: dict, market: dict, *, observed_at: datetime) -> dict:
@@ -68,7 +92,8 @@ def moneyline_matches(market: Market, rows: list[dict], *, observed_at: datetime
     """Require identical event, two named teams, full-game winner and clock."""
     if (market.market_type != "moneyline" or market.status != "scheduled"
             or len(market.outcomes) != 2 or set(market.outcomes) != set(market.participants)
-            or market.settlement.period != "full_game" or market.start_time <= observed_at):
+            or market.settlement.period.casefold() not in {"full", "full_game"}
+            or market.start_time <= observed_at):
         return []
     matches = []
     for row in rows:
@@ -78,14 +103,25 @@ def moneyline_matches(market: Market, rows: list[dict], *, observed_at: datetime
                 or not row.get("rules") or not row.get("question")):
             continue
         event_start, native_start = _clock(row.get("event_start")), _clock(row.get("market_start"))
-        if event_start is None or native_start is None or event_start != native_start or native_start != market.start_time.astimezone(timezone.utc):
+        if (event_start is None or native_start is None or event_start != native_start
+                or abs((native_start-market.start_time.astimezone(timezone.utc)).total_seconds()) > 900):
+            continue
+        # A 10-minute listed start versus actual tip is observed on the live
+        # NBA feeds. This tolerance creates only an UNAPPROVED research lead.
+        # When the rule text names an exact time, it must corroborate the
+        # native catalog clock; the Chicago listing currently does not.
+        rule_start = _rule_start(row.get("rules"))
+        if rule_start is not None and rule_start != native_start:
             continue
         teams = row.get("teams", [])
         sides = row.get("sides", [])
         if (len(teams) != 2 or len(sides) != 2
                 or {team["name"] for team in teams} != set(market.participants)
                 or {side["long"] for side in sides} != {True, False}
-                or not all(side["tradable"] for side in sides)):
+                or not all(side["tradable"] and side["description"]
+                           and side["description"].casefold() in row["question"].casefold()
+                           and side["description"].casefold() in row["rules"].casefold()
+                           for side in sides)):
             continue
         by_id = {team["id"]: team["name"] for team in teams}
         long, short = next(s for s in sides if s["long"]), next(s for s in sides if not s["long"])

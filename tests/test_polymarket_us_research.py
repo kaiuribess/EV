@@ -41,7 +41,7 @@ def native_catalog():
     market = {"slug": SLUG, "id": 1305786, "gameStartTime": START.isoformat(),
               "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
               "question": "Will the Chicago Bulls beat the Milwaukee Bucks?",
-              "description": "The full game includes overtime. Postponements may settle at fair price.",
+              "description": "Bulls versus Bucks full game includes overtime. Postponements may settle at fair price.",
               "active": True, "closed": False, "hidden": False, "archived": False,
               "status": "MARKET_STATUS_OPEN", "feeCoefficient": "0.0695",
               "minimumTradeQty": "0.01", "orderPriceMinTickSize": "0.01",
@@ -86,6 +86,24 @@ def test_ambiguous_duplicate_market_and_player_prop_do_not_match():
     prop = source_market(market_type="player_prop", player="A Player", player_id="A Player",
                          statistic="points", line=D("24.5"), outcomes=("over", "under"))
     assert moneyline_matches(prop, [row], observed_at=NOW) == []
+
+
+def test_ten_minute_tip_offset_is_research_only_when_rule_clock_agrees():
+    row = native_catalog()
+    row["rules"] = ("Bulls versus Bucks game originally scheduled for Oct 23, 2026 "
+                    "at 2:00PM ET. Overtime is included if played.")
+    leads = moneyline_matches(source_market(start_time=START+timedelta(minutes=10),
+                                            settlement=Settlement(period="FULL", overtime="unverified")),
+                              [row], observed_at=NOW)
+    assert len(leads) == 2 and all(not lead.public()["mapping_reviewed"] for lead in leads)
+    row["rules"] = row["rules"].replace("2:00PM", "8:00PM")
+    assert moneyline_matches(source_market(start_time=START+timedelta(minutes=10)),
+                             [row], observed_at=NOW) == []
+    row["rules"] = row["rules"].replace("8:00PM", "2:00PM")
+    assert moneyline_matches(source_market(start_time=START+timedelta(minutes=30)),
+                             [row], observed_at=NOW) == []
+    assert moneyline_matches(source_market(settlement=Settlement(period="FIRST_HALF")),
+                             [row], observed_at=NOW) == []
 
 
 def test_full_rest_book_fractional_depth_long_short_collateral_and_fee():
