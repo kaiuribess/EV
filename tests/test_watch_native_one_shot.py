@@ -36,6 +36,7 @@ def state(*, armed=False):
     return {"mode": "production", "sample_feed_enabled": False, "live_enabled": True,
             "auto_trade": armed, "kill_switch": not armed,
             "native_authorization_expires_at": (NOW+timedelta(hours=1)).isoformat() if armed else None,
+            "markets": [{"id": MARKET, "sport": "football", "market_type": "player_prop"}],
             "risk": risk}
 
 
@@ -130,6 +131,18 @@ def test_unapproved_or_wrong_market_never_arms(monkeypatch, tmp_path):
     assert gate.tick(now=NOW) == "waiting_for_approved_source_and_market_policy"
     assert ("POST", "/api/control") not in calls
     assert current["kill_switch"] is True
+
+
+def test_selected_market_override_is_checked_without_blocking_other_sports():
+    current = state()
+    policy = setup()
+    policy["pricing"]["market_overrides"] = {
+        "basketball:moneyline": {"reference_quality_mode": "strict_verified"},
+        "football:player_prop": {"reference_quality_mode": "trusted_provider"},
+    }
+    assert gate._scope(policy, current)[0] == "ready"
+    policy["pricing"]["market_overrides"]["football:player_prop"]["min_ev"] = "0.01"
+    assert gate._scope(policy, current)[0] == "waiting_for_approved_source_and_market_policy"
 
 
 def test_check_only_and_invalid_limits_make_zero_control_calls(monkeypatch, tmp_path):

@@ -142,21 +142,29 @@ def _scope(setup: dict, state: dict) -> tuple[str, str | None]:
     pricing = setup.get("pricing") or {}
     pilot = pricing.get("trusted_pilot_policy") or {}
     market_ids = {market.get("id") for p in profiles for market in p["markets"]}
-    if (pricing.get("reference_quality_mode") != "trusted_provider"
-            or pricing.get("normal_outcome_policy") != "winner_only_binary"
-            or pricing.get("reference_profile_mode") != "strict"
-            or (configured_ev := _money(pricing.get("min_ev"))) is None or configured_ev < MIN_EV
+    if market_ids != {pilot.get("exact_market_id")}:
+        return "waiting_for_approved_source_and_market_policy", None
+    market_rows = [market for market in state.get("markets", ())
+                   if market.get("id") == pilot.get("exact_market_id")]
+    if len(market_rows) != 1:
+        return "selected_market_not_in_current_canonical_state", None
+    market = market_rows[0]
+    override = (pricing.get("market_overrides") or {}).get(
+        f"{market.get('sport')}:{market.get('market_type')}", {})
+    if not isinstance(override, dict):
+        return "market_pricing_override_needs_one_shot_review", None
+    resolved = {**pricing, **override}
+    pilot = resolved.get("trusted_pilot_policy") or {}
+    if (resolved.get("reference_quality_mode") != "trusted_provider"
+            or resolved.get("normal_outcome_policy") != "winner_only_binary"
+            or resolved.get("reference_profile_mode") != "strict"
+            or (configured_ev := _money(resolved.get("min_ev"))) is None or configured_ev < MIN_EV
             or pilot.get("enabled") is not True or pilot.get("owner_approved") is not True
-            or market_ids != {pilot.get("exact_market_id")}
+            or pilot.get("exact_market_id") != market.get("id")
             or _money(pilot.get("uncertainty_margin_probability")) != MARGIN
             or (debit := _money(pilot.get("max_debit_usd"))) is None or debit > CAP
             or (loss := _money(pilot.get("max_loss_usd"))) is None or loss > CAP):
         return "waiting_for_approved_source_and_market_policy", None
-    overrides = pricing.get("market_overrides") or {}
-    if any(not isinstance(override, dict) or any(key in override for key in (
-            "min_ev", "trusted_pilot_policy", "reference_quality_mode",
-            "normal_outcome_policy", "reference_profile_mode")) for override in overrides.values()):
-        return "market_pricing_override_needs_one_shot_review", None
     if setup.get("safe_to_arm") is not True or (setup.get("activation") or {}).get("available") is not True:
         return "waiting_for_live_checks", None
     digest = (setup.get("activation") or {}).get("scope_digest")
