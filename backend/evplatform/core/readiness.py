@@ -253,6 +253,7 @@ class RuntimeReadiness(StrictRecord):
     settlement_reconciliation_supported: bool = False
     native_credentials_present: bool = False
     account_identity_verified: bool = False
+    geographic_attestation_current: bool = False
     unresolved_unknown_orders: int = Field(default=0, ge=0)
     reconciliation_discrepancies: int = Field(default=0, ge=0)
     native_pilot_prior_attempts: int = Field(default=0, ge=0)
@@ -389,6 +390,12 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         if set(profile.strategy_ids) != set(runtime.enabled_strategy_ids):
             block("profile.strategy_mismatch", "Enabled strategies differ from authorized strategies",
                   "Limit native routing to the exact approved strategy set", category="authorization")
+        if (profile.environment == "production" and profile.venue == "novig"
+                and not runtime.geographic_attestation_current):
+            block("account.geographic_attestation_missing",
+                  "Novig has no current account-bound location attestation in its runtime snapshot",
+                  "Obtain a venue-supported current location result bound to this trading account before arming",
+                  category="authorization", scope=profile.venue)
 
         feeds = {item.provider_id: item for item in runtime.feeds}
         if len(feeds) != len(runtime.feeds):

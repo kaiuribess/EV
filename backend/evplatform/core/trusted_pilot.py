@@ -26,12 +26,12 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
             or config.normal_outcome_policy != "winner_only_binary"
             or config.reference_profile_mode != "strict"):
         reasons.append("Trusted pilot requires the reviewed winner-only reference profile")
-    if (policy.exact_market_id != market.id or market.extensions.get("research_only")
-            or market.status != "scheduled" or market.start_time <= now):
-        reasons.append("Pilot market is not the exact reviewed upcoming pregame selection")
+    if (not policy.permits_market(market) or market.status != "scheduled"
+            or market.start_time <= now):
+        reasons.append("Pilot market is outside the reviewed exact selection or normal-question rule")
     books = {ref.get("bookmaker") for ref in references}
     providers = {ref.get("provider") for ref in references}
-    if (len(books) != len(references) or len(books) < max(2, config.min_references)
+    if (len(books) != len(references) or len(books) < max(policy.min_distinct_books, config.min_references)
             or not books <= set(policy.trusted_books)):
         reasons.append("Pilot references are duplicated, insufficient or outside approved books")
     if policy.independent_crosscheck == "two_distinct_books":
@@ -61,6 +61,9 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
             reasons.append(f"{book}: normal-outcome market identity is unreviewed")
         if ref.get("normal_outcome_verified") is not True or not ref.get("normal_outcome_evidence"):
             reasons.append(f"{book}: normal WIN/LOSS condition has no reviewed source evidence")
+        elif (policy.market_scope is not None and
+              policy.market_scope.reviewed_normal_rule_id not in ref["normal_outcome_evidence"]):
+            reasons.append(f"{book}: normal WIN/LOSS evidence is outside the approved rule")
         status = ref.get("status")
         if status in {"suspended", "withdrawn"} or status not in {"active", "unknown"}:
             reasons.append(f"{book}: sportsbook selection is unavailable")

@@ -41,6 +41,22 @@ def pilot_prior_attempts(orders) -> int:
                for order in orders)
 
 
+def current_geographic_attestation(snapshot, account_fingerprint: str,
+                                   environment: str, now: datetime) -> bool:
+    """Require an account-bound, unexpired native location result at dispatch.
+
+    An authenticated wallet, a production host, or a prior launch certificate
+    does not establish the account's present trading location. Venues without
+    a read-only attestation remain unable to submit automatically.
+    """
+    expiry = getattr(snapshot, "geographic_attestation_expires_at", None)
+    return bool(snapshot is not None and getattr(snapshot, "identity_verified", False)
+                and getattr(snapshot, "account_fingerprint", None) == account_fingerprint
+                and getattr(snapshot, "environment", None) == environment
+                and isinstance(expiry, datetime) and expiry.tzinfo is not None
+                and expiry.utcoffset() is not None and now < expiry)
+
+
 class NativeRuntime:
     def __init__(self, engine):
         self.engine = engine
@@ -764,7 +780,8 @@ class NativeRuntime:
                         or not p.validation_pilot
                         or p.limits.max_native_order_attempts != 1
                         or not pilot.enabled or not pilot.owner_approved
-                        or pilot.exact_market_id != order.market_id
+                        or not pilot.permits_market(market)
+                        or (pilot.market_scope is not None and pilot.market_scope.venue != order.venue)
                         or order.reserved_cost > min(pilot.max_debit_usd, pilot.max_loss_usd)):
                     raise RiskRejected("Trusted-provider pilot permits one scoped authorized attempt only")
                 if any(previous.id != order.id and previous.market_id == order.market_id
@@ -800,7 +817,11 @@ class NativeRuntime:
         if not preview_only:
             adapter = self.manager.adapters[order.venue]
             location_verified = (p.environment == "production" and
-                (order.venue != "prophetx" or self._prophetx_location_valid(order, adapter.client)))
+                (self._prophetx_location_valid(order, adapter.client) if order.venue == "prophetx"
+                 else current_geographic_attestation(snapshot, order.account_fingerprint,
+                                                     order.mode, utcnow())))
+            if p.environment == "production" and not location_verified:
+                raise RiskRejected("Current account-bound native geographic eligibility is unavailable")
             adapter.preflight = NativePreflight(environment=p.environment, account_authorized=True,
                 geographic_eligibility_verified=location_verified, native_trading_enabled=True,
                 evidence=p.digest(), valid_until=min(time.time()+5, *(e.expires_at.timestamp() for e in p.evidence)))
@@ -1345,7 +1366,10 @@ class NativeRuntime:
             settlement_reconciliation_supported=native_bound and supports_settlement_scope(
                 p, adapter, self.mapper.mappings if self.mapper else (), tuple(engine.risk.native_orders.values())),
             native_credentials_present=bool(record and record.credential_status != "missing"),
-            account_identity_verified=account_current, unresolved_unknown_orders=unknown,
+            account_identity_verified=account_current,
+            geographic_attestation_current=bool(p and account_current and
+                current_geographic_attestation(snapshot, p.account_fingerprint, p.environment, now)),
+            unresolved_unknown_orders=unknown,
             reconciliation_discrepancies=(1 if snapshot and not snapshot.reconciled else 0) + len(self.manager.invalidated_settlements),
             native_pilot_prior_attempts=prior_attempts,
             feeds=tuple(feeds), markets=tuple(markets), live_enabled=engine.settings.live_enabled,

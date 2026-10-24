@@ -8,15 +8,47 @@ from .reference_profiles import ReferenceFreshnessRule, ReferenceProfile
 from .paths import PROJECT_ROOT
 
 
+class TrustedPilotMarketScope(BaseModel):
+    """A rule-bound normal question, not approval of a discovered native ID."""
+    model_config = ConfigDict(extra="forbid")
+    venue: Literal["novig"]
+    sport: Literal["football"]
+    league: Literal["NFL"]
+    market_type: Literal["player_prop"]
+    statistics: tuple[Literal["receptions", "receiving_yards"], ...] = Field(min_length=1)
+    period: Literal["FULL"] = "FULL"
+    reviewed_normal_rule_id: str = Field(min_length=8)
+
+    @model_validator(mode="after")
+    def distinct_statistics(self):
+        if len(set(self.statistics)) != len(self.statistics):
+            raise ValueError("Pilot statistics must be distinct")
+        return self
+
+    def matches(self, market) -> bool:
+        return bool(market.sport == self.sport and market.league == self.league
+            and market.market_type == self.market_type and market.statistic in self.statistics
+            and market.settlement.period == self.period
+            and market.settlement.overtime == "included"
+            and market.player and market.player_id and market.line is not None
+            and market.line != market.line.to_integral_value()
+            and set(market.outcomes) == {"over", "under"}
+            and market.extensions.get("reviewed_normal_rule_id") == self.reviewed_normal_rule_id
+            and market.extensions.get("normal_outcome_reviewed") is True
+            and market.extensions.get("research_only") is not True)
+
+
 class TrustedPilotPolicy(BaseModel):
-    """One-market owner approval, independent of launch, cash and kill-switch gates."""
+    """Source approval independent of native mapping, account and kill-switch gates."""
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     owner_approved: bool = False
     exact_market_id: str | None = None
+    market_scope: TrustedPilotMarketScope | None = None
     provider_id: str | None = None
     crosscheck_provider_id: str | None = None
     trusted_books: list[str] = Field(default_factory=list)
+    min_distinct_books: int = Field(default=2, ge=2)
     accept_unknown_active_status: bool = False
     accept_unknown_quote_observation_age: bool = False
     max_indicator_age_ms: int | None = Field(default=None, ge=1000, le=600000)
@@ -29,17 +61,26 @@ class TrustedPilotPolicy(BaseModel):
     automatic_followups: Literal[False] = False
     approval_evidence: str | None = None
 
+    def permits_market(self, market) -> bool:
+        return bool(not market.extensions.get("research_only") and (
+            self.exact_market_id == market.id if self.exact_market_id is not None
+            else self.market_scope is not None and self.market_scope.matches(market)))
+
     @model_validator(mode="after")
     def complete_if_enabled(self):
         if self.owner_approved and not self.enabled:
             raise ValueError("An approved pilot must be explicitly enabled")
         if self.enabled:
-            required = (self.exact_market_id, self.provider_id, self.max_indicator_age_ms,
+            required = (self.provider_id, self.max_indicator_age_ms,
                         self.independent_crosscheck, self.uncertainty_margin_probability,
                         self.max_debit_usd, self.max_loss_usd, self.approval_evidence)
             if (not self.owner_approved or any(value is None or value == "" for value in required)
-                    or len(set(self.trusted_books)) < 2 or len(set(self.trusted_books)) != len(self.trusted_books)):
+                    or (self.exact_market_id is None) == (self.market_scope is None)
+                    or len(set(self.trusted_books)) < self.min_distinct_books
+                    or len(set(self.trusted_books)) != len(self.trusted_books)):
                 raise ValueError("Trusted live pilot requires an exact, complete owner-reviewed source policy")
+            if self.market_scope is not None and self.min_distinct_books < 3:
+                raise ValueError("Dynamic pilot requires at least three distinct sportsbook references")
             if self.max_debit_usd > Decimal("5") or self.max_loss_usd > Decimal("5"):
                 raise ValueError("Trusted pilot debit and loss ceilings cannot exceed five dollars")
             if self.independent_crosscheck == "separate_provider" and (
@@ -71,8 +112,8 @@ class PricingConfig(BaseModel):
     market_overrides: dict[str, dict] = Field(default_factory=dict)
     reference_profile_mode: Literal["legacy", "strict"] = "legacy"
     # Reference quality is independent of the win/loss payout model. Trusted
-    # provider estimates remain research-only unless the exact one-market
-    # pilot is separately approved; they never inherit strict permission.
+    # provider estimates remain research-only unless a separately approved
+    # market or reviewed normal-question rule passes every other live gate.
     reference_quality_mode: Literal["strict_verified", "trusted_provider"] = "strict_verified"
     # An independent read-only strategy. It never changes the reference
     # profile used by the central execution engine.

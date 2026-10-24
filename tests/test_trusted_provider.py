@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from evplatform.api import create_app
-from evplatform.core.config import PricingConfig, TrustedPilotPolicy
+from evplatform.core.config import PricingConfig, TrustedPilotMarketScope, TrustedPilotPolicy
 from evplatform.core.config import Settings
 from evplatform.core.models import Envelope, utcnow
 from evplatform.core.native_accounting import NativeInstrument, NativePriceBand
@@ -506,6 +506,65 @@ def approved_pilot_case(at=NOW):
     return market, quotes, book, scoped
 
 
+def test_rule_bound_novig_nfl_pilot_pricing_accepts_only_reviewed_new_questions():
+    """An approved source scope cannot itself review a new market's identity."""
+    base, old_quotes, _ = trusted_native_fixture()
+    rule_id = "OFFLINE-reviewed-nfl-full-prop-rule"
+    market = base.model_copy(update={
+        "id": "OFFLINE-new-nfl-receptions-3.5", "sport": "football", "league": "NFL",
+        "market_type": "player_prop", "player": "Fixture Player", "player_id": "Fixture Player",
+        "statistic": "receptions", "line": Decimal("3.5"), "outcomes": ("over", "under"),
+        "settlement": base.settlement.model_copy(update={"period": "FULL", "overtime": "included"}),
+        "extensions": {"reviewed_normal_rule_id": rule_id, "normal_outcome_reviewed": True},
+    })
+    books = ("fanduel", "draftkings", "caesars")
+    quotes = [old_quotes[index % 2].model_copy(update={
+        "market_id": market.id, "market_fingerprint": market.identity(), "bookmaker": book,
+        "decimal_odds": {"over": old_quotes[index % 2].decimal_odds["Home"],
+                         "under": old_quotes[index % 2].decimal_odds["Away"]},
+        "normal_outcome_verified": True,
+        "normal_outcome_evidence": f"{rule_id}: OFFLINE exact normal question review",
+        "source_stored_at": NOW-timedelta(seconds=1),
+        "source_scope_poll_at": NOW-timedelta(seconds=1),
+        "source_scope_is_current": True,
+    }) for index, book in enumerate(books)]
+    profile = ReferenceProfile(selectors=(ProfileSelector(sport="football", league="NFL",
+        market_type="player_prop", statistic="receptions"),),
+        weights_percent={"fanduel": Decimal(34), "draftkings": Decimal(33),
+                         "caesars": Decimal(33)},
+        min_distinct_books=3, status="research_only", live_execution_allowed=False)
+    policy = TrustedPilotPolicy(enabled=True, owner_approved=True,
+        market_scope=TrustedPilotMarketScope(venue="novig", sport="football", league="NFL",
+            market_type="player_prop", statistics=("receptions", "receiving_yards"),
+            reviewed_normal_rule_id=rule_id),
+        provider_id="parlay_rest", trusted_books=list(books), min_distinct_books=3,
+        accept_unknown_active_status=True, accept_unknown_quote_observation_age=True,
+        max_indicator_age_ms=30000, independent_crosscheck="two_distinct_books",
+        uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal("5"),
+        max_loss_usd=Decimal("5"), approval_evidence="OFFLINE scoped approval fixture")
+    scoped = PricingConfig(reference_profile_mode="strict", reference_quality_mode="trusted_provider",
+        normal_outcome_policy="winner_only_binary", reference_profiles={"nfl": profile},
+        enabled_reference_profiles=["nfl"], trusted_pilot_policy=policy,
+        trusted_max_delivery_age_ms=30000, trusted_max_indicator_age_ms=30000)
+    fair = fair_value(market, quotes, scoped, NOW)
+    assert fair.live_execution_allowed and fair.execution_eligible
+    assert fair.trusted_pilot_margin_probability == Decimal("0.01")
+    assert {ref["bookmaker"] for ref in fair.references} == set(books)
+    with pytest.raises(NoSignal, match="Insufficient"):
+        fair_value(market, quotes[:2], scoped, NOW)
+    for altered in (
+        market.model_copy(update={"extensions": {"reviewed_normal_rule_id": rule_id}}),
+        market.model_copy(update={"extensions": {"reviewed_normal_rule_id": rule_id,
+            "normal_outcome_reviewed": True, "research_only": True}}),
+        market.model_copy(update={"id": "OFFLINE-other-threshold", "line": Decimal("4.5")}),
+    ):
+        try:
+            result = fair_value(altered, quotes, scoped, NOW)
+        except NoSignal:
+            continue
+        assert not result.live_execution_allowed
+
+
 @pytest.mark.asyncio
 async def test_approved_trusted_pilot_emits_one_automatic_native_candidate_only_while_armed():
     from types import SimpleNamespace
@@ -712,7 +771,11 @@ def test_trusted_pilot_preflight_requires_armed_automatic_route_and_blocks_prior
                                        sandbox_trading_ready=False),
         profile_for=lambda venue: profile,
         account_snapshots={"novig": SimpleNamespace(cash_available_verified=True,
-                                                      balance_usd=Decimal("25"))},
+                                                      balance_usd=Decimal("25"),
+                                                      identity_verified=True,
+                                                      account_fingerprint=account,
+                                                      environment="production",
+                                                      geographic_attestation_expires_at=utcnow()+timedelta(minutes=1))},
         manager=SimpleNamespace(adapters={"novig": SimpleNamespace(client=object(), preflight=None)}),
         engine=SimpleNamespace(settings=SimpleNamespace(live_enabled=True, pricing=scoped),
                                markets={market.id: market}, risk=risk))
@@ -724,6 +787,10 @@ def test_trusted_pilot_preflight_requires_armed_automatic_route_and_blocks_prior
     risk.auto_trade, risk.kill_switch = True, False
     NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="automatic"))
     assert runtime.manager.adapters["novig"].preflight.native_trading_enabled is True
+    runtime.account_snapshots["novig"].geographic_attestation_expires_at = None
+    with pytest.raises(RiskRejected, match="geographic eligibility"):
+        NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="automatic"))
+    runtime.account_snapshots["novig"].geographic_attestation_expires_at = utcnow()+timedelta(minutes=1)
     risk.kill_switch = True
     with pytest.raises(RiskRejected, match="authorized attempt only"):
         NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="automatic"))

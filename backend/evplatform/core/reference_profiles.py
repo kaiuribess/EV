@@ -174,8 +174,7 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
     limited_board = quote.verification_reason in {
         "truncated_response", "incomplete_snapshot", "paginated_response_not_atomic"}
     pilot = config.trusted_pilot_policy
-    reviewed_pilot_row = (pilot.enabled and pilot.owner_approved
-                          and pilot.exact_market_id == market.id and not market.extensions.get("research_only"))
+    reviewed_pilot_row = (pilot.enabled and pilot.owner_approved and pilot.permits_market(market))
     if limited_board and not ((market.extensions.get("research_only") is True or reviewed_pilot_row)
             and quote.provider in {"parlay_rest", "parlay_ws", "parlay_game_ws"}
             and len(market.outcomes) == 2 and set(quote.decimal_odds) == set(market.outcomes)):
