@@ -153,7 +153,8 @@ def test_existing_monitor_selects_exact_mlb_catalog_rows_for_native_subscription
     assert len(priority) == 3  # Both YES/NO directions share the same monitored ticker.
 
 
-def test_monitor_prewarms_exact_total_without_fair_or_fee_requests():
+def test_monitor_prewarms_exact_total_without_fair_or_fee_requests(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: OBSERVED)
     game, total = source_market(), source_market("total", id="research:parlay:tbmil-total")
     series = ["KXNBAGAME", "KXNFLGAME", "KXMLBGAME", "KXNHLGAME", "KXMLBTOTAL"]
     catalogs = {name: {"markets": [], "cursor": ""} for name in series}

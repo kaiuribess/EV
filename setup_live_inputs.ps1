@@ -98,6 +98,7 @@ Configure-Input 'oddize_rest' @{
 Configure-Input 'parlay_rest' @{
     sports = $sports; bookmakers = $books; markets = @('h2h', 'spreads', 'totals');
     include_props = $true; props_limit = 5000;
+    deduplicate_complete_game_stream = $true; startup_stream_wait_seconds = 12;
     poll_interval_seconds = [double]900; session_request_budget = 80000;
     focused_novig_nfl_props = ($isNative -and $state.mode -eq 'production');
     focused_props_interval_seconds = 120; focused_props_hourly_credit_budget = 36;

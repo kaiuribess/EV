@@ -1,7 +1,7 @@
 """Read-only Novig discovery rotates native book scope without order access."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from decimal import Decimal
 
@@ -265,3 +265,74 @@ def test_missing_remove_diagnostic_distinguishes_zero_update_from_unseen_order()
         "last_lifecycle": None, "market_status": "OPEN", "book_size": 0}
     book.reset()
     assert book.last_gap_context is None
+
+
+@pytest.mark.asyncio
+async def test_quiet_matched_book_requires_authoritative_resnapshot_before_reuse(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+    book = NovigBook()
+    frame = {"snapshot": {LIVE: {"lifecycle": {"seq": 2, "status": "OPEN"},
+        "book": {"seq": 9, "orders": {NEXT: [{"orderId": "bid", "price": "0.6", "qty": 100}]}}}}}
+    book.apply(frame)
+
+    class Client:
+        def __init__(self):
+            self.book, self.calls = book, []
+
+        def health_check(self):
+            return {"streaming": True}
+
+        async def fetch_snapshot(self, market_id):
+            self.calls.append(market_id)
+            return frame
+
+    client = Client()
+    monitor = SimpleNamespace(client=client, manifest=SimpleNamespace(name="novig"),
+        engine=SimpleNamespace(consensus_estimates={}, reference_estimates={}, markets={}),
+        focused_prop_matches={"prop": [SimpleNamespace(native_market_id=LIVE,
+            opposing_outcome_id=NEXT, outcome="over")]},
+        research_matches={}, _subscribed_market_ids=[LIVE], _book_at={LIVE: NOW-timedelta(seconds=25)},
+        _novig_snapshot_attempts={}, _novig_snapshot_window=[], _novig_snapshot_error=None,
+        _novig_book_snapshots={}, _novig_book_deltas={}, _novig_subscription_ack_at=None,
+        _market_data_updates=0, _last_market_data_at=None, _last_valid_book_at=None,
+        health_snapshot=lambda: {"valid_book_ids": [LIVE]})
+    monitor.research_book_current = lambda market_id, now=None: NativeMonitor.research_book_current(
+        monitor, market_id, now=now)
+    assert not NativeMonitor.research_book_current(monitor, LIVE, now=NOW+timedelta(seconds=6))
+    await NativeMonitor._refresh_quiet_novig_books(monitor)
+    assert client.calls == [LIVE]
+    assert monitor._book_at[LIVE] == NOW-timedelta(seconds=25)  # the request is not evidence
+    NativeMonitor._observe_market_frame(monitor, frame)
+    assert NativeMonitor.research_book_current(monitor, LIVE, now=NOW)
+    evidence = NativeMonitor._novig_matched_book_evidence(monitor, NOW)
+    assert evidence[0]["last_snapshot_at"] == NOW.isoformat()
+    assert evidence[0]["directions"][0]["opposing_bid_count_retained"] == 1
+    await NativeMonitor._refresh_quiet_novig_books(monitor)
+    assert client.calls == [LIVE]  # no duplicate paid/stream snapshot on the same book
+
+
+@pytest.mark.asyncio
+async def test_empty_novig_book_does_not_trigger_repeated_snapshot(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+    book = NovigBook()
+    book.apply({"snapshot": {LIVE: {"lifecycle": {"seq": 1, "status": "OPEN"},
+        "book": {"seq": 1, "orders": {}}}}})
+
+    class Client:
+        def __init__(self):
+            self.book, self.calls = book, 0
+
+        def health_check(self):
+            return {"streaming": True}
+
+        async def fetch_snapshot(self, _):
+            self.calls += 1
+
+    client = Client()
+    monitor = SimpleNamespace(client=client, engine=SimpleNamespace(
+        consensus_estimates={}, reference_estimates={}, markets={}),
+        focused_prop_matches={"prop": [SimpleNamespace(native_market_id=LIVE)]},
+        research_matches={}, _subscribed_market_ids=[LIVE], _book_at={LIVE: NOW-timedelta(seconds=60)},
+        _novig_snapshot_attempts={}, _novig_snapshot_window=[])
+    await NativeMonitor._refresh_quiet_novig_books(monitor)
+    assert client.calls == 0

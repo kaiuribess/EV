@@ -479,8 +479,19 @@ class NativeRuntime:
                     fee_for = lambda price, qty, native=native: taker_fee(native, price, qty)
                 else:
                     current = getattr(monitor, "research_book_current", None)
+                    book_current = current is None or current(match.native_market_id, now=now)
                     levels = (client.book.asks(match.native_market_id, match.opposing_outcome_id)
-                        if current is None or current(match.native_market_id, now=now) else [])
+                        if book_current else [])
+                    depth_reason = None
+                    if not book_current:
+                        stamp = getattr(monitor, "_book_at", {}).get(match.native_market_id)
+                        depth_reason = ("Native book observation exceeded 30 seconds"
+                            if stamp is not None else "No native book snapshot for this subscription")
+                    elif not levels:
+                        depth_reason = ("Novig market is not open or book sequence is invalid"
+                            if client.book.statuses.get(match.native_market_id) != "OPEN"
+                            or f"{match.native_market_id}:book" in client.book.sequences.invalid
+                            else "No executable opposing bids in the current Novig book")
                     native = next((row for row in monitor.research_catalog_rows
                                    if row.get("marketId") == match.native_market_id), None)
                     event = monitor.research_events.get(match.native_event_id)
@@ -503,6 +514,8 @@ class NativeRuntime:
                 else:
                     result = compare_minimum_lot(match, fair.probabilities[match.outcome], levels,
                         fee_for=fee_for, uncertainty_margin_probability=margin, now=now)
+                    if venue == "novig" and depth_reason is not None:
+                        result["rejection"] = depth_reason
                 if venue == "polymarket_us":
                     result["native_order_direction"] = "BUY_LONG" if match.side == "long" else "SELL_SHORT"
                     result["instrument_outcome"] = next((s["description"] for s in native["sides"]

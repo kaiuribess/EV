@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -58,6 +59,8 @@ async def test_focused_novig_prop_scope_uses_free_coverage_and_one_paid_page():
     assert calls[1][1]["eventId"] == EVENT and calls[1][1]["player"] == "Aaron Jones"
     assert calls[1][1]["includeSids"] == "true"
     assert detail["credits_reserved"] == 3 and len(pages) == 1
+    assert rest.quota.provider_reported_cost == 3
+    assert rest.quota.provider_reported_cost_samples == 1
     offers = extract_offers(pages[0])
     assert len(offers) == 3 and {o.bookmaker for o in offers} == {
         "fanduel", "draftkings", "caesars"}
@@ -185,6 +188,37 @@ def test_focused_health_snapshot_reports_live_usage_not_startup_state():
     assert result["focused_novig_nfl_props"] == bridge._focused_status
     assert result["quota"] == {"requests": 4}
     assert result["mapped_quotes"] == 7
+
+
+@pytest.mark.asyncio
+async def test_focused_fetch_skips_all_parlay_requests_without_opposing_native_bids(monkeypatch):
+    sleeps = 0
+
+    async def one_cycle(_):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
+    async def unexpected_discovery(*_args, **_kwargs):
+        raise AssertionError("Native depth must be checked before Parlay requests")
+    client = SimpleNamespace(config=SimpleNamespace(focused_props_interval_seconds=120),
+        discover_events=unexpected_discovery)
+    native = SimpleNamespace(focused_prop_source_ids=["source"],
+        focused_prop_matches={"source": [SimpleNamespace(native_market_id="native",
+            opposing_outcome_id="other")]},
+        research_book_current=lambda *_args, **_kwargs: True,
+        client=SimpleNamespace(book=SimpleNamespace(asks=lambda *_args: [])))
+    bridge = ProviderBridge.__new__(ProviderBridge)
+    bridge.client = client
+    bridge.engine = SimpleNamespace(markets={"source": SimpleNamespace(id="source")},
+        registry=SimpleNamespace(records={"novig": SimpleNamespace(enabled=True, plugin=native)}))
+    bridge._focused_budget = FocusedCreditWindow(36, 120)
+    bridge._focused_status = {}
+    with pytest.raises(asyncio.CancelledError):
+        await bridge._focused_novig_props_session()
+    assert bridge._focused_status == {"state": "no_current_native_depth", "native_leads": 1}
 
 
 def test_focused_event_lookup_supplies_identity_only_for_exact_prop_rows():

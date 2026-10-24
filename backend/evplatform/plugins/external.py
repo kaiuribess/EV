@@ -56,11 +56,25 @@ class ProviderBridge(InputPlugin):
             runtime_data_file("verified_mappings.json", self.engine.settings.data_dir))
         self.mapper.research_projector = TrustedSourceProjector(lambda: self.engine.settings.pricing)
         self.client = self.factory({**context.config, "enabled": True})
+        if (self.manifest.name == "parlay_rest" and self.client.config.deduplicate_complete_game_stream
+                and (record := self.engine.registry.records.get("parlay_game_ws")) and record.enabled):
+            self.client.game_stream_state = self._parlay_game_stream_state
         if await self.client.connect():
             self.task = asyncio.create_task(self._run(), name=f"input:{self.manifest.name}")
             if self.manifest.name == "parlay_rest" and self.client.config.focused_novig_nfl_props:
                 self.focused_task = asyncio.create_task(self._run_focused_novig_props(),
                                                         name="parlay-focused-novig-nfl-props")
+
+    def _parlay_game_stream_state(self, sport: str) -> tuple[bool, bool]:
+        record = self.engine.registry.records.get("parlay_game_ws")
+        stream = record.plugin.client if record and record.enabled else None
+        if (stream is None or sport not in stream.config.sports
+                or stream.config.bookmakers != self.client.config.bookmakers
+                or stream.config.markets != self.client.config.markets
+                or stream.config.regions != self.client.config.regions):
+            return False, False
+        return (sport in stream._ready_sports,
+                sport in stream._complete_baseline_sports)
 
     async def _publish_mapped(self, raw):
         async with self._map_lock:
@@ -100,16 +114,18 @@ class ProviderBridge(InputPlugin):
                     self._focused_status = {"state": "no_exact_native_prop_lead"}
                 else:
                     now = time.monotonic()
-                    if now - events_at >= 300:
-                        discovery = await self.client.discover_events("americanfootball_nfl")
-                        events = discovery.payload if isinstance(discovery.payload, list) else []
-                        events_at = now
                     self._focused_status = {"state": "no_current_native_depth", "native_leads": len(targets)}
                     for market in targets[cursor % len(targets):] + targets[:cursor % len(targets)]:
                         matches = monitor.focused_prop_matches.get(market.id, ())
                         if not any(monitor.research_book_current(item.native_market_id)
+                                   and monitor.client.book.asks(item.native_market_id,
+                                                                item.opposing_outcome_id)
                                    for item in matches):
                             continue
+                        if now - events_at >= 300:
+                            discovery = await self.client.discover_events("americanfootball_nfl")
+                            events = discovery.payload if isinstance(discovery.payload, list) else []
+                            events_at = now
                         # A current /events ID may differ from the cached broad
                         # prop event ID. Once its exact new market has two usable
                         # books, do not keep buying the old scope's same rows.
@@ -483,6 +499,13 @@ class NativeMonitor(Plugin):
         self._last_market_data_at = None
         self._last_valid_book_at = None
         self._book_at: dict[str, object] = {}
+        self._novig_book_snapshots: dict[str, object] = {}
+        self._novig_book_deltas: dict[str, object] = {}
+        self._novig_snapshot_attempts: dict[str, float] = {}
+        self._novig_snapshot_window: list[float] = []
+        self._novig_snapshot_error: str | None = None
+        self._novig_subscription_ack_at = None
+        self._novig_last_rotation: dict = {}
         self._reconnect_count = 0
         self._seen_initial_snapshot = False
 
@@ -520,6 +543,13 @@ class NativeMonitor(Plugin):
         self._last_market_data_at = None
         self._last_valid_book_at = None
         self._book_at = {}
+        self._novig_book_snapshots = {}
+        self._novig_book_deltas = {}
+        self._novig_snapshot_attempts = {}
+        self._novig_snapshot_window = []
+        self._novig_snapshot_error = None
+        self._novig_subscription_ack_at = None
+        self._novig_last_rotation = {}
         self._reconnect_count = 0
         self._seen_initial_snapshot = False
         if context.config.get("legacy_market_ids"):
@@ -872,6 +902,7 @@ class NativeMonitor(Plugin):
                     elapsed = 0
                 elif NativeMonitor._research_match_refresh_due(self, elapsed):
                     await self._refresh_research_matches()
+                await NativeMonitor._refresh_quiet_novig_books(self)
                 if self.discovery_status == "read_failed":
                     continue
                 research = [item.native_market_id for matches in self.research_matches.values() for item in matches]
@@ -890,9 +921,66 @@ class NativeMonitor(Plugin):
                 except Exception:
                     self.discovery_status = "subscription_failed"
                     continue
+                self._novig_last_rotation = {"at": utcnow().isoformat(),
+                    "added": sorted(set(selected)-set(self._subscribed_market_ids)),
+                    "removed": sorted(set(self._subscribed_market_ids)-set(selected))}
                 self._subscribed_market_ids = selected
         except asyncio.CancelledError:
             raise
+
+    async def _refresh_quiet_novig_books(self):
+        """Reobserve a few matched quiet books through Novig's same-socket snapshot.
+
+        A trade-free snapshot preserves subscriptions and carries a new book
+        sequence. Silence alone cannot certify the current executable ladder.
+        This is bounded to relevant markets, unlike refreshing every catalog row.
+        """
+        if (not self.client or not hasattr(self.client, "health_check")
+                or self.client.health_check().get("streaming") is not True):
+            return
+        now, tick = utcnow(), time.monotonic()
+        self._novig_snapshot_window = [t for t in self._novig_snapshot_window if tick-t < 60]
+        if len(self._novig_snapshot_window) >= 6:
+            return
+        pairs = [item for matches in self.focused_prop_matches.values() for item in matches]
+        for source_id, matches in self.research_matches.items():
+            row = (self.engine.consensus_estimates.get(source_id)
+                   or self.engine.reference_estimates.get(source_id))
+            if not row or source_id not in self.engine.markets or self.engine.markets[source_id].start_time <= now:
+                continue
+            from ..integrations.base import parse_timestamp
+            calculated = parse_timestamp(row.get("calculated_at"))
+            if calculated is None or not 0 <= (now-calculated).total_seconds() <= 120:
+                continue
+            pairs.extend(matches)
+        requested = 0
+        for market_id in dict.fromkeys(item.native_market_id for item in pairs):
+            if requested >= 2 or len(self._novig_snapshot_window) >= 6:
+                break
+            stamp = self._book_at.get(market_id)
+            if (market_id not in self._subscribed_market_ids or stamp is None
+                    or not 20 <= (now-stamp).total_seconds()
+                    or not self.client.book.books.get(market_id)
+                    or self.client.book.statuses.get(market_id) != "OPEN"
+                    or f"{market_id}:book" in self.client.book.sequences.invalid
+                    or tick-self._novig_snapshot_attempts.get(market_id, float("-inf")) < 20):
+                continue
+            self._novig_snapshot_attempts[market_id] = tick
+            self._novig_snapshot_window.append(tick)
+            requested += 1
+            try:
+                frame = await self.client.fetch_snapshot(market_id)
+                if (not isinstance(frame.get("snapshot"), dict)
+                        or "book" not in frame["snapshot"].get(market_id, {})):
+                    self._novig_snapshot_error = "incomplete_snapshot"
+                else:
+                    self._novig_snapshot_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Failed reads retain the original book clock and cannot turn
+                # old levels into executable depth.
+                self._novig_snapshot_error = type(exc).__name__
 
     async def _refresh_polymarket_discovery(self):
         from ..integrations.polymarket_us_discovery import balanced_open_moneylines
@@ -1237,6 +1325,9 @@ class NativeMonitor(Plugin):
                 if frame.get("type") == "transport_invalidated":
                     self._reconnect_count += 1
                     self._book_at.clear()
+                    self._novig_book_snapshots.clear()
+                    self._novig_book_deltas.clear()
+                    self._novig_subscription_ack_at = None
                     self.engine.metrics.counters[f"native_invalidations:{self.manifest.name}"] += 1
                     continue
                 if self.manifest.name == "prophetx" and frame.get("type") == "snapshot_required":
@@ -1282,6 +1373,8 @@ class NativeMonitor(Plugin):
         if self.manifest.name == "kalshi" and frame.get("type") in {"orderbook_snapshot", "orderbook_delta"}:
             subjects = [frame.get("msg", {}).get("market_ticker")]
         elif self.manifest.name == "novig":
+            if isinstance(frame.get("subscribed"), dict) and isinstance(frame.get("snapshot"), dict):
+                self._novig_subscription_ack_at = utcnow()
             batch = frame.get("snapshot", frame.get("delta", {}))
             if isinstance(batch, dict):
                 subjects = [key for key, channels in batch.items()
@@ -1301,6 +1394,11 @@ class NativeMonitor(Plugin):
             for subject in subjects:
                 if isinstance(subject, str) and subject:
                     self._book_at[subject] = observed
+                    if self.manifest.name == "novig":
+                        target = getattr(self, "_novig_book_snapshots" if "snapshot" in frame
+                                         else "_novig_book_deltas", None)
+                        if target is not None:
+                            target[subject] = observed
             if any(subject in self.health_snapshot().get("valid_book_ids", ()) for subject in subjects):
                 self._last_valid_book_at = observed
 
@@ -1311,6 +1409,42 @@ class NativeMonitor(Plugin):
             return False
         age = ((now or utcnow())-stamp).total_seconds()
         return 0 <= age <= 30
+
+    def _novig_matched_book_evidence(self, now) -> list[dict]:
+        """A bounded, public read of matched book evidence already in memory."""
+        if not self.client or not hasattr(self.client, "book"):
+            return []
+        matches = [item for rows in self.focused_prop_matches.values() for item in rows]
+        matches.extend(item for rows in self.research_matches.values() for item in rows)
+        grouped: dict[str, list] = {}
+        for item in matches:
+            if item.native_market_id in self._subscribed_market_ids:
+                grouped.setdefault(item.native_market_id, []).append(item)
+        result = []
+        for market_id, items in list(grouped.items())[:4]:
+            stamp = self._book_at.get(market_id)
+            current = self.research_book_current(market_id, now=now)
+            directions = []
+            for item in items[:2]:
+                bids = [row for row in self.client.book.books.get(market_id, {}).values()
+                        if row["outcome"] == item.opposing_outcome_id]
+                asks = self.client.book.asks(market_id, item.opposing_outcome_id) if current else []
+                directions.append({"outcome": item.outcome,
+                    "opposing_bid_count_retained": len(bids),
+                    "executable_ask_price": str(asks[0][0]) if asks else None,
+                    "executable_ask_quantity": asks[0][1] if asks else None})
+            result.append({"market_id": market_id, "status": self.client.book.statuses.get(market_id),
+                "book_sequence": self.client.book.sequences.values.get(f"{market_id}:book"),
+                "subscription_ack_at": (self._novig_subscription_ack_at.isoformat()
+                    if self._novig_subscription_ack_at else None),
+                "last_snapshot_at": (self._novig_book_snapshots[market_id].isoformat()
+                    if market_id in self._novig_book_snapshots else None),
+                "last_delta_at": (self._novig_book_deltas[market_id].isoformat()
+                    if market_id in self._novig_book_deltas else None),
+                "last_book_at": stamp.isoformat() if stamp else None,
+                "last_book_age_seconds": (now-stamp).total_seconds() if stamp else None,
+                "book_current": current, "directions": directions})
+        return result
 
     def health_snapshot(self):
         if self.config_error:
@@ -1378,6 +1512,14 @@ class NativeMonitor(Plugin):
                  "oldest_valid_book_age_seconds": max(ages) if ages else None,
                  "data_stale": not bool(current),
                  "last_reported_error": last_error,
+                **({"subscription_ack_at": (self._novig_subscription_ack_at.isoformat()
+                         if self._novig_subscription_ack_at else None),
+                    "last_rotation": dict(self._novig_last_rotation),
+                    "quiet_book_snapshot_error": self._novig_snapshot_error,
+                    "quiet_book_snapshots_last_minute": len([t for t in self._novig_snapshot_window
+                        if time.monotonic()-t < 60]),
+                    "matched_prop_books": NativeMonitor._novig_matched_book_evidence(self, now)}
+                   if self.manifest.name == "novig" else {}),
                 "discovery_status": self.discovery_status,
                 **({"discovery_error_type": self.discovery_error_type}
                    if self.manifest.name in {"prophetx", "polymarket_us"} else {}),

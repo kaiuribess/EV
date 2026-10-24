@@ -316,7 +316,8 @@ def test_depth_or_fee_gap_never_becomes_positive_research_signal():
 def test_runtime_research_comparison_is_read_only_and_requires_live_stream(monkeypatch):
     import evplatform.core.pricing as pricing
     monkeypatch.setattr(pricing, "validate_fair_references", lambda *_: None)
-    current = utcnow()
+    monkeypatch.setattr("evplatform.core.native_runtime.utcnow", lambda: NOW)
+    current = NOW
     found = kalshi_moneyline_matches(market(), kalshi_rows(), observed_at=current)
     ticker = f"{EVENT}-ATL"
     book = KalshiBook()
@@ -363,7 +364,8 @@ def test_runtime_research_comparison_is_read_only_and_requires_live_stream(monke
 def test_novig_review_lead_keeps_exact_fee_phase_evidence(monkeypatch):
     import evplatform.core.pricing as pricing
     monkeypatch.setattr(pricing, "validate_fair_references", lambda *_: None)
-    current = utcnow()
+    monkeypatch.setattr("evplatform.core.native_runtime.utcnow", lambda: NOW)
+    current = NOW
     found = novig_prop_matches(prop_market(), novig_prop_rows(), {E: novig_event()},
         observed_at=current)
     book = NovigBook()
@@ -405,8 +407,19 @@ def test_novig_review_lead_keeps_exact_fee_phase_evidence(monkeypatch):
     monitor.research_catalog_rows[0]["fee"] = novig_prop_rows()[0]["fee"]
     book.reset()
     disconnected = NativeRuntime.research_comparisons(runtime, prop_market(), fair)
-    assert all(item["rejection"] == "No synchronized executable opposing bid depth"
+    assert all(item["rejection"] == "Novig market is not open or book sequence is invalid"
                for item in disconnected)
+    book.apply({"snapshot": {M: {"lifecycle": {"seq": 2, "status": "OPEN"},
+        "book": {"seq": 2, "orders": {A: [{"orderId": "one-sided-bid",
+            "price": "0.58", "qty": 100}]}}}}})
+    one_sided = NativeRuntime.research_comparisons(runtime, prop_market(), fair)
+    assert next(item for item in one_sided if item["outcome"] == "over")["rejection"] == (
+        "No executable opposing bids in the current Novig book")
+    monitor.research_book_current = lambda *_args, **_kwargs: False
+    monitor._book_at[M] = NOW-timedelta(seconds=65)
+    stale = NativeRuntime.research_comparisons(runtime, prop_market(), fair)
+    assert all(item["rejection"] == "Native book observation exceeded 30 seconds"
+               for item in stale)
 
 
 def test_exact_research_review_draft_persists_without_approving_mapping(tmp_path):

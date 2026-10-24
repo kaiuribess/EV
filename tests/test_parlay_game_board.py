@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,6 +17,7 @@ from evplatform.integrations.parlay import (
     ParlayConfig, ParlayGameBoardConfig, ParlayGameBoardWebSocket, ParlayRest,
     ParlayWebSocket,
 )
+from evplatform.plugins.external import ProviderBridge
 
 
 @pytest.mark.parametrize("override", [
@@ -114,3 +116,37 @@ def test_complete_flag_needs_provider_confirmation_and_never_certifies_quote():
                    {"snapshot_complete": False}):
         bounded = provider.parse_frame(json.dumps({**frame, **change}), has_snapshot=False)
         assert bounded.snapshot_complete is False
+
+
+@pytest.mark.asyncio
+async def test_rest_startup_deduplicates_only_complete_identical_game_stream_scope():
+    provider = ParlayRest({"deduplicate_complete_game_stream": True,
+                           "startup_stream_wait_seconds": 0}, credential="")
+    frame = ProviderEnvelope("parlay_rest", "snapshot", [], datetime.now(UTC), 1)
+    provider.fetch_snapshot = AsyncMock(return_value=frame)
+    provider.fetch_props = AsyncMock(return_value=frame)
+    provider.game_stream_state = lambda _: (True, True)
+    assert len([row async for row in provider._poll_sport("basketball_nba")]) == 1
+    provider.fetch_snapshot.assert_not_awaited()
+    provider.fetch_props.assert_awaited_once()
+    provider.game_stream_state = lambda _: (True, False)
+    assert len([row async for row in provider._poll_sport("basketball_nba")]) == 2
+    provider.fetch_snapshot.assert_awaited_once()
+
+
+def test_rest_stream_dedup_needs_exact_book_market_region_and_sport_scope():
+    rest = ParlayRest({"sports": ["basketball_nba"], "bookmakers": ["fanduel"],
+        "markets": ["h2h", "spreads", "totals"]}, credential="")
+    stream = ParlayGameBoardWebSocket({"sports": ["basketball_nba"],
+        "bookmakers": ["fanduel"], "markets": ["h2h", "spreads", "totals"]}, credential="")
+    stream._ready_sports.add("basketball_nba")
+    stream._complete_baseline_sports.add("basketball_nba")
+    bridge = ProviderBridge.__new__(ProviderBridge)
+    bridge.client = rest
+    bridge.engine = SimpleNamespace(registry=SimpleNamespace(records={
+        "parlay_game_ws": SimpleNamespace(enabled=True,
+            plugin=SimpleNamespace(client=stream))}))
+    assert bridge._parlay_game_stream_state("basketball_nba") == (True, True)
+    assert bridge._parlay_game_stream_state("americanfootball_nfl") == (False, False)
+    stream.config.bookmakers = ["draftkings"]
+    assert bridge._parlay_game_stream_state("basketball_nba") == (False, False)

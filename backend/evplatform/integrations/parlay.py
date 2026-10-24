@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import urlencode
 
 from pydantic import Field, model_validator
@@ -45,6 +45,8 @@ class ParlayConfig(ProviderConfig):
     focused_props_interval_seconds: int = Field(default=120, ge=60, le=3600)
     focused_props_hourly_credit_budget: int = Field(default=36, ge=3, le=300)
     focused_props_limit: int = Field(default=200, ge=1, le=10000)
+    deduplicate_complete_game_stream: bool = False
+    startup_stream_wait_seconds: int = Field(default=12, ge=0, le=30)
     watchdog_seconds: float = Field(default=90, ge=10, le=180)
     account_tier: Literal["unknown", "free", "starter", "pro", "business", "enterprise", "scale"] = "unknown"
 
@@ -73,6 +75,11 @@ class ParlayRest(RestProvider):
     base_url = "https://parlay-api.com"
     credential_env = "PARLAY_API_KEY"
     config_class = ParlayConfig
+
+    # Supplied by ProviderBridge only when a separately authenticated game
+    # stream has exactly the same sport/book/market scope. A complete baseline
+    # can replace the metered REST discovery copy; an incomplete one cannot.
+    game_stream_state: Callable[[str], tuple[bool, bool]] | None = None
 
     def auth(self) -> tuple[dict[str, str], dict[str, str]]:
         return {"X-API-Key": self._credential}, {}
@@ -222,9 +229,24 @@ class ParlayRest(RestProvider):
                        "credits_reserved": 3 * len(pages)}
 
     async def _poll_sport(self, sport: str) -> AsyncIterator[ProviderEnvelope]:
-        yield await self.fetch_snapshot(sport)
+        game_complete = (self.config.deduplicate_complete_game_stream
+            and self.game_stream_state is not None and self.game_stream_state(sport)[1])
+        if not game_complete:
+            yield await self.fetch_snapshot(sport)
         if self.config.include_props:
             yield await self.fetch_props(sport)
+
+    async def stream_updates(self) -> AsyncIterator[ProviderEnvelope]:
+        if self.config.deduplicate_complete_game_stream and self.game_stream_state is not None:
+            # Wait briefly for the free stream's first board on startup. REST
+            # remains the fallback if the stream fails, is partial, or is late.
+            deadline = time.monotonic() + self.config.startup_stream_wait_seconds
+            while time.monotonic() < deadline and not all(
+                self.game_stream_state(sport)[0] for sport in self.config.sports
+            ):
+                await asyncio.sleep(0.25)
+        async for envelope in super().stream_updates():
+            yield envelope
 
 
 class ParlayWebSocket(ParlayRest):
