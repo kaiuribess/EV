@@ -437,8 +437,14 @@ def test_trusted_pilot_policy_is_disabled_and_requires_scoped_owner_review():
         TrustedPilotPolicy(enabled=True, owner_approved=True, exact_market_id="nba-1",
             provider_id="parlay_rest", trusted_books=["pinnacle", "fanduel"],
             max_indicator_age_ms=30000, independent_crosscheck="two_distinct_books",
-            uncertainty_margin_probability=Decimal("0.02"), max_debit_usd=Decimal("2"),
+            uncertainty_margin_probability=Decimal("0.02"), max_debit_usd=Decimal("5.01"),
             max_loss_usd=Decimal("1"), approval_evidence="owner-review")
+    five = TrustedPilotPolicy(enabled=True, owner_approved=True, exact_market_id="nba-1",
+        provider_id="parlay_rest", trusted_books=["pinnacle", "fanduel"],
+        max_indicator_age_ms=30000, independent_crosscheck="two_distinct_books",
+        uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal("5"),
+        max_loss_usd=Decimal("5"), approval_evidence="owner-review")
+    assert five.max_debit_usd == Decimal("5")
 
 
 def trusted_native_fixture(at=NOW):

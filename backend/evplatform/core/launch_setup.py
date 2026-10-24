@@ -251,7 +251,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                     and any(not any(e.kind == kind for e in p.evidence) for p in profiles.values()))
         if deferred:
             passed = False
-            detail += " A one-order, $1 validation pilot defers this historical proof; it is not a completed check."
+            detail += " A one-order, at-most-$5 validation pilot defers this historical proof; it is not a completed check."
         if kind == "geographic_eligibility" and any(p.environment != "production" for p in profiles.values()):
             passed = False
         requirement(f"evidence.{kind}", passed, title, detail, external=kind != "risk_authorization")

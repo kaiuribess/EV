@@ -44,6 +44,20 @@ function Managed-Process-Alive {
     } catch { return $false }
 }
 
+function Invoke-OneShotGate {
+    if ($Port -ne 8002) { return }
+    $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
+    $gate = Join-Path $PSScriptRoot 'watch_native_one_shot.py'
+    if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $gate)) {
+        Write-SupervisorEvent 'One-shot gate unavailable; research scanner remains running.'
+        return
+    }
+    & $python $gate --url $baseUrl | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-SupervisorEvent "One-shot gate returned $LASTEXITCODE; inspect its status file."
+    }
+}
+
 try {
     try { $locked = $mutex.WaitOne(0) }
     catch [Threading.AbandonedMutexException] { $locked = $true }
@@ -100,6 +114,7 @@ try {
                 }
             }
         }
+        Invoke-OneShotGate
         return
     }
 
@@ -143,6 +158,7 @@ try {
         throw 'Production restarted with unexpected execution controls; emergency stop was applied.'
     }
     Write-SupervisorEvent 'Started production scanner disarmed on port 8002.'
+    Invoke-OneShotGate
 } catch {
     Write-SupervisorEvent "Supervisor failed: $($_.Exception.GetType().Name): $($_.Exception.Message)"
     throw

@@ -134,7 +134,7 @@ def pilot_fixture():
     return profile, runtime, now
 
 
-def test_one_dollar_first_order_pilot_defers_only_historical_validation():
+def test_bounded_first_order_pilot_defers_only_historical_validation():
     profile, runtime, now = pilot_fixture()
     report = evaluate_readiness(profile, runtime, now=now)
     assert report.safe_to_arm and report.live_trading_ready
@@ -169,12 +169,25 @@ def test_validation_pilot_accepts_scoped_novig_and_rejects_wrong_venue_policy():
     assert novig.validation_pilot and novig.limits.max_native_order_attempts == 1
     with pytest.raises(ValidationError):
         LaunchProfile.model_validate({**profile.model_dump(), "venue": "novig"})
-    with pytest.raises(ValidationError):
-        LaunchProfile.model_validate({**profile.model_dump(), "venue": "prophetx",
-            "settlement_policy": "prophetx_funded_cash_win_loss_halt_on_exception"})
+    prophetx = LaunchProfile.model_validate({**profile.model_dump(), "venue": "prophetx",
+        "settlement_policy": "prophetx_funded_cash_win_loss_halt_on_exception"})
+    assert prophetx.validation_pilot
     with pytest.raises(ValidationError):
         LaunchProfile.model_validate({**profile.model_dump(), "limits": {
             **profile.limits.model_dump(), "max_native_order_attempts": None}})
+
+
+def test_validation_pilot_allows_five_dollars_but_not_more():
+    profile, _, _ = pilot_fixture()
+    values = profile.limits.model_dump()
+    for field in ("max_order_stake_usd", "max_event_exposure_usd", "max_player_exposure_usd",
+                  "max_venue_exposure_usd", "max_correlated_exposure_usd", "max_total_exposure_usd"):
+        values[field] = Decimal("5")
+    five = LaunchProfile.model_validate({**profile.model_dump(), "limits": values})
+    assert five.validation_pilot and five.limits.max_order_stake_usd == Decimal("5")
+    values["max_order_stake_usd"] = Decimal("5.01")
+    with pytest.raises(ValidationError):
+        LaunchProfile.model_validate({**profile.model_dump(), "limits": values})
 
 
 def test_legacy_profile_digest_stays_stable_without_pilot():

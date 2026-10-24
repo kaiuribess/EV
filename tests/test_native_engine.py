@@ -116,6 +116,8 @@ async def test_offline_native_engine_stream_risk_fill_audit_and_restart(tmp_path
         await asyncio.wait_for(engine.risk_queue.join(), 2)
         assert len(adapter.submissions) == 1, (engine.native.report().blocking_items, list(engine.events))
         assert not engine.risk.auto_trade
+        assert engine.risk.kill_switch
+        assert engine.risk.native_authorization_expires_at is None
         submitted = next(iter(engine.risk.native_orders.values()))
         assert submitted.status == OrderStatus.OPEN and submitted.filled_quantity == 0
         assert submitted.quantity == 100

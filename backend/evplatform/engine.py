@@ -848,9 +848,12 @@ class Engine:
                         cap = self.risk.config.max_native_order_attempts
                         if (cap is not None and len(self.risk.native_orders) >= cap
                                 and self.risk.auto_trade):
-                            self.risk.auto_trade = False
-                            await self.notice("info", "Native order attempt limit reached; automatic trading paused", "operator")
+                            self.risk.halt("Native order attempt limit reached")
+                            await self.storage.save_config("kill_switch", True)
+                            await self.notice("info", "Native order attempt limit reached; emergency stop restored", "operator")
                 else:
+                    if self.settings.mode in {"sandbox", "production"}:
+                        raise RiskRejected("Native one-shot authorization cannot route a non-native strategy")
                     await self.oms.execute(c, self.markets[c.market_id], self.book(c.market_id, c.venue, c.outcome), self.settings.mode)
                 self.metrics.counters["orders_routed"] += 1
             except RiskRejected as exc:
@@ -967,8 +970,8 @@ class Engine:
                 return
             now = utcnow()
             if (authorization_expires_at is None or authorization_expires_at.tzinfo is None
-                    or not now < authorization_expires_at <= now + timedelta(minutes=15)):
-                raise ValueError("Native trading requires an explicit authorization expiry within 15 minutes")
+                    or not now < authorization_expires_at <= now + timedelta(hours=24)):
+                raise ValueError("Native trading requires an explicit authorization expiry within 24 hours")
             if kill_switch is not False:
                 existing = self.risk.native_authorization_expires_at
                 if existing is None or existing <= now or authorization_expires_at > existing:

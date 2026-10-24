@@ -154,10 +154,11 @@ class LaunchProfile(StrictRecord):
         pilot_settlement = {
             "kalshi": "kalshi_ioc_binary_halt_on_exception",
             "novig": "novig_ioc_win_loss_halt_on_exception",
+            "prophetx": "prophetx_funded_cash_win_loss_halt_on_exception",
         }
         if (self.environment != "production"
                 or self.settlement_policy != pilot_settlement.get(self.venue)
-                or any(cap is None or cap > Decimal("1") for cap in caps)
+                or any(cap is None or cap > Decimal("5") for cap in caps)
                 or limits.max_native_order_attempts != 1
                 or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1
                 or not limits.available_cash_only or not limits.block_overlapping_events
@@ -165,7 +166,7 @@ class LaunchProfile(StrictRecord):
                 or limits.stake_sizing != "quarter_kelly" or limits.unit_size_usd != Decimal("5")
                 or set(self.strategy_ids) != {"native_positive_ev"}
                 or self.min_reference_books < 2):
-            raise ValueError("Validation pilot requires one $1 supported-venue attempt with cash and overlap limits")
+            raise ValueError("Validation pilot requires one at-most-$5 supported-venue attempt with cash and overlap limits")
         return self
 
     @field_validator("market_ids", "strategy_ids", "provider_ids")

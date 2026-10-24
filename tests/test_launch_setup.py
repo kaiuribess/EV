@@ -403,7 +403,7 @@ def test_matching_review_digest_allows_operator_control_in_offline_fixture(tmp_p
         assert client.get("/api/native/orders").json()["orders"] == []
 
 
-def test_native_activation_requires_an_explicit_short_lease(tmp_path, monkeypatch):
+def test_native_activation_requires_an_explicit_24_hour_or_shorter_lease(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with TestClient(native_app(tmp_path)) as client:
         engine = client.app.state.engine
@@ -411,7 +411,7 @@ def test_native_activation_requires_an_explicit_short_lease(tmp_path, monkeypatc
         engine.native.report = lambda *args: report
         engine.settings.live_enabled = True
         for expiry in (None, (utcnow()-timedelta(seconds=1)).isoformat(),
-                       (utcnow()+timedelta(minutes=16)).isoformat()):
+                       (utcnow()+timedelta(hours=25)).isoformat()):
             body = {"auto_trade": True, "kill_switch": False, "expected_launch_digest": "a"*64}
             if expiry is not None:
                 body["authorization_expires_at"] = expiry
@@ -499,7 +499,7 @@ def test_unready_standby_release_requires_matching_digest_and_bounded_expiry(tmp
                 "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()}
         for invalid in ({**body, "expected_launch_digest": "b" * 64},
                         {**body, "authorization_expires_at": None},
-                        {**body, "authorization_expires_at": (utcnow()+timedelta(minutes=16)).isoformat()}):
+                        {**body, "authorization_expires_at": (utcnow()+timedelta(hours=25)).isoformat()}):
             assert client.post("/api/control", headers=HEADERS, json=invalid).status_code == 409
             assert engine.risk.kill_switch and not engine.risk.auto_trade
 

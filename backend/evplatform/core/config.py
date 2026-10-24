@@ -40,8 +40,8 @@ class TrustedPilotPolicy(BaseModel):
             if (not self.owner_approved or any(value is None or value == "" for value in required)
                     or len(set(self.trusted_books)) < 2 or len(set(self.trusted_books)) != len(self.trusted_books)):
                 raise ValueError("Trusted live pilot requires an exact, complete owner-reviewed source policy")
-            if self.max_debit_usd > Decimal("1") or self.max_loss_usd > Decimal("1"):
-                raise ValueError("Existing one-dollar pilot ceiling cannot be enlarged here")
+            if self.max_debit_usd > Decimal("5") or self.max_loss_usd > Decimal("5"):
+                raise ValueError("Trusted pilot debit and loss ceilings cannot exceed five dollars")
             if self.independent_crosscheck == "separate_provider" and (
                     not self.crosscheck_provider_id or self.crosscheck_provider_id == self.provider_id):
                 raise ValueError("A separate-provider cross-check needs a second named provider")
