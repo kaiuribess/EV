@@ -86,7 +86,27 @@ function App() {
     catch (e) { notify((e as Error).message, true) }
     finally { setBusy(false) }
   }
+  const releaseStopStandby = async () => {
+    setBusy(true)
+    try {
+      const readiness = await request('/api/readiness')
+      const digest = readiness.profile_digest
+      if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest))
+        throw new Error('A current launch scope is required to release the stop.')
+      const result = await mutate('/api/control', {
+        auto_trade: false,
+        kill_switch: false,
+        expected_launch_digest: digest,
+        authorization_expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+      })
+      if (result.kill_switch !== false || result.auto_trade !== false)
+        throw new Error('The emergency stop was not released. Refresh the current engine state.')
+      notify('Kill switch released for five minutes. Automation remains off; order checks still apply.')
+    } catch (e) { notify((e as Error).message, true) }
+    finally { setBusy(false) }
+  }
   const synthetic = ['demo', 'paper', 'disconnected'].includes(state.mode.toLowerCase())
+  const nativeMode = ['sandbox', 'production'].includes(state.mode)
   const livePaperInputs = state.mode === 'paper' && state.sample_feed_enabled === false
   const freshState = updatedAt !== null && Date.now() - updatedAt < 10000
   return <div className="app">
@@ -106,8 +126,9 @@ function App() {
     <div className="main-shell">
       <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu size={20} /></button><span>Workspace</span><ChevronRight size={13} /><strong>{titles[page][0]}</strong></div><div className="topbar-right"><span className={`connection ${freshState ? 'good' : ''}`}><span className={`live-dot ${freshState ? '' : 'offline'}`} />{connected && freshState ? 'Stream connected' : freshState ? 'Polling fallback' : 'Engine offline'}</span><span className="top-divider" /><span className="utc-clock">{new Date().toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false })}<small>UTC</small></span><button className="icon-button" onClick={() => setLogsOpen(v => !v)} aria-label="Show system events"><Bell size={17} />{state.events.length > 0 && <i className="notification-dot" />}</button></div></header>
       <main>
-        <div className="page-heading"><div><div className="eyebrow">YOUR EDGE, IN FOCUS</div><h1>{titles[page][0]}</h1><p>{titles[page][1]}</p></div><div className="heading-actions"><Badge tone={synthetic ? 'neutral' : 'red'}><span className="small-dot" />{state.mode === 'disconnected' ? 'AWAITING ENGINE' : `${state.mode.toUpperCase()} MODE`}</Badge><button className={`button ${state.kill_switch ? 'danger active-kill' : 'quiet'}`} disabled={busy || !freshState || (state.kill_switch && ['production', 'sandbox'].includes(state.mode))} onClick={() => void control({ kill_switch: !state.kill_switch })}>{state.kill_switch ? <ShieldOff size={15} /> : <ShieldCheck size={15} />}{state.kill_switch ? 'Kill switch active' : 'Kill switch'}</button></div></div>
+        <div className="page-heading"><div><div className="eyebrow">YOUR EDGE, IN FOCUS</div><h1>{titles[page][0]}</h1><p>{titles[page][1]}</p></div><div className="heading-actions"><Badge tone={synthetic ? 'neutral' : 'red'}><span className="small-dot" />{state.mode === 'disconnected' ? 'AWAITING ENGINE' : `${state.mode.toUpperCase()} MODE`}</Badge><button className={`button ${state.kill_switch ? 'danger active-kill' : 'quiet'}`} disabled={busy || !freshState} title={state.kill_switch && nativeMode ? 'Release the stop for five minutes with automation paused' : undefined} onClick={() => { if (state.kill_switch && nativeMode) void releaseStopStandby(); else void control({ kill_switch: !state.kill_switch }) }}>{state.kill_switch ? <ShieldOff size={15} /> : <ShieldCheck size={15} />}{state.kill_switch && nativeMode ? 'Release stop (5 min)' : state.kill_switch ? 'Kill switch active' : 'Kill switch'}</button></div></div>
         {state.kill_switch && <div className="notice danger-notice"><ShieldOff size={17} /><span><strong>Kill switch is active.</strong> New orders are blocked. Review outstanding orders and positions in the trading desk.</span><button onClick={() => setPage('trading')}>View trading <ArrowRight size={14} /></button></div>}
+        {nativeMode && !state.kill_switch && !state.auto_trade && <div className="notice subtle-notice"><ShieldCheck size={17} /><span><strong>Standby release is active.</strong> Automation remains off. Manual orders still require the full launch and risk checks. The stop returns at {clockTime(state.native_authorization_expires_at)} or after a restart.</span></div>}
         {!freshState && <div className="notice connection-notice"><Unplug size={17} /><span><strong>{updatedAt ? 'Connection interrupted.' : 'Waiting for the local engine.'}</strong> {updatedAt ? 'Displayed data is the last received snapshot. Actions are disabled until it reconnects.' : 'Start the backend with start_demo.ps1 to stream the deterministic sample markets.'}</span>{error && <span className="technical-error">{error}</span>}</div>}
         {livePaperInputs && <div className="notice connection-notice"><Radio size={17} /><span><strong>Live Parlay input, hypothetical paper bets.</strong> Parlay prices feed the paper-only sportsbook comparison. Quote status, settlement rules, and offered stake are assumed; fills and capacity are simulated. Native trading remains off.</span></div>}
         {page === 'opportunities' && <Opportunities state={state} history={history} selectMarket={setSelectedMarket} setPage={setPage} />}

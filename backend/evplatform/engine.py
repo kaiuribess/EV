@@ -960,6 +960,8 @@ class Engine:
 
     async def control(self, *, auto_trade=None, kill_switch=None, expected_launch_digest=None,
                       authorization_expires_at=None):
+        standby_release = (self.settings.mode in {"sandbox", "production"}
+                           and kill_switch is False and auto_trade is False)
         def check_native_activation():
             if self.settings.mode in {"demo", "paper"} or not (auto_trade or kill_switch is False):
                 return
@@ -974,7 +976,7 @@ class Engine:
             report = self.native.report()
             if (expected_launch_digest is None or expected_launch_digest != report.profile_digest):
                 raise ValueError("The reviewed launch scope changed; refresh and review before enabling")
-            if not self.settings.live_enabled or not report.safe_to_arm:
+            if not self.settings.live_enabled or (not standby_release and not report.safe_to_arm):
                 raise ValueError("Native execution requires explicit enablement and all launch checks passing")
 
         # Reject an invalid combined enable/reset before modifying or persisting
@@ -982,6 +984,8 @@ class Engine:
         if (kill_switch is False and self.settings.mode in {"sandbox", "production"}
                 and auto_trade is None):
             raise ValueError("Explicitly keep automation paused or enable it with the reviewed scope")
+        if standby_release and self.risk.auto_trade:
+            raise ValueError("Pause automation before releasing the emergency stop in standby")
         if kill_switch is not True:
             check_native_activation()
         previous_stop = (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted,

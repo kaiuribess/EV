@@ -457,6 +457,53 @@ def test_owner_can_release_stop_for_one_manual_order_without_enabling_automation
         assert not engine.risk.kill_switch and not engine.risk.auto_trade
 
 
+def test_unready_owner_can_release_stop_only_into_short_lived_standby(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": False, "profile_digest": "a" * 64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        engine.risk.halt("Offline test stop")
+        expires = (utcnow()+timedelta(seconds=1)).isoformat()
+        body = {"auto_trade": False, "kill_switch": False,
+                "expected_launch_digest": "a" * 64, "authorization_expires_at": expires}
+        assert client.post("/api/control", headers=HEADERS, json=body).status_code == 200
+        assert not engine.risk.kill_switch and not engine.risk.auto_trade
+        with pytest.raises(ValueError, match="Automatic trading is disabled"):
+            engine.risk.check_enabled()
+        with pytest.raises(ValueError, match="release gate has unresolved checks"):
+            engine.native.require_preflight(SimpleNamespace(id="offline-intent", execution_origin="manual"),
+                                            preview_only=True)
+        assert client.post("/api/control", headers=HEADERS,
+            json={**body, "auto_trade": True}).status_code == 409
+        assert not engine.risk.kill_switch and not engine.risk.auto_trade
+        assert client.get("/api/native/orders").json()["orders"] == []
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not engine.risk.kill_switch:
+            time.sleep(.1)
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        assert client.get("/api/health").json()["status"] == "running"
+
+
+def test_unready_standby_release_requires_matching_digest_and_bounded_expiry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": False, "profile_digest": "a" * 64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        engine.risk.halt("Offline test stop")
+        body = {"auto_trade": False, "kill_switch": False,
+                "expected_launch_digest": "a" * 64,
+                "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()}
+        for invalid in ({**body, "expected_launch_digest": "b" * 64},
+                        {**body, "authorization_expires_at": None},
+                        {**body, "authorization_expires_at": (utcnow()+timedelta(minutes=16)).isoformat()}):
+            assert client.post("/api/control", headers=HEADERS, json=invalid).status_code == 409
+            assert engine.risk.kill_switch and not engine.risk.auto_trade
+
+
 def test_activation_failure_cannot_erase_new_safety_halt(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with TestClient(native_app(tmp_path)) as client:
