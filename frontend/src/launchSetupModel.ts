@@ -214,7 +214,8 @@ export function activationBody(report: SetupReport, receivedAt: number, reviewed
   const gate = activationGate(report, receivedAt, now)
   if (!gate.allowed) throw new Error(gate.reason)
   if (!reviewedDigest || reviewedDigest !== report.activation.scope_digest) throw new Error('The trading scope changed. Review the new accounts, markets and limits before enabling.')
-  return { auto_trade: true, kill_switch: false, expected_launch_digest: reviewedDigest }
+  return { auto_trade: true, kill_switch: false, expected_launch_digest: reviewedDigest,
+    authorization_expires_at: new Date(now + 5 * 60 * 1000).toISOString() }
 }
 export function candidateCounts(values: { synthetic?: unknown }[]) {
   return values.reduce<{ real: number; synthetic: number; unknown: number }>((counts, item) => {

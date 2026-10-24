@@ -4,7 +4,7 @@ import asyncio
 import heapq
 import time
 from collections import OrderedDict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from .core.bus import EventBus, SchemaRegistry
@@ -187,6 +187,8 @@ class Engine:
         await self.native.start()
         if saved.get("kill_switch", False) or saved.get("unclean_shutdown", False):
             self.risk.halt("Persisted emergency stop; reset explicitly")
+        if self.settings.mode in {"sandbox", "production"} and not self.risk.kill_switch:
+            self.risk.halt("Native trading authorization never survives restart")
         await self.storage.save_config("unclean_shutdown", True)
         self.risk.auto_trade = self.settings.auto_trade and not self.risk.kill_switch and self.settings.mode in {"demo", "paper"}
         from .plugins.external import register_external
@@ -286,13 +288,14 @@ class Engine:
         return [task.get_name() for task in self.tasks if task.done()]
 
     def stopped_plugin_workers(self):
-        """A dead input worker can be restarted without disturbing other feeds."""
+        """A failed input worker or startup can recover without disturbing other feeds."""
         if self.stopping:
             return []
         return [name for name, record in self.registry.records.items()
-                if (record.enabled or self._plugin_enable_preferences.get(name))
-                and (task := getattr(record.plugin, "task", None)) is not None
-                and task.done()]
+                if (((record.enabled or self._plugin_enable_preferences.get(name))
+                     and (task := getattr(record.plugin, "task", None)) is not None and task.done())
+                    or (self._plugin_enable_preferences.get(name)
+                        and record.health.get("status") == "error"))]
 
     async def notice(self, level, message, component):
         await self.bus.publish(Envelope(schema_name="system.notice", source=component,
@@ -861,6 +864,9 @@ class Engine:
     async def _maintenance(self):
         while True:
             await asyncio.sleep(.5)
+            if (self.settings.mode in {"sandbox", "production"}
+                    and self.risk.expire_native_authorization()):
+                await self.storage.save_config("kill_switch", True)
             now = utcnow().timestamp()
             while self.expirations and self.expirations[0][0] <= now:
                 _, revision, market_id = heapq.heappop(self.expirations)
@@ -952,10 +958,19 @@ class Engine:
         await self.recalculate(result.market_id)
         await self.notice("info", f"Simulated settlement recorded; realized P&L {realized:.2f}", "paper_settlement")
 
-    async def control(self, *, auto_trade=None, kill_switch=None, expected_launch_digest=None):
+    async def control(self, *, auto_trade=None, kill_switch=None, expected_launch_digest=None,
+                      authorization_expires_at=None):
         def check_native_activation():
             if self.settings.mode in {"demo", "paper"} or not (auto_trade or kill_switch is False):
                 return
+            now = utcnow()
+            if (authorization_expires_at is None or authorization_expires_at.tzinfo is None
+                    or not now < authorization_expires_at <= now + timedelta(minutes=15)):
+                raise ValueError("Native trading requires an explicit authorization expiry within 15 minutes")
+            if kill_switch is not False:
+                existing = self.risk.native_authorization_expires_at
+                if existing is None or existing <= now or authorization_expires_at > existing:
+                    raise ValueError("Release the kill switch with a bounded authorization before enabling orders")
             report = self.native.report()
             if (expected_launch_digest is None or expected_launch_digest != report.profile_digest):
                 raise ValueError("The reviewed launch scope changed; refresh and review before enabling")
@@ -969,7 +984,8 @@ class Engine:
             raise ValueError("Explicitly keep automation paused or enable it with the reviewed scope")
         if kill_switch is not True:
             check_native_activation()
-        previous_stop = (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted)
+        previous_stop = (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted,
+                         self.risk.native_authorization_expires_at)
         if kill_switch is True:
             self.risk.halt("Operator emergency stop")
             await self.storage.save_config("kill_switch", True)
@@ -981,6 +997,7 @@ class Engine:
             if self.native.manager.invalidated_settlements:
                 raise ValueError("Repair invalidated native settlement accounting before resetting")
             self.risk.kill_switch, self.risk.kill_reason = False, ""
+            self.risk.native_authorization_expires_at = authorization_expires_at
             self.halt_persisted = False
             await self.storage.save_config("kill_switch", False)
         if auto_trade is not None:
@@ -994,7 +1011,8 @@ class Engine:
                     # A new safety halt raised during the persistence await
                     # takes precedence over the state from before this request.
                     if not self.risk.kill_switch:
-                        self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted = previous_stop
+                        (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted,
+                         self.risk.native_authorization_expires_at) = previous_stop
                     await self.storage.save_config("kill_switch", self.risk.kill_switch)
                 raise
             if auto_trade and self.risk.kill_switch:
@@ -1091,6 +1109,8 @@ class Engine:
             "mode": self.settings.mode, "auto_trade": self.risk.auto_trade,
             "live_enabled": self.settings.live_enabled,
             "kill_switch": self.risk.kill_switch, "kill_reason": self.risk.kill_reason,
+            "native_authorization_expires_at": (self.risk.native_authorization_expires_at.isoformat()
+                if self.risk.native_authorization_expires_at else None),
             "synthetic": self.settings.mode in {"demo", "paper"},
             "sample_feed_enabled": self.settings.sample_feed_enabled,
             "started_at": self.started_at.isoformat(),

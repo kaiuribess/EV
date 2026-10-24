@@ -88,6 +88,7 @@ async def system(tmp_path):
     await storage.open()
     risk = RiskEngine(RiskConfig(live_max_order_stake=D("1")))
     risk.auto_trade = True
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     schemas = SchemaRegistry()
     schemas.register("native.order", 1, NativeOrder)
     schemas.register("native.settlement", 1, NativeSettlement)
@@ -173,12 +174,14 @@ async def test_one_native_attempt_cap_survives_restart_and_unknown_outcome(syste
     assert len(adapter.submissions) == 1
     risk.kill_switch = False
     risk.auto_trade = True
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
         await manager.execute(order(market))
     risk.native_orders.clear()
     await manager.start()
     risk.kill_switch = False
     risk.auto_trade = True
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
         await manager.execute(order(market))
     assert len(adapter.submissions) == 1

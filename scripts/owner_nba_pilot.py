@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -180,7 +180,9 @@ def submit_saved(args) -> int:
         _claim_attempt(args.proposal_file, proposal["proposal_digest"])
         try:
             post(client, "/api/control", {"auto_trade": False, "kill_switch": False,
-                                          "expected_launch_digest": proposal["profile_digest"]})
+                                          "expected_launch_digest": proposal["profile_digest"],
+                                          "authorization_expires_at": (datetime.now(timezone.utc)
+                                              + timedelta(minutes=5)).isoformat()})
             state = get(client, "/api/state")
             if state.get("auto_trade") is not False or state.get("kill_switch") is not False:
                 raise ValueError("Manual-only arming did not take effect")

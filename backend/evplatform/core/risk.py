@@ -38,6 +38,9 @@ class RiskEngine:
         self.auto_trade = False
         self.kill_switch = False
         self.kill_reason = ""
+        # Native permission is process-local and time-bounded. A restart never
+        # rehydrates this lease from the durable account or order ledger.
+        self.native_authorization_expires_at = None
         self.daily_realized = Decimal(0)
         self.daily_date = utcnow().date()
         self.orders: dict[str, Order] = {}
@@ -64,8 +67,16 @@ class RiskEngine:
 
     def halt(self, reason):
         self.kill_switch, self.auto_trade, self.kill_reason = True, False, reason
+        self.native_authorization_expires_at = None
         if self.on_halt:
             self.on_halt(reason)
+
+    def expire_native_authorization(self):
+        deadline = self.native_authorization_expires_at
+        if not self.kill_switch and (deadline is None or utcnow() >= deadline):
+            self.halt("Native trading authorization expired or missing")
+            return True
+        return False
 
     def cost(self, order):
         if order.id in self.settled:
@@ -103,6 +114,8 @@ class RiskEngine:
             if self.config.daily_loss_limit is not None and self.daily_realized <= -self.config.daily_loss_limit:
                 raise RiskRejected("Daily realized loss limit reached")
         else:
+            if self.expire_native_authorization():
+                raise RiskRejected("Native trading authorization expired or missing")
             self.check_enabled(order.id if getattr(order, "execution_origin", "automatic") == "manual" else None)
         if (not reserved and self.config.max_native_order_attempts is not None
                 and len(self.native_orders) >= self.config.max_native_order_attempts):

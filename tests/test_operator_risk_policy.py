@@ -1,10 +1,11 @@
 """Operator $5/cash-only/no-overlap configuration; entirely offline."""
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 
 from evplatform.core.config import RiskConfig
-from evplatform.core.models import OrderStatus
+from evplatform.core.models import OrderStatus, utcnow
 from evplatform.core.readiness import LiveLimits
 from evplatform.core.risk import RiskEngine, RiskRejected
 from test_position_conflicts import risk, candidate, fresh
@@ -81,6 +82,7 @@ def test_native_cash_policy_still_enforces_five_dollar_all_in_cap(market):
                         daily_loss_limit=None, max_order_stake="5", live_max_order_stake="5")
     risk = RiskEngine(config)
     risk.auto_trade = True
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     valid = order(market)
     risk.check_native_reservation(valid)  # Cash/preflight is a separate required OMS check.
     too_large = valid.model_copy(update={"intent": valid.intent.model_copy(update={"quantity": Decimal("1200")})})

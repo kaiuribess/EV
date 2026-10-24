@@ -57,7 +57,8 @@ test('quarter Kelly accepts cash-bounded stakes without turning the reporting un
 test('valid current production approval can prepare a digest-bound body without executing it', () => {
   const parsed = parseSetupReport(report())
   assert.equal(activationGate(parsed, NOW, NOW).allowed, true)
-  assert.deepEqual(activationBody(parsed, NOW, DIGEST, NOW), { auto_trade: true, kill_switch: false, expected_launch_digest: DIGEST })
+  assert.deepEqual(activationBody(parsed, NOW, DIGEST, NOW), { auto_trade: true, kill_switch: false,
+    expected_launch_digest: DIGEST, authorization_expires_at: new Date(NOW + 5 * 60 * 1000).toISOString() })
 })
 test('one-order pilot defers only historical proof after the backend approves the exact live scope', () => {
   const raw = report()

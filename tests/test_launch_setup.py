@@ -2,6 +2,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+import time
 
 from fastapi.testclient import TestClient
 import pytest
@@ -354,7 +355,8 @@ def test_review_digest_mismatch_rejected_before_changing_stop(tmp_path, monkeypa
         engine.settings.live_enabled = True
         engine.risk.kill_switch = True
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "b"*64})
+            "kill_switch": False, "expected_launch_digest": "b"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 409
         assert engine.risk.kill_switch and not engine.risk.auto_trade
 
@@ -378,7 +380,8 @@ def test_gate_change_during_reset_restores_saved_emergency_stop(tmp_path, monkey
                 engine.native.report = lambda *args: failed
         engine.storage.save_config = interrupted_save
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "a"*64})
+            "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 409
         assert engine.risk.kill_switch and not engine.risk.auto_trade
         assert saved == [("kill_switch", False), ("kill_switch", True)]
@@ -393,10 +396,46 @@ def test_matching_review_digest_allows_operator_control_in_offline_fixture(tmp_p
         engine.settings.live_enabled = True
         engine.risk.kill_switch = True
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "a"*64})
+            "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 200
         assert not engine.risk.kill_switch and engine.risk.auto_trade
         assert client.get("/api/native/orders").json()["orders"] == []
+
+
+def test_native_activation_requires_an_explicit_short_lease(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": True, "profile_digest": "a"*64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        for expiry in (None, (utcnow()-timedelta(seconds=1)).isoformat(),
+                       (utcnow()+timedelta(minutes=16)).isoformat()):
+            body = {"auto_trade": True, "kill_switch": False, "expected_launch_digest": "a"*64}
+            if expiry is not None:
+                body["authorization_expires_at"] = expiry
+            assert client.post("/api/control", headers=HEADERS, json=body).status_code == 409
+            assert engine.risk.kill_switch and not engine.risk.auto_trade
+
+
+def test_native_authorization_expiry_keeps_research_engine_running(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": True, "profile_digest": "a"*64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        response = client.post("/api/control", headers=HEADERS, json={
+            "auto_trade": True, "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(seconds=1)).isoformat()})
+        assert response.status_code == 200
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not engine.risk.kill_switch:
+            time.sleep(.1)
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        assert engine.risk.native_authorization_expires_at is None
+        assert client.get("/api/health").json()["status"] == "running"
 
 
 def test_owner_can_release_stop_for_one_manual_order_without_enabling_automation(tmp_path, monkeypatch):
@@ -412,7 +451,8 @@ def test_owner_can_release_stop_for_one_manual_order_without_enabling_automation
         assert engine.risk.kill_switch and not engine.risk.auto_trade
         response = client.post("/api/control", headers=HEADERS,
             json={"auto_trade": False, "kill_switch": False,
-                  "expected_launch_digest": "a" * 64})
+                  "expected_launch_digest": "a" * 64,
+                  "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 200
         assert not engine.risk.kill_switch and not engine.risk.auto_trade
 
@@ -434,7 +474,8 @@ def test_activation_failure_cannot_erase_new_safety_halt(tmp_path, monkeypatch):
                 engine.native.report = lambda *args: base
         engine.storage.save_config = interrupted_save
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "a"*64})
+            "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 409
         assert engine.risk.kill_switch and engine.risk.kill_reason == "OFFLINE new safety halt"
         assert not engine.risk.auto_trade

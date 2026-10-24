@@ -4,7 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 from evplatform.core.config import Settings
+from evplatform.core.config import RiskConfig
+from evplatform.core.models import utcnow
+from evplatform.core.risk import RiskEngine
 from evplatform.engine import Engine
+from evplatform.plugins.external import register_external
+from datetime import timedelta
 
 
 @pytest.mark.asyncio
@@ -42,3 +47,25 @@ async def test_only_intended_stopped_plugin_workers_are_restartable(tmp_path):
     finally:
         active.cancel()
         await asyncio.gather(active, return_exceptions=True)
+
+
+def test_expired_native_lease_disarms_but_does_not_stop_scanner():
+    risk = RiskEngine(RiskConfig())
+    risk.kill_switch = False
+    risk.auto_trade = True
+    risk.native_authorization_expires_at = utcnow() - timedelta(seconds=1)
+    assert risk.expire_native_authorization()
+    assert risk.kill_switch and not risk.auto_trade
+    assert risk.native_authorization_expires_at is None
+
+
+def test_failed_enabled_input_startup_is_recoverable_without_reviving_operator_disabled_input(tmp_path):
+    engine = Engine(Settings(mode="production", database_path=str(tmp_path / "startup.db")))
+    register_external(engine.registry, engine)
+    failed = engine.registry.records["novig"]
+    failed.enabled = False
+    failed.health = {"status": "error", "message": "Plugin failed: FileNotFoundError"}
+    engine._plugin_enable_preferences["novig"] = True
+    assert "novig" in engine.stopped_plugin_workers()
+    engine._plugin_enable_preferences["novig"] = False
+    assert "novig" not in engine.stopped_plugin_workers()

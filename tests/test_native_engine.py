@@ -108,7 +108,9 @@ async def test_offline_native_engine_stream_risk_fill_audit_and_restart(tmp_path
         assert engine.native.signals[market.id].status == "NEGATIVE EV"
         assert not adapter.submissions
 
+        engine.risk.kill_switch = False  # OFFLINE gate fixture only.
         engine.risk.auto_trade = True
+        engine.risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
         await engine.bus.publish(Envelope(schema_name="exchange.native_book", source="OFFLINE fixture", payload=positive))
         await asyncio.wait_for(engine.process_queue.join(), 2)
         await asyncio.wait_for(engine.risk_queue.join(), 2)

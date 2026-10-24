@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,6 +29,7 @@ class ControlBody(BaseModel):
     auto_trade: bool | None = None
     kill_switch: bool | None = None
     expected_launch_digest: str | None = None
+    authorization_expires_at: datetime | None = None
 
 
 class ToggleBody(BaseModel):
