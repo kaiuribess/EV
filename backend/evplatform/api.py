@@ -170,7 +170,11 @@ def create_app(settings=None):
 
     @app.get("/api/health")
     async def health():
-        return {"status": "running", "mode": engine.settings.mode, "kill_switch": engine.risk.kill_switch}
+        stopped = engine.stopped_workers()
+        return {"status": "degraded" if stopped else "running",
+                "mode": engine.settings.mode, "kill_switch": engine.risk.kill_switch,
+                "critical_workers_stopped": stopped,
+                "plugin_workers_stopped": engine.stopped_plugin_workers()}
 
     @app.get("/api/state")
     async def state():

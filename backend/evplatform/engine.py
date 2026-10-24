@@ -279,6 +279,21 @@ class Engine:
             exception = task.exception()
             self.risk.halt(f"Critical worker stopped: {task.get_name()} ({type(exception).__name__})")
 
+    def stopped_workers(self):
+        """Expose failed core tasks to the local process supervisor."""
+        if self.stopping:
+            return []
+        return [task.get_name() for task in self.tasks if task.done()]
+
+    def stopped_plugin_workers(self):
+        """A dead input worker can be restarted without disturbing other feeds."""
+        if self.stopping:
+            return []
+        return [name for name, record in self.registry.records.items()
+                if (record.enabled or self._plugin_enable_preferences.get(name))
+                and (task := getattr(record.plugin, "task", None)) is not None
+                and task.done()]
+
     async def notice(self, level, message, component):
         await self.bus.publish(Envelope(schema_name="system.notice", source=component,
                                        payload=Notice(level=level, message=message, component=component)))
