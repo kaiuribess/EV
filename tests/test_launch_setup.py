@@ -139,6 +139,44 @@ def test_pricing_launch_check_only_requires_scoped_books_and_profile(engine, mar
     assert requirements["pricing.profiles"]["status"] == "pending"
 
 
+def test_approved_trusted_pilot_does_not_require_strict_source_ttl_rules(engine, market):
+    market = market.model_copy(update={"sport": "football", "league": "NFL",
+        "market_type": "player_prop", "player": "Reviewed Player", "player_id": "player-1",
+        "statistic": "receptions", "line": Decimal("3.5"), "outcomes": ("over", "under"),
+        "status": "scheduled", "start_time": utcnow()+timedelta(hours=2),
+        "settlement": market.settlement.model_copy(update={"period": "FULL", "overtime": "included"}),
+        "extensions": {"normal_outcome_reviewed": True, "reviewed_normal_rule_id": "rule-nfl-2026"}})
+    profile, *_ = ready_fixture("production")
+    engine.native.profile = profile.model_copy(update={"venue": "novig", "market_ids": (market.id,),
+        "provider_ids": ("parlay_rest",), "settlement_policy": "novig_ioc_win_loss_halt_on_exception"})
+    engine.markets[market.id] = market
+    selector = {"sport": "football", "league": "NFL", "market_type": "player_prop",
+        "statistic": "receptions"}
+    research_profile = ReferenceProfile(selectors=(selector,), weights_percent={
+        "fanduel": Decimal(25), "draftkings": Decimal(25),
+        "caesars": Decimal(25), "bet365": Decimal(25)},
+        min_distinct_books=3, status="research_only", live_execution_allowed=False)
+    pilot = {"enabled": True, "owner_approved": True, "provider_id": "parlay_rest",
+        "trusted_books": ["fanduel", "draftkings", "caesars", "bet365"],
+        "min_distinct_books": 3, "accept_unknown_active_status": True,
+        "accept_unknown_quote_observation_age": True, "max_indicator_age_ms": 30000,
+        "independent_crosscheck": "two_distinct_books",
+        "uncertainty_margin_probability": "0.01", "max_debit_usd": "5",
+        "max_loss_usd": "5", "approval_evidence": "owner scoped source approval",
+        "market_scope": {"venue": "novig", "sport": "football", "league": "NFL",
+            "market_type": "player_prop", "statistics": ["receptions"],
+            "reviewed_normal_rule_id": "rule-nfl-2026"}}
+    engine.settings.pricing = PricingConfig(reference_quality_mode="trusted_provider",
+        normal_outcome_policy="winner_only_binary", reference_profile_mode="strict",
+        reference_profiles={"pilot_research_weights": research_profile},
+        enabled_reference_profiles=["pilot_research_weights"], trusted_pilot_policy=pilot)
+    requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
+    assert requirements["pricing.profiles"]["status"] == "passed"
+    market.extensions["reviewed_normal_rule_id"] = "unreviewed-change"
+    requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
+    assert requirements["pricing.profiles"]["status"] == "pending"
+
+
 def test_unsupported_settlement_is_visible_even_without_launch_profile(engine):
     report = launch_setup(engine)
     poly = account(report, "polymarket_us")

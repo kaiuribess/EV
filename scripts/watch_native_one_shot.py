@@ -19,6 +19,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from evplatform.core.config import TrustedPilotPolicy
+from evplatform.core.models import Market
+
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTH_PATH = ROOT / "data" / "native_one_shot_authorization.json"
@@ -137,34 +140,50 @@ def _scope(setup: dict, state: dict) -> tuple[str, str | None]:
            or p.get("settlement_policy") != SETTLEMENT.get(p.get("venue"))
            or not p.get("markets") for p in profiles):
         return "launch_scope_outside_one_shot_authorization", None
-    # Only the currently implemented exact-market trusted source exception may
-    # arm. Research consensus and an unreviewed dynamic mapping remain blocked.
+    # A dynamic policy may cover more than one newly discovered *reviewed*
+    # market. Every selected launch market must still have a current canonical
+    # identity and pass the same scoped rule used by the pricing engine.
     pricing = setup.get("pricing") or {}
     pilot = pricing.get("trusted_pilot_policy") or {}
-    market_ids = {market.get("id") for p in profiles for market in p["markets"]}
-    if market_ids != {pilot.get("exact_market_id")}:
+    try:
+        policy = TrustedPilotPolicy.model_validate(pilot)
+    except ValueError:
         return "waiting_for_approved_source_and_market_policy", None
-    market_rows = [market for market in state.get("markets", ())
-                   if market.get("id") == pilot.get("exact_market_id")]
-    if len(market_rows) != 1:
+    selected = [row.get("id") for p in profiles for row in p["markets"]]
+    if not selected or len(selected) != len(set(selected)) or any(not isinstance(i, str) for i in selected):
+        return "waiting_for_approved_source_and_market_policy", None
+    current_rows = state.get("markets") or []
+    if not isinstance(current_rows, list):
         return "selected_market_not_in_current_canonical_state", None
-    market = market_rows[0]
-    override = (pricing.get("market_overrides") or {}).get(
-        f"{market.get('sport')}:{market.get('market_type')}", {})
-    if not isinstance(override, dict):
-        return "market_pricing_override_needs_one_shot_review", None
-    resolved = {**pricing, **override}
-    pilot = resolved.get("trusted_pilot_policy") or {}
-    if (resolved.get("reference_quality_mode") != "trusted_provider"
-            or resolved.get("normal_outcome_policy") != "winner_only_binary"
-            or resolved.get("reference_profile_mode") != "strict"
-            or (configured_ev := _money(resolved.get("min_ev"))) is None or configured_ev < MIN_EV
-            or pilot.get("enabled") is not True or pilot.get("owner_approved") is not True
-            or pilot.get("exact_market_id") != market.get("id")
-            or _money(pilot.get("uncertainty_margin_probability")) != MARGIN
-            or (debit := _money(pilot.get("max_debit_usd"))) is None or debit > CAP
-            or (loss := _money(pilot.get("max_loss_usd"))) is None or loss > CAP):
-        return "waiting_for_approved_source_and_market_policy", None
+    for market_id in selected:
+        rows = [row for row in current_rows if isinstance(row, dict) and row.get("id") == market_id]
+        if len(rows) != 1:
+            return "selected_market_not_in_current_canonical_state", None
+        raw_market = rows[0]
+        try:
+            market = Market.model_validate(raw_market)
+        except ValueError:
+            return "selected_market_not_in_current_canonical_state", None
+        if not policy.permits_market(market):
+            return "waiting_for_approved_source_and_market_policy", None
+        if policy.market_scope is not None and any(p.get("venue") != policy.market_scope.venue
+                for p in profiles if any(row.get("id") == market_id for row in p["markets"])):
+            return "waiting_for_approved_source_and_market_policy", None
+        override = (pricing.get("market_overrides") or {}).get(
+            f"{market.sport}:{market.market_type}", {})
+        if not isinstance(override, dict):
+            return "market_pricing_override_needs_one_shot_review", None
+        resolved = {**pricing, **override}
+        if (resolved.get("reference_quality_mode") != "trusted_provider"
+                or resolved.get("normal_outcome_policy") != "winner_only_binary"
+                or resolved.get("reference_profile_mode") != "strict"
+                or (configured_ev := _money(resolved.get("min_ev"))) is None or configured_ev < MIN_EV
+                or resolved.get("trusted_pilot_policy") != pilot
+                or not policy.enabled or not policy.owner_approved
+                or _money(policy.uncertainty_margin_probability) != MARGIN
+                or (debit := _money(policy.max_debit_usd)) is None or debit > CAP
+                or (loss := _money(policy.max_loss_usd)) is None or loss > CAP):
+            return "waiting_for_approved_source_and_market_policy", None
     if setup.get("safe_to_arm") is not True or (setup.get("activation") or {}).get("available") is not True:
         return "waiting_for_live_checks", None
     digest = (setup.get("activation") or {}).get("scope_digest")

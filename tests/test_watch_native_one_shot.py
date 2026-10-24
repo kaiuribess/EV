@@ -36,7 +36,13 @@ def state(*, armed=False):
     return {"mode": "production", "sample_feed_enabled": False, "live_enabled": True,
             "auto_trade": armed, "kill_switch": not armed,
             "native_authorization_expires_at": (NOW+timedelta(hours=1)).isoformat() if armed else None,
-            "markets": [{"id": MARKET, "sport": "football", "market_type": "player_prop"}],
+            "markets": [{"id": MARKET, "event_id": "nfl-event", "event_name": "Home vs Away",
+                "sport": "football", "league": "NFL", "participants": ["Home", "Away"],
+                "start_time": (NOW+timedelta(hours=5)).isoformat(), "market_type": "player_prop",
+                "player": "Reviewed Player", "player_id": "reviewed-player", "statistic": "receptions",
+                "line": "3.5", "outcomes": ["over", "under"],
+                "settlement": {"period": "FULL", "overtime": "included"},
+                "extensions": {}}],
             "risk": risk}
 
 
@@ -53,7 +59,12 @@ def setup(*, ready=True):
             "min_ev": "0.015", "market_overrides": {},
             "trusted_pilot_policy": {"enabled": True, "owner_approved": True,
                 "exact_market_id": MARKET, "uncertainty_margin_probability": "0.01",
-                "max_debit_usd": "5", "max_loss_usd": "5"}},
+                "max_debit_usd": "5", "max_loss_usd": "5", "provider_id": "parlay_rest",
+                "trusted_books": ["fanduel", "draftkings", "caesars"],
+                "min_distinct_books": 3, "accept_unknown_active_status": True,
+                "accept_unknown_quote_observation_age": True,
+                "max_indicator_age_ms": 30000, "independent_crosscheck": "two_distinct_books",
+                "approval_evidence": "owner approved scoped test policy"}},
         "safe_to_arm": ready, "activation": {"available": ready, "scope_digest": DIGEST}}
 
 
@@ -143,6 +154,28 @@ def test_selected_market_override_is_checked_without_blocking_other_sports():
     assert gate._scope(policy, current)[0] == "ready"
     policy["pricing"]["market_overrides"]["football:player_prop"]["min_ev"] = "0.01"
     assert gate._scope(policy, current)[0] == "waiting_for_approved_source_and_market_policy"
+
+
+def test_reviewed_dynamic_nfl_prop_scope_can_reach_existing_launch_gate():
+    current, launch = state(), setup()
+    policy = launch["pricing"]["trusted_pilot_policy"]
+    policy["exact_market_id"] = None
+    policy["market_scope"] = {"venue": "novig", "sport": "football", "league": "NFL",
+        "market_type": "player_prop", "statistics": ["receptions", "receiving_yards"],
+        "period": "FULL", "reviewed_normal_rule_id": "rule-nfl-2026"}
+    current["markets"][0]["extensions"] = {
+        "reviewed_normal_rule_id": "rule-nfl-2026", "normal_outcome_reviewed": True}
+    assert gate._scope(launch, current) == ("ready", DIGEST)
+
+    current["markets"][0]["extensions"]["research_only"] = True
+    assert gate._scope(launch, current)[0] == "waiting_for_approved_source_and_market_policy"
+    del current["markets"][0]["extensions"]["research_only"]
+    current["markets"][0]["line"] = "4"
+    assert gate._scope(launch, current)[0] == "waiting_for_approved_source_and_market_policy"
+    current["markets"][0]["line"] = "3.5"
+    launch["launch_scope"][0]["venue"] = "kalshi"
+    launch["launch_scope"][0]["settlement_policy"] = gate.SETTLEMENT["kalshi"]
+    assert gate._scope(launch, current)[0] == "waiting_for_approved_source_and_market_policy"
 
 
 def test_check_only_and_invalid_limits_make_zero_control_calls(monkeypatch, tmp_path):

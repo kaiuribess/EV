@@ -217,6 +217,21 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                 reference_profiles_ready = False
                 continue
             _, profile = selected
+            from .pricing import market_config
+            source_config = market_config(pricing, market)
+            pilot = source_config.trusted_pilot_policy
+            if (source_config.reference_quality_mode == "trusted_provider"
+                    and source_config.normal_outcome_policy == "winner_only_binary"
+                    and pilot.enabled and pilot.owner_approved and pilot.permits_market(market)
+                    and (pilot.market_scope is None or pilot.market_scope.venue == launch_profile.venue)
+                    and pilot.provider_id in launch_profile.provider_ids
+                    and len(set(pilot.trusted_books).intersection(profile.weights_percent))
+                        >= max(pilot.min_distinct_books, profile.min_distinct_books)):
+                # The separate owner-approved provider-trust route is checked
+                # against actual quote evidence by fair_value and runtime
+                # readiness. It intentionally does not claim exact-source TTL
+                # verification or promote this research profile globally.
+                continue
             rules = {rule.bookmaker for rule in pricing.profile_freshness_rules
                 if rule.verified and rule.provider in launch_profile.provider_ids
                 and rule.matches(market) and rule.phase == profile.phase
@@ -225,7 +240,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                     or not set(profile.required_any_anchor).intersection(rules)):
                 reference_profiles_ready = False
         requirement("pricing.profiles", reference_profiles_ready, "Validate reference profiles for live execution",
-            "Validate only the selected launch markets with enough independent exact-source freshness rules and an anchor; every current quote must still pass status, completeness and sensitivity checks.", external=True)
+            "Selected markets need either sufficient exact-source rules and an anchor, or an approved scoped provider-trust pilot; every current quote must still pass status, completeness and sensitivity checks.", external=True)
     relevant_software = [item for item in software_blockers if not profiles or item.scope in profiles]
     requirement("software.settlement", bool(accounts) and not relevant_software,
         "Complete venue settlement support",
