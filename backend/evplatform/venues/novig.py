@@ -496,6 +496,7 @@ class NovigClient(NativeTransport):
             self.book.reset()
             self._nonce = 0
             recovery_nonce = None
+            recovery_deadline = None
             resync_attempts = 0
             try:
                 await self._refresh_configured_subscriptions()
@@ -509,8 +510,16 @@ class NovigClient(NativeTransport):
                     frames = aiter(socket)
                     while True:
                         try:
+                            # The resnapshot has an absolute deadline. Market
+                            # deltas or heartbeats can keep arriving while its
+                            # acknowledgement never does; a per-frame timeout
+                            # would then retain an invalid book indefinitely.
+                            remaining = (recovery_deadline - time.monotonic()
+                                         if recovery_deadline is not None else None)
+                            if remaining is not None and remaining <= 0:
+                                raise TimeoutError("Novig book resnapshot timed out")
                             raw = await asyncio.wait_for(anext(frames),
-                                timeout=self.settings.timeout_seconds if recovery_nonce is not None else None)
+                                timeout=remaining)
                         except StopAsyncIteration:
                             break
                         frame = json.loads(raw, parse_float=Decimal)
@@ -530,6 +539,7 @@ class NovigClient(NativeTransport):
                                 raise VenueError("Novig book resnapshot was rejected or incomplete")
                             self.book.apply(frame)
                             recovery_nonce = None
+                            recovery_deadline = None
                             self.health = "streaming"
                             self.health_reason = "Novig WebSocket book resnapshot confirmed"
                             failures = 0
@@ -569,6 +579,7 @@ class NovigClient(NativeTransport):
                             self._record_sequence_gap(exc)
                             yield self._invalidate_stream("resyncing", "Novig book gap; awaiting a fresh snapshot")
                             recovery_nonce = await self._command("snapshot", self.selection, wait=False)
+                            recovery_deadline = time.monotonic() + self.settings.timeout_seconds
                             continue
                         if nonce == subscription_nonce and "subscribed" in frame:
                             self.health = "streaming"

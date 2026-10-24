@@ -1,4 +1,5 @@
 """Offline Novig connection health checks; no credentials or network access."""
+import asyncio
 import json
 from decimal import Decimal
 
@@ -393,6 +394,47 @@ async def test_book_gap_resnapshots_on_same_socket_and_blocks_old_depth(native, 
     finally:
         await updates.aclose()
     assert native.book.asks(MONITOR_OPEN, outcome) == []
+
+
+async def test_book_resnapshot_timeout_is_absolute_despite_continuing_heartbeats(native, monkeypatch):
+    first = {"nonce": 1, "subscribed": {"markets": {MONITOR_OPEN: "book"}},
+        "snapshot": {MONITOR_OPEN: {"lifecycle": {"seq": 1, "status": "OPEN"},
+            "book": {"seq": 1, "orders": {"opposing": [
+                {"orderId": "known", "price": "0.4", "qty": 8}]}}}}}
+    gap = {"delta": {MONITOR_OPEN: {"book": {"seq": 2,
+        "deltas": [{"kind": "remove", "orderId": "unseen"}]}}}}
+
+    class HeartbeatSocket(Socket):
+        async def __anext__(self):
+            try:
+                return json.dumps(next(self.frames))
+            except StopIteration:
+                await asyncio.sleep(0.005)
+                return json.dumps({"heartbeat": {"ts": 1757894415123}})
+
+    first_socket = HeartbeatSocket([first, gap])
+    sessions = iter([first_socket, Socket([first])])
+    native.selection["markets"] = {MONITOR_OPEN: "book"}
+    native.settings.timeout_seconds = 0.05
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *args, **kwargs: next(sessions))
+    async def immediate_backoff(_failures):
+        return None
+    monkeypatch.setattr(native, "_backoff", immediate_backoff)
+    updates = native.stream_updates()
+    try:
+        assert await anext(updates) == first
+        assert (await anext(updates))["reason"] == "resyncing"
+        assert native.book.asks(MONITOR_OPEN, "opposing") == []
+        # Heartbeats arrive faster than each socket read timeout. They must not
+        # postpone recovery forever when nonce 2 never receives its snapshot.
+        invalidation = await asyncio.wait_for(anext(updates), timeout=1)
+        assert invalidation["reason"] == "reconnecting"
+        assert native.book.asks(MONITOR_OPEN, "opposing") == []
+        assert await asyncio.wait_for(anext(updates), timeout=1) == first
+        assert native.book.asks(MONITOR_OPEN, "opposing") == [(Decimal("0.6"), 8)]
+        assert first_socket.sent[1]["snapshot"] == native.selection
+    finally:
+        await updates.aclose()
 
 
 async def test_disconnected_novig_book_cannot_remain_executable(native):
