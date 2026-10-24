@@ -162,10 +162,16 @@ def test_known_failed_lifecycle_evidence_is_not_waived_for_pilot():
     assert "evidence.native_lifecycle" in codes(report)
 
 
-def test_validation_pilot_rejects_unbounded_or_non_kalshi_scope():
+def test_validation_pilot_accepts_scoped_novig_and_rejects_wrong_venue_policy():
     profile, _, _ = pilot_fixture()
+    novig = LaunchProfile.model_validate({**profile.model_dump(), "venue": "novig",
+        "settlement_policy": "novig_ioc_win_loss_halt_on_exception"})
+    assert novig.validation_pilot and novig.limits.max_native_order_attempts == 1
     with pytest.raises(ValidationError):
         LaunchProfile.model_validate({**profile.model_dump(), "venue": "novig"})
+    with pytest.raises(ValidationError):
+        LaunchProfile.model_validate({**profile.model_dump(), "venue": "prophetx",
+            "settlement_policy": "prophetx_funded_cash_win_loss_halt_on_exception"})
     with pytest.raises(ValidationError):
         LaunchProfile.model_validate({**profile.model_dump(), "limits": {
             **profile.limits.model_dump(), "max_native_order_attempts": None}})

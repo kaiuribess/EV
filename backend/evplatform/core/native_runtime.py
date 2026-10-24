@@ -758,12 +758,15 @@ class NativeRuntime:
             source_config = market_config(self.engine.settings.pricing, market)
             if source_config.reference_quality_mode == "trusted_provider":
                 pilot = source_config.trusted_pilot_policy
-                if (order.execution_origin != "manual" or not p.validation_pilot
+                automatic = (order.execution_origin == "automatic"
+                             and self.engine.risk.auto_trade and not self.engine.risk.kill_switch)
+                if (not (manual or automatic or (preview_only and order.execution_origin == "manual"))
+                        or not p.validation_pilot
                         or p.limits.max_native_order_attempts != 1
                         or not pilot.enabled or not pilot.owner_approved
                         or pilot.exact_market_id != order.market_id
                         or order.reserved_cost > min(pilot.max_debit_usd, pilot.max_loss_usd)):
-                    raise RiskRejected("Trusted-provider pilot permits one scoped manual attempt only")
+                    raise RiskRejected("Trusted-provider pilot permits one scoped authorized attempt only")
                 if any(previous.id != order.id and previous.market_id == order.market_id
                        and previous.venue == order.venue and previous.mode == order.mode
                        and previous.account_fingerprint == order.account_fingerprint
@@ -987,9 +990,7 @@ class NativeRuntime:
         await self.engine.bus.publish(Envelope(schema_name="native.signal", source="native_positive_ev", payload=observation))
         for candidate in candidates:
             self.candidates[(candidate.market_id, candidate.venue, candidate.outcome)] = candidate
-            if (candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch
-                    and market_config(self.engine.settings.pricing,
-                                      self.engine.markets[market_id]).reference_quality_mode != "trusted_provider"):
+            if (candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch):
                 await self.engine.bus.publish(Envelope(schema_name="trade.native_candidate", source=candidate.strategy, payload=candidate))
 
     def bind_client(self, venue, client):

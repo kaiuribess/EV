@@ -151,8 +151,12 @@ class LaunchProfile(StrictRecord):
         caps = (limits.max_order_stake_usd, limits.max_event_exposure_usd,
                 limits.max_player_exposure_usd, limits.max_venue_exposure_usd,
                 limits.max_correlated_exposure_usd, limits.max_total_exposure_usd)
-        if (self.venue != "kalshi" or self.environment != "production"
-                or self.settlement_policy != "kalshi_ioc_binary_halt_on_exception"
+        pilot_settlement = {
+            "kalshi": "kalshi_ioc_binary_halt_on_exception",
+            "novig": "novig_ioc_win_loss_halt_on_exception",
+        }
+        if (self.environment != "production"
+                or self.settlement_policy != pilot_settlement.get(self.venue)
                 or any(cap is None or cap > Decimal("1") for cap in caps)
                 or limits.max_native_order_attempts != 1
                 or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1
@@ -161,7 +165,7 @@ class LaunchProfile(StrictRecord):
                 or limits.stake_sizing != "quarter_kelly" or limits.unit_size_usd != Decimal("5")
                 or set(self.strategy_ids) != {"native_positive_ev"}
                 or self.min_reference_books < 2):
-            raise ValueError("Validation pilot requires one $1 Kalshi attempt with cash and overlap limits")
+            raise ValueError("Validation pilot requires one $1 supported-venue attempt with cash and overlap limits")
         return self
 
     @field_validator("market_ids", "strategy_ids", "provider_ids")

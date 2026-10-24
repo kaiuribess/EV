@@ -480,13 +480,13 @@ def test_synthetic_trusted_positive_ev_is_research_only_without_order_intent():
             mode="production", now=NOW)
 
 
-def approved_pilot_case():
-    market, quotes, book = trusted_native_fixture()
+def approved_pilot_case(at=NOW):
+    market, quotes, book = trusted_native_fixture(at)
     quotes = [quote.model_copy(update={
         "normal_outcome_verified": True,
         "normal_outcome_evidence": "OFFLINE reviewed ordinary winner identity",
-        "source_stored_at": NOW - timedelta(seconds=1),
-        "source_scope_poll_at": NOW - timedelta(seconds=1),
+        "source_stored_at": at - timedelta(seconds=1),
+        "source_scope_poll_at": at - timedelta(seconds=1),
         "source_scope_is_current": True,
     }) for quote in quotes]
     policy = TrustedPilotPolicy(enabled=True, owner_approved=True,
@@ -498,6 +498,39 @@ def approved_pilot_case():
         max_loss_usd=Decimal("1"), approval_evidence="OFFLINE owner-policy fixture only")
     scoped = config().model_copy(update={"trusted_pilot_policy": policy})
     return market, quotes, book, scoped
+
+
+@pytest.mark.asyncio
+async def test_approved_trusted_pilot_emits_one_automatic_native_candidate_only_while_armed():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from evplatform.core.native_runtime import NativeRuntime
+    from evplatform.core.risk import RiskEngine
+    from evplatform.core.config import RiskConfig
+    from evplatform.plugins.native_positive_ev import NativePositiveEV
+
+    market, quotes, book, scoped = approved_pilot_case(utcnow())
+    risk = RiskEngine(RiskConfig(max_order_stake=Decimal("1"), live_max_order_stake=Decimal("1"),
+        live_stake_authorized=True, stake_sizing="quarter_kelly"))
+    risk.auto_trade, risk.kill_switch = True, False
+    publish = AsyncMock()
+    engine = SimpleNamespace(risk=risk, settings=SimpleNamespace(pricing=scoped, mode="production"),
+        markets={market.id: market}, quotes={market.id: {q.bookmaker: q for q in quotes}},
+        registry=SimpleNamespace(records={"native_positive_ev": SimpleNamespace(
+            enabled=True, plugin=NativePositiveEV())}), bus=SimpleNamespace(publish=publish))
+    runtime = SimpleNamespace(engine=engine, books={(market.id, "kalshi", "Home"): book},
+        candidates={}, signals={}, sizing_cash=lambda venue: Decimal("50"))
+
+    await NativeRuntime.recalculate(runtime, market.id)
+    assert len(runtime.candidates) == 1
+    assert runtime.candidates[(market.id, "kalshi", "Home")].qualified
+    assert [call.args[0].schema_name for call in publish.call_args_list] == [
+        "native.signal", "trade.native_candidate"]
+
+    risk.kill_switch = True
+    publish.reset_mock()
+    await NativeRuntime.recalculate(runtime, market.id)
+    assert [call.args[0].schema_name for call in publish.call_args_list] == ["native.signal"]
 
 
 def test_approved_fixture_pilot_reaches_fee_and_kelly_bounded_native_candidate():
@@ -652,7 +685,7 @@ async def test_approved_fixture_pilot_can_be_previewed_without_placement_or_armi
     assert not risk.auto_trade and risk.kill_switch
 
 
-def test_trusted_pilot_preflight_rejects_automatic_route_and_prior_attempt():
+def test_trusted_pilot_preflight_requires_armed_automatic_route_and_blocks_prior_attempt():
     from types import SimpleNamespace
     from evplatform.core.native_runtime import NativeRuntime
     from evplatform.core.risk import RiskEngine, RiskRejected
@@ -662,20 +695,31 @@ def test_trusted_pilot_preflight_rejects_automatic_route_and_prior_attempt():
     risk = RiskEngine(RiskConfig())
     risk.kill_switch = True
     account = "a" * 64
-    profile = SimpleNamespace(venue="kalshi", environment="production",
+    profile = SimpleNamespace(venue="novig", environment="production",
         account_fingerprint=account, market_ids=(market.id,),
         strategy_ids=("native_positive_ev",), validation_pilot=True,
+        settlement_policy="full", evidence=(SimpleNamespace(expires_at=utcnow()+timedelta(minutes=1)),),
+        digest=lambda: "OFFLINE-profile",
         limits=SimpleNamespace(max_native_order_attempts=1))
     runtime = SimpleNamespace(
         report=lambda: SimpleNamespace(safe_to_arm=True, live_trading_ready=True,
                                        sandbox_trading_ready=False),
         profile_for=lambda venue: profile,
+        account_snapshots={"novig": SimpleNamespace(cash_available_verified=True,
+                                                      balance_usd=Decimal("25"))},
+        manager=SimpleNamespace(adapters={"novig": SimpleNamespace(client=object(), preflight=None)}),
         engine=SimpleNamespace(settings=SimpleNamespace(live_enabled=True, pricing=scoped),
                                markets={market.id: market}, risk=risk))
-    base = dict(id="current", venue="kalshi", mode="production",
+    base = dict(id="current", venue="novig", mode="production",
         account_fingerprint=account, market_id=market.id,
         strategy="native_positive_ev", reserved_cost=Decimal("0.40"))
-    with pytest.raises(RiskRejected, match="manual attempt only"):
+    with pytest.raises(RiskRejected, match="authorized attempt only"):
+        NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="automatic"))
+    risk.auto_trade, risk.kill_switch = True, False
+    NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="automatic"))
+    assert runtime.manager.adapters["novig"].preflight.native_trading_enabled is True
+    risk.kill_switch = True
+    with pytest.raises(RiskRejected, match="authorized attempt only"):
         NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="automatic"))
     risk.native_orders["prior"] = SimpleNamespace(**(base | {"id": "prior"}),
                                                     execution_origin="manual")
