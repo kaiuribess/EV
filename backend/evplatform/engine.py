@@ -322,6 +322,14 @@ class Engine:
                         refund_fees_returned=payload.refund_fees_returned)
                 else:
                     await self.signal_ledger.process(event.payload)
+            except ValueError as exc:
+                if str(exc) != "Signal observations must be processed in timestamp order":
+                    raise
+                # A delayed historical observation cannot replace a newer
+                # episode. Keep the read-only scanner alive, but halt execution
+                # until the discarded audit observation is reviewed.
+                self.metrics.counters["out_of_order_signal_observations"] += 1
+                self.risk.halt("Out-of-order signal observation rejected; review signal provenance")
             finally:
                 self.signal_queue.task_done()
 

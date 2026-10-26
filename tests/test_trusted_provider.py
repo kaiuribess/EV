@@ -618,9 +618,28 @@ def test_prophetx_recurring_scope_requires_reviewed_exact_nfl_moneyline():
         market.model_copy(update={"settlement": market.settlement.model_copy(update={"period": "1H"})}),
     ):
         assert not scope.matches(altered)
+    prop_scope = TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
+        market_type="player_prop", statistics=("receptions",), reviewed_normal_rule_id=rule_id)
+    prop = market.model_copy(update={"market_type": "player_prop", "player": "Fixture Player",
+        "player_id": "fixture-player-id", "statistic": "receptions", "line": Decimal("3.5"),
+        "outcomes": ("over", "under")})
+    assert prop_scope.matches(prop)
+    assert not prop_scope.matches(prop.model_copy(update={"player_id": None}))
+    assert not prop_scope.matches(prop.model_copy(update={"settlement": prop.settlement.model_copy(
+        update={"period": "1H"})}))
+    nba_scope = TrustedPilotMarketScope(venue="prophetx", sport="basketball", league="NBA",
+        market_type="player_prop", statistics=("points", "rebounds", "assists"),
+        reviewed_normal_rule_id=rule_id)
+    nba_prop = prop.model_copy(update={"sport": "basketball", "league": "NBA",
+        "statistic": "points", "line": Decimal("24.5")})
+    assert nba_scope.matches(nba_prop)
+    assert not nba_scope.matches(nba_prop.model_copy(update={"statistic": "shots_on_goal"}))
     with pytest.raises(ValueError, match="ProphetX pilot scope"):
         TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
-            market_type="player_prop", statistics=("receptions",), reviewed_normal_rule_id=rule_id)
+            market_type="player_prop", statistics=("shots_on_goal",), reviewed_normal_rule_id=rule_id)
+    with pytest.raises(ValueError, match="sport and league"):
+        TrustedPilotMarketScope(venue="prophetx", sport="basketball", league="NFL",
+            market_type="moneyline", reviewed_normal_rule_id=rule_id)
     with pytest.raises(ValueError, match="Novig pilot scope"):
         TrustedPilotMarketScope(venue="novig", sport="football", league="NFL",
             market_type="moneyline", reviewed_normal_rule_id=rule_id)

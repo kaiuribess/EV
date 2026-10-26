@@ -12,10 +12,12 @@ class TrustedPilotMarketScope(BaseModel):
     """A rule-bound normal question, not approval of a discovered native ID."""
     model_config = ConfigDict(extra="forbid")
     venue: Literal["novig", "prophetx"]
-    sport: Literal["football"]
-    league: Literal["NFL"]
+    sport: Literal["football", "basketball", "baseball", "hockey"]
+    league: Literal["NFL", "NBA", "MLB", "NHL"]
     market_type: Literal["player_prop", "moneyline"]
-    statistics: tuple[Literal["receptions", "receiving_yards"], ...] = ()
+    statistics: tuple[Literal["receptions", "receiving_yards", "passing_yards", "rushing_yards",
+                              "points", "rebounds", "assists", "threes", "pra",
+                              "pitcher_strikeouts", "hits", "total_bases", "shots_on_goal"], ...] = ()
     period: Literal["FULL"] = "FULL"
     reviewed_normal_rule_id: str = Field(min_length=8)
 
@@ -23,11 +25,22 @@ class TrustedPilotMarketScope(BaseModel):
     def distinct_statistics(self):
         if len(set(self.statistics)) != len(self.statistics):
             raise ValueError("Pilot statistics must be distinct")
+        supported = {
+            ("football", "NFL"): {"receptions", "receiving_yards", "passing_yards", "rushing_yards"},
+            ("basketball", "NBA"): {"points", "rebounds", "assists", "threes", "pra"},
+            ("baseball", "MLB"): {"pitcher_strikeouts", "hits", "total_bases"},
+            ("hockey", "NHL"): {"shots_on_goal", "points"},
+        }
+        allowed = supported.get((self.sport, self.league))
+        if allowed is None:
+            raise ValueError("Pilot sport and league must identify the same supported competition")
         if self.venue == "novig":
-            if self.market_type != "player_prop" or not self.statistics:
+            if (self.sport != "football" or self.market_type != "player_prop"
+                    or not self.statistics or not set(self.statistics) <= {"receptions", "receiving_yards"}):
                 raise ValueError("Novig pilot scope requires reviewed NFL player props")
-        elif self.market_type != "moneyline" or self.statistics:
-            raise ValueError("ProphetX pilot scope permits reviewed NFL moneylines only")
+        elif (self.market_type == "moneyline" and self.statistics
+                or self.market_type == "player_prop" and (not self.statistics or not set(self.statistics) <= allowed)):
+            raise ValueError("ProphetX pilot scope requires reviewed normal moneylines or supported player props")
         return self
 
     def matches(self, market) -> bool:
