@@ -108,6 +108,33 @@ async def test_unmanaged_position_blocks_inventory_reconciliation():
     assert result.identity_verified and not result.reconciled and result.position_count == 1
 
 
+async def test_exact_reviewed_external_position_reconciles_without_debiting_cash_twice():
+    data = fixtures()
+    data[f"/v3/account/subaccounts/{KEY}/balance"]["balance"] = "24.02825"
+    data["/v3/account/positions"]["positions"] = [
+        {"marketId": "market", "outcomeId": "outcome", "qty": 169, "cost": ".97175"}]
+    external = SimpleNamespace(venue="novig", environment="sandbox",
+        account_fingerprint=novig_wallet_fingerprint("sandbox", KEY),
+        native_market_id="market", native_outcome_id="outcome",
+        quantity=Decimal(169), cost_usd=Decimal(".97175"))
+    async with httpx.AsyncClient() as http:
+        client = NovigClient(NovigSettings(api_key=KEY), client=http)
+        async def request(method, path):
+            assert method == "GET"
+            return data[path]
+        client.request = request
+        result = await probe_native_account(client, external_positions=(external,))
+    assert result.reconciled and result.external_position_count == 1
+    assert result.external_cost_usd == Decimal(".97175")
+    assert result.balance_usd == Decimal("24.02825")
+    data["/v3/account/positions"]["positions"][0]["cost"] = ".97176"
+    async with httpx.AsyncClient() as http:
+        client = NovigClient(NovigSettings(api_key=KEY), client=http)
+        client.request = request
+        changed = await probe_native_account(client, external_positions=(external,))
+    assert not changed.reconciled
+
+
 async def test_unmanaged_resting_order_blocks_inventory_reconciliation():
     data = fixtures()
     data["/v3/account/orders"]["open"] = [{"orderId": "external", "qty": 100, "price": ".6"}]

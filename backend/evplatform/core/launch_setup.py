@@ -7,6 +7,7 @@ the optional limits file is explicitly an unapplied operator draft.
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from pathlib import Path
 
 from .models import utcnow
@@ -136,6 +137,8 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                 "exchange_index": snapshot.exchange_index if current else None,
                 "open_order_count": snapshot.open_order_count if current else None,
                 "position_count": snapshot.position_count if current else None,
+                "external_position_count": snapshot.external_position_count if current else None,
+                "external_cost_usd": str(snapshot.external_cost_usd) if current else None,
                 "balance_usd": str(snapshot.balance_usd) if current and snapshot.cash_available_verified
                     and snapshot.balance_usd is not None else None,
                 "observed_at": snapshot.observed_at.isoformat() if snapshot else None,
@@ -302,6 +305,14 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "scope": {"profile_count": len(profiles), "verified_native_markets": len(native_markets),
             "real_reference_markets": len(real_reference_markets), "native_candidates": len(native.candidates),
             "synthetic_candidates": sum(bool(item.synthetic) for item in engine.opportunities.values())},
+        "external_inventory": {"loaded_count": len(native.external_positions),
+            "unsettled_cost_usd": str(sum((item.cost_usd for item in native.external_positions), Decimal(0))),
+            "venues": sorted({item.venue for item in native.external_positions}),
+            "account_reconciled": bool(native.external_positions) and all(
+                any(snapshot.account_fingerprint == item.account_fingerprint and snapshot.reconciled
+                    for snapshot in native.account_snapshots.values())
+                for item in native.external_positions),
+            "note": "External positions remain outside OMS order history; cash already reflects their debit."},
         "risk_policy": risk_policy, "accounts": accounts, "requirements": requirements,
         "launch_scope": launch_scope,
         "structural_review": ({**structural.model_dump(mode="json"),

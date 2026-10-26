@@ -48,10 +48,21 @@ def test_all_registered_native_monitors_appear_without_launch_profile(engine):
     assert report["activation"]["scope_digest"] is None
     assert not report["safe_to_arm"] and not report["profile_draft"]["can_prepare"]
     assert report["scope"]["profile_count"] == 0
+    assert report["external_inventory"]["loaded_count"] == 0
     assert report["launch_scope"] == []
     assert not account(report)["profile_configured"]
     assert report["pricing"] == engine.settings.pricing.model_dump(mode="json")
     assert all(row["status"] == "pending" for row in report["requirements"])
+
+
+def test_external_inventory_is_visible_but_not_an_oms_order_or_verified_account(engine):
+    engine.native.external_positions = (SimpleNamespace(venue="novig", account_fingerprint="a" * 64,
+        cost_usd=Decimal(".97175")),)
+    report = launch_setup(engine)
+    assert report["external_inventory"]["loaded_count"] == 1
+    assert report["external_inventory"]["unsettled_cost_usd"] == "0.97175"
+    assert report["external_inventory"]["account_reconciled"] is False
+    assert report["safe_to_arm"] is False
 
 
 def test_future_native_monitor_registration_needs_no_dashboard_name_change(engine):

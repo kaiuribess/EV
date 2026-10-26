@@ -218,6 +218,17 @@ async def test_recurring_daily_debit_cap_uses_worst_case_intents(system, market)
     assert len(adapter.submissions) == 1
 
 
+async def test_external_position_blocks_same_sport_without_becoming_oms_order(system, market):
+    from types import SimpleNamespace
+    manager, risk, _, adapter = system
+    risk.external_positions = (SimpleNamespace(venue="novig", environment="production",
+        sport=market.sport, cost_usd=D(".97175")),)
+    with pytest.raises(RiskRejected, match="external native position blocks this sport"):
+        await manager.execute(order(market))
+    assert not adapter.submissions and not risk.native_orders
+    assert risk.exposures() == D(".97175")
+
+
 async def test_unknown_transmission_never_retried_and_survives_restart(system, market):
     manager, risk, storage, adapter = system
     adapter.fail = True

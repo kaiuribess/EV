@@ -1,0 +1,88 @@
+"""Reviewed external positions are inventory, never OMS orders or cash debits."""
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class ExternalPosition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    venue: Literal["novig"]
+    environment: Literal["production"]
+    account_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    native_order_id: str = Field(min_length=1)
+    native_event_id: str = Field(min_length=1)
+    native_market_id: str = Field(min_length=1)
+    native_outcome_id: str = Field(min_length=1)
+    sport: Literal["basketball", "football", "baseball", "hockey"]
+    quantity: Decimal = Field(gt=0)
+    cost_usd: Decimal = Field(gt=0)
+    recorded_at: datetime
+    source_artifact: str = Field(pattern=r"^[a-zA-Z0-9_-]+\.json$")
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    catalog_artifact: str = Field(pattern=r"^[a-zA-Z0-9_-]+\.json$")
+    catalog_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def exact_money_and_clock(self):
+        if (not self.quantity.is_finite() or self.quantity != self.quantity.to_integral_value()
+                or not self.cost_usd.is_finite() or self.recorded_at.tzinfo is None):
+            raise ValueError("External inventory needs whole contracts, exact cost and zoned time")
+        return self
+
+
+class ExternalInventoryFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[1] = 1
+    positions: tuple[ExternalPosition, ...] = ()
+
+    @model_validator(mode="after")
+    def distinct_native_positions(self):
+        keys = [(row.venue, row.account_fingerprint, row.native_market_id,
+                 row.native_outcome_id) for row in self.positions]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Duplicate external position identity")
+        return self
+
+
+def load_external_inventory(path: Path) -> tuple[ExternalPosition, ...]:
+    if not path.exists():
+        return ()
+    inventory = ExternalInventoryFile.model_validate_json(path.read_text(encoding="utf-8"))
+    for row in inventory.positions:
+        def verified_json(filename: str, digest: str):
+            artifact = path.parent / filename
+            if not artifact.is_file() or hashlib.sha256(artifact.read_bytes()).hexdigest() != digest:
+                raise ValueError("External position evidence artifact changed or is missing")
+            return json.loads(artifact.read_text(encoding="utf-8"))
+
+        try:
+            receipt = verified_json(row.source_artifact, row.source_sha256)
+            catalog = verified_json(row.catalog_artifact, row.catalog_sha256)
+            event, market = catalog["event"], catalog["market"]
+            matches = (receipt.get("venue") == row.venue
+                and receipt.get("account_fingerprint") == row.account_fingerprint
+                and receipt.get("order_id") == row.native_order_id
+                and receipt.get("market_id") == row.native_market_id
+                and receipt.get("outcome_id") == row.native_outcome_id
+                and receipt.get("native_status") == "FILLED"
+                and Decimal(str(receipt.get("filled_qty"))) == row.quantity
+                and Decimal(str(receipt.get("filled_cost_usd"))) == row.cost_usd
+                and datetime.fromisoformat(receipt["recorded_at"]) == row.recorded_at
+                and event.get("eventId") == row.native_event_id
+                and str(event.get("sport", "")).lower() == row.sport
+                and market.get("eventId") == row.native_event_id
+                and market.get("marketId") == row.native_market_id
+                and any(outcome.get("outcomeId") == row.native_outcome_id
+                        for outcome in market.get("outcomes", [])))
+        except (AttributeError, KeyError, TypeError, InvalidOperation) as exc:
+            raise ValueError("External position evidence is malformed") from exc
+        if not matches:
+            raise ValueError("External position identity differs from reviewed receipt or catalog")
+    return inventory.positions

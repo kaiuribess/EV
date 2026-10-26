@@ -47,6 +47,10 @@ class RiskEngine:
         # Native orders retain their own exact quantity and payout contracts.
         # They still participate in every central USD exposure/position guard.
         self.native_orders: dict = {}
+        # Reviewed external positions are never inserted into the OMS ledger.
+        # Authenticated cash already reflects their debit; they contribute only
+        # to exposure and conservative position-conflict checks.
+        self.external_positions = ()
         self.duplicates = {}
         self.settled: set[str] = set()
         self.authority = RiskAuthority()
@@ -89,7 +93,8 @@ class RiskEngine:
         return max(order.reserved_cost, filled)
 
     def exposures(self):
-        return sum((self.cost(o) for o in self.all_orders()), Decimal(0))
+        return (sum((self.cost(o) for o in self.all_orders()), Decimal(0))
+                + sum((o.cost_usd for o in self.external_positions), Decimal(0)))
 
     def all_orders(self):
         return (*self.orders.values(), *self.native_orders.values())
@@ -153,7 +158,10 @@ class RiskEngine:
         if order.player_id:
             limits.append(([o for o in others if o.player_id == order.player_id], self.config.max_player_exposure, "player"))
         for orders, limit, label in limits:
-            if limit is not None and sum((self.cost(o) for o in orders), Decimal(0)) + cost > limit:
+            external = sum((p.cost_usd for p in self.external_positions
+                if p.environment == order.mode and (label == "total" or
+                    label == "venue" and p.venue == order.venue)), Decimal(0))
+            if limit is not None and sum((self.cost(o) for o in orders), Decimal(0)) + external + cost > limit:
                 raise RiskRejected(f"Native {label} exposure limit reached")
 
     def check_native_daily_budget(self, order):
@@ -262,6 +270,12 @@ class RiskEngine:
             raise RiskRejected(str(exc)) from exc
         family = risk_family(market)
         fingerprint = market.identity()
+        for external in self.external_positions:
+            # A raw external receipt has no reviewed canonical event/family ID.
+            # Block the entire sport until such identity is established or the
+            # actual position settles; never guess that another market is safe.
+            if external.sport == market.sport:
+                raise RiskRejected("Reviewed external native position blocks this sport until settlement")
         own = (self.orders.get(exclude_order_id) or self.native_orders.get(exclude_order_id)) if exclude_order_id else None
         if own and (not metadata_consistent(own) or own.market_fingerprint != fingerprint or
                     (own.market_id, own.venue, own.outcome, own.strategy) !=

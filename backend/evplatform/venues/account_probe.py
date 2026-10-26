@@ -40,6 +40,8 @@ class NativeAccountSnapshot(BaseModel):
     cash_available_verified: bool = False
     open_order_count: int | None = None
     position_count: int | None = None
+    external_position_count: int = 0
+    external_cost_usd: Decimal = Decimal(0)
     reconciled: bool = False
     order_sequence: int | None = None
     position_sequence: int | None = None
@@ -92,7 +94,8 @@ def _novig_trading_scope(client: NovigClient, metadata: dict) -> bool:
 
 async def probe_native_account(client, managed_orders=(), *, settled_order_ids=frozenset(),
                                adapter=None, management_client=None,
-                               exchange_index: int | None = None) -> NativeAccountSnapshot:
+                               exchange_index: int | None = None,
+                               external_positions=()) -> NativeAccountSnapshot:
     """No connection/login management; use an already authenticated client.
 
     Managed orders are the native OMS's durable records. Account snapshots are
@@ -101,8 +104,12 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
     """
     venue, environment = client.venue_id, client.settings.environment
     if isinstance(client, KalshiClient):
+        if external_positions:
+            raise ReconciliationError("Kalshi external inventory is not reviewed for this account probe")
         return await _probe_kalshi(client, managed_orders, settled_order_ids, exchange_index)
     if isinstance(client, ProphetXClient):
+        if external_positions:
+            raise ReconciliationError("ProphetX external inventory is not reviewed for this account probe")
         if not client._signin_confirmed or not client.health_check().get("authenticated"):
             return NativeAccountSnapshot(venue=venue, environment=environment, observed_at=utcnow(),
                 reason="ProphetX confirmed authenticated private identity is required")
@@ -110,6 +117,8 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
         return await probe_prophetx_account(client, managed_orders, settled_order_ids=settled_order_ids,
                                              review=getattr(client, "account_review", None))
     if client.venue_id == "polymarket_us":
+        if external_positions:
+            raise ReconciliationError("Polymarket US external inventory is not reviewed for this account probe")
         from .polymarket_us_account import probe_polymarket_us_account
         return await probe_polymarket_us_account(client, managed_orders,
             settled_order_ids=settled_order_ids, adapter=adapter)
@@ -167,6 +176,19 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
             i = order.intent.instrument
             expected_positions[(i.instrument_id, i.native_outcome)] += order.filled_quantity
             expected_costs[(i.instrument_id, i.native_outcome)] += order.filled_cost_usd
+    external_cost = Decimal(0)
+    for external in external_positions:
+        if (external.venue != venue or external.environment != environment
+                or external.account_fingerprint != fingerprint):
+            reasons.append("External position belongs to another account")
+            continue
+        identity = (external.native_market_id, external.native_outcome_id)
+        if identity in expected_positions:
+            reasons.append("External position overlaps an OMS position")
+            continue
+        expected_positions[identity] += external.quantity
+        expected_costs[identity] += external.cost_usd
+        external_cost += external.cost_usd
     actual_positions = {}
     for raw in positions:
         row = _object(raw, "position")
@@ -196,6 +218,7 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
     return NativeAccountSnapshot(venue=venue, environment=environment, account_fingerprint=fingerprint,
         identity_verified=True, observed_at=utcnow(), balance_usd=cash,
         open_order_count=len(orders), position_count=len(actual_positions), reconciled=not reasons,
+        external_position_count=len(external_positions), external_cost_usd=external_cost,
         order_sequence=order_seq, position_sequence=position_seq,
         reason="; ".join(dict.fromkeys([*reasons, *([permission_reason] if permission_reason else [])])),
         api_key_scopes=("trading",) if scope_verified else (),

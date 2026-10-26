@@ -71,6 +71,7 @@ class NativeRuntime:
         self.candidates = {}
         self.signals = {}
         self.account_snapshots = {}
+        self.external_positions = ()
         # Pre-profile diagnostics are never consulted by risk, sizing or the
         # release gate. They let an operator identify an account before writing
         # the reviewed launch profile that enables normal account probing.
@@ -98,7 +99,17 @@ class NativeRuntime:
     async def start(self):
         self.build_id = await asyncio.to_thread(build_fingerprint)
         from .paths import runtime_data_file
+        from .external_inventory import load_external_inventory
         from .structural_review import StructuralPilotReview
+
+        external_inventory_error = ""
+        if self.engine.settings.mode == "production":
+            external_path = runtime_data_file("external_native_positions.json", self.engine.settings.data_dir)
+            try:
+                self.external_positions = await asyncio.to_thread(load_external_inventory, external_path)
+                self.engine.risk.external_positions = self.external_positions
+            except (OSError, ValueError, KeyError, TypeError):
+                external_inventory_error = "External native inventory review is invalid; native execution is blocked"
         review_path = runtime_data_file("nba_pilot_structural_review.json", self.engine.settings.data_dir)
         if review_path.exists():
             try:
@@ -147,6 +158,8 @@ class NativeRuntime:
                 runtime_data_file("native_mappings.json", self.engine.settings.data_dir))
         except (ValueError, OSError):
             self.profile_error = "Native mappings are invalid; review the exact market and fee evidence"
+        if external_inventory_error:
+            self.profile_error = (self.profile_error + "; " if self.profile_error else "") + external_inventory_error
         await self.manager.start()
 
     def close(self):
@@ -1590,6 +1603,9 @@ class NativeRuntime:
                 settled = frozenset(self.engine.risk.settled)
             snapshot = await asyncio.wait_for(probe_native_account(client,
                 managed_orders=inventory, settled_order_ids=settled,
+                **({"external_positions": tuple(row for row in self.external_positions
+                     if row.venue == p.venue)} if any(row.venue == p.venue
+                     for row in self.external_positions) else {}),
                 **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
                 **({"adapter": adapter} if p.venue == "polymarket_us" else {}),
                 **({"management_client": record.plugin.management_client}
