@@ -1,6 +1,8 @@
 """A recurring lease cannot skip the launch gate or revive an emergency stop."""
 from datetime import datetime, timedelta, timezone
 import json
+import subprocess
+import sys
 
 import httpx
 
@@ -110,3 +112,9 @@ def test_recurring_expiry_disarms_without_stopping_research(monkeypatch, tmp_pat
     assert gate.tick(now=NOW+timedelta(hours=2)) == "expired"
     assert current["kill_switch"] and not current["auto_trade"]
     assert ("POST", "/api/control") in calls
+
+
+def test_recurring_watcher_direct_windows_entry_point_imports():
+    result = subprocess.run([sys.executable, gate.__file__, "--help"],
+        cwd=one_shot.ROOT, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr

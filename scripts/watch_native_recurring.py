@@ -17,7 +17,12 @@ import httpx
 
 from evplatform.core.config import TrustedPilotPolicy
 from evplatform.core.models import Market
-from scripts import watch_native_one_shot as shared
+try:
+    from scripts import watch_native_one_shot as shared
+except ModuleNotFoundError:
+    # The scheduled supervisor invokes this file directly, so sys.path[0] is
+    # scripts/ rather than the repository root used by pytest imports.
+    import watch_native_one_shot as shared
 
 
 AUTH_PATH = shared.ROOT / "data" / "native_recurring_authorization.json"
