@@ -25,8 +25,9 @@ export type SetupAccount = {
 }
 export type SetupReport = {
   schema_version: 1; checked_at: string; environment: string; safe_to_arm: boolean;
-  activation: { available: boolean; scope_digest: string | null; requires_restart: boolean; action_label: string; reason: string };
-  switches: { live_enabled: boolean; auto_trade: boolean; kill_switch: boolean };
+  activation: { available: boolean; scope_digest: string | null; requires_restart: boolean; action_label: string; reason: string;
+    by_venue?: Record<string, { available: boolean; scope_digest: string }> };
+  switches: { live_enabled: boolean; auto_trade: boolean; kill_switch: boolean; native_enabled_venues?: string[] };
   scope: { profile_count: number; verified_native_markets: number; real_reference_markets: number; native_candidates: number; synthetic_candidates: number };
   risk_policy: { source: string; values: RecordValue | null; applied: boolean; error: string | null };
   accounts: SetupAccount[];
@@ -111,6 +112,11 @@ export function parseSetupReport(value: unknown): SetupReport {
       || !record(scope) || !['profile_count', 'verified_native_markets', 'real_reference_markets', 'native_candidates', 'synthetic_candidates'].every(k => count(scope[k]))
       || !record(risk) || typeof risk.source !== 'string' || typeof risk.applied !== 'boolean' || !nullableString(risk.error)
       || !(risk.values === null || record(risk.values))) return fail()
+  if (activation.by_venue !== undefined && (!record(activation.by_venue)
+      || Object.entries(activation.by_venue).some(([venue, entry]) => !identifier(venue) || !record(entry)
+        || typeof entry.available !== 'boolean' || typeof entry.scope_digest !== 'string'
+        || !/^[0-9a-f]{64}$/.test(entry.scope_digest)))) return fail()
+  if (switches.native_enabled_venues !== undefined && !uniqueStrings(switches.native_enabled_venues)) return fail()
   if (record(risk.values)) {
     const values = risk.values
     if (!['max_order_stake_usd', 'max_event_exposure_usd', 'max_player_exposure_usd', 'max_correlated_exposure_usd'].every(k => values[k] === null && values.available_cash_only === true || decimal(values[k]) && Number(values[k]) > 0)
@@ -210,11 +216,41 @@ export function activationGate(report: SetupReport | null, receivedAt: number | 
   if (report.switches.auto_trade && !report.switches.kill_switch) return { allowed: false, reason: 'Real trading is already enabled for the reviewed scope.' }
   return { allowed: true, reason: 'Current checks passed. Review the exact accounts and limits before enabling.' }
 }
-export function activationBody(report: SetupReport, receivedAt: number, reviewedDigest: string, now: number) {
-  const gate = activationGate(report, receivedAt, now)
+export function venueActivationGate(report: SetupReport | null, receivedAt: number | null, now: number, venue: string, error: string | null = null): { allowed: boolean; reason: string } {
+  if (!setupIsCurrent(report, receivedAt, now, error) || !report) return { allowed: false, reason: 'Refresh the current launch checks before continuing.' }
+  if (report.environment !== 'production' || !report.switches.live_enabled || report.activation.requires_restart)
+    return { allowed: false, reason: 'The reviewed production workspace must be started before real trading can be enabled.' }
+  if (report.switches.auto_trade || !report.switches.kill_switch)
+    return { allowed: false, reason: 'Pause the current automation and restore the emergency stop before changing venues.' }
+  const account = report.accounts.find(item => item.venue === venue)
+  if (!account) return { allowed: false, reason: 'This exchange is not configured in the production workspace.' }
+  const scope = report.launch_scope.find(item => item.venue === venue)
+  if (!scope) return { allowed: false, reason: account.blockers.find(item => item.category !== 'arming')?.message ?? 'This exchange has no reviewed launch profile.' }
+  const activation = report.activation.by_venue?.[venue]
+  if (!activation) return { allowed: false, reason: 'The backend has not approved a venue-specific activation scope.' }
+  if (!activation.available) return { allowed: false, reason: account.blockers.find(item => item.category !== 'arming')?.message ?? 'Current market, account, source or risk checks are incomplete for this exchange.' }
+  if (!report.risk_policy.applied || report.risk_policy.values === null || report.risk_policy.error)
+    return { allowed: false, reason: 'Reviewed risk limits are not applied.' }
+  if (scope.environment !== 'production' || !scope.markets.length || !scope.strategy_ids.length || !scope.provider_ids.length
+      || !account.profile_configured || account.settlement_policy !== scope.settlement_policy || !account.verified_native_markets)
+    return { allowed: false, reason: 'The exact reviewed account and market scope is incomplete.' }
+  const snapshot = account.account_snapshot
+  if (!account.enabled || !account.credentials_configured || !account.authenticated || !account.monitor_running
+      || account.configured_environment !== 'production' || account.runtime_environment !== 'production'
+      || !snapshot.available || !snapshot.current || !snapshot.identity_verified || !snapshot.reconciled
+      || !snapshot.cash_available_verified || snapshot.balance_usd === null || !snapshot.observed_at
+      || Date.parse(snapshot.observed_at) > Date.parse(report.checked_at)
+      || account.blockers.some(blocker => blocker.category !== 'arming'))
+    return { allowed: false, reason: 'Selected account facts do not agree with the current launch approval.' }
+  return { allowed: true, reason: `Current ${venue} checks passed. Review its exact account, markets and limits before enabling.` }
+}
+export function activationBody(report: SetupReport, receivedAt: number, reviewedDigest: string, now: number, venue?: string) {
+  const gate = venue ? venueActivationGate(report, receivedAt, now, venue) : activationGate(report, receivedAt, now)
   if (!gate.allowed) throw new Error(gate.reason)
-  if (!reviewedDigest || reviewedDigest !== report.activation.scope_digest) throw new Error('The trading scope changed. Review the new accounts, markets and limits before enabling.')
+  const currentDigest = venue ? report.activation.by_venue?.[venue]?.scope_digest : report.activation.scope_digest
+  if (!reviewedDigest || reviewedDigest !== currentDigest) throw new Error('The trading scope changed. Review the new accounts, markets and limits before enabling.')
   return { auto_trade: true, kill_switch: false, expected_launch_digest: reviewedDigest,
+    ...(venue ? { native_venues: [venue] } : {}),
     authorization_expires_at: new Date(now + 5 * 60 * 1000).toISOString() }
 }
 export function candidateCounts(values: { synthetic?: unknown }[]) {

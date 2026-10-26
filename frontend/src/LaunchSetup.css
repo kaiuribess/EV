@@ -72,6 +72,8 @@
 .setup-checklist p { color:var(--muted); font-size:10px; line-height:1.7; padding:0 0 15px 26px; }
 .setup-activation { border-top:1px solid var(--border); padding:22px 25px; display:flex; align-items:center; justify-content:space-between; gap:25px; background:#bedb7405; }
 .setup-activation strong { font-size:12px; font-weight:500; }
+.setup-venue-select { display:flex; align-items:center; gap:10px; margin-bottom:12px; color:var(--muted); font-size:11px; }
+.setup-venue-select select { background:var(--panel,#131c28); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:7px 9px; }
 .setup-activation p { font-size:11px; color:var(--muted); line-height:1.7; margin:7px 0; }
 .setup-activation small { font-size:9px; color:var(--faint); }
 .setup-activation button { flex-shrink:0; }
