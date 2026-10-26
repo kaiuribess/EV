@@ -8,10 +8,15 @@ location attestation, or trading authorization. Production remains disarmed.
 - Venue: Novig production only. Other venues remain outside this proposed scope.
 - Strategy: multi-book sportsbook EV, winner-only normal-result estimate, quarter Kelly.
 - Minimum estimated EV: 1.5% after actual fees and a 1% normal-payout uncertainty deduction.
-- Monetary ceilings: $25 per order, $25 total open exposure, $25 daily upfront debit, and $25 daily realized loss. The same $25 ceiling is proposed for event, player, venue and correlated exposure. Verified spendable cash is an additional limit.
+- The owner's later instruction supersedes the proposed fixed $25 ceilings:
+  size from quarter Kelly and verified available cash rather than treating $5
+  as a stake cap. No revised recurring loss, exposure or debit policy has been
+  applied to production. A future review must bind the resulting cash-based
+  limits to the actual account and explain turnover across repeated trades.
 - Frequency: no daily attempt-count cap requested; the existing one-open-order and one-order-per-minute limits remain. Rejected and uncertain intents still consume daily debit budget.
 - `unit_size_usd=5` is for reporting only. It never sets a stake or minimum order.
-- The saved `data/operator_launch_limits.json` is an unapplied draft of these values.
+- The saved `data/operator_launch_limits.json` is an unapplied, now superseded
+  $25 draft; do not use it as evidence of the owner's latest risk scope.
 
 ## Source policy awaiting recurring approval
 
@@ -46,10 +51,76 @@ an executable mapping by copying its IDs or extending its quote lifetime.
    native mapping; do not infer these facts from a player-and-line label.
 3. Obtain a current Novig account-bound location result using a supported venue
    method. Authenticated trading-key scope and cash alone do not establish it.
-4. Bind an approved recurring source policy and the $25 risk limits to the
+4. Bind an approved recurring source policy and explicitly reviewed current
+   risk limits to the
    actual account, mapping, pricing and build digests in the existing launch
    profile. Then record a separate, expiring recurring authorization through
    the supported controller. The old one-shot authorization is not reusable.
 
 Current production state: no launch profile, no executable native mapping,
 no recurring authorization, `auto_trade=false`, `kill_switch=true`.
+
+## Bounded read-only follow-up on October 26
+
+Authoritative account reads found the three known raw-API orders as external
+inventory, not OMS orders. Kalshi's NHL order
+`01a17983-3b70-7ecd-863e-7847f26d9cf0` is executed for 0.60 YES
+contracts with no remainder and remains an unsettled position. The second
+Kalshi position is a separate, earlier executed order
+`01a16a2a-1810-745c-ba45-43790063ecc2` for 19.70 YES contracts in
+`KXSTREAMERAWARDS-GAMER26-JYN`; its fill was at $0.49 per contract. The
+complete unsettled position page reports $0.336000 and $9.653000 of cost,
+respectively, plus $0.010400 and $0.344700 of fees. Both are on exchange
+index 0. These costs are already reflected in the reported cash balance and
+must not be debited a second time. Their combined original cost and fees is
+$10.344100, but no current settlement payout is certified.
+
+ProphetX order `partner_f951c27d-3ad4-4131-9b39-25e2688cebfe` has one
+USD-risk unit filled and zero open quantity. Its `open` status denotes an
+unsettled matched position, not a resting remainder. The authenticated wallet
+reported $49.10 available, $1.00 matched-order balance, zero unmatched-order
+balance and zero GEC. A market-filtered transaction read found the $1 trade;
+the position is not settled. Polymarket US order `DB9JPZX011MQ` is filled
+BUY_LONG for one contract at $0.37, with $0.02 reported commission. Its
+complete current position page reports one unsettled long and no open orders.
+The balance page reports $49.61 buying power but no `lastUpdated` time and an
+unexplained $25 `balanceReservation`. The published balance schema lists that
+field without enough semantics to allocate it to this order. Keep the
+Polymarket US inventory review pending; do not infer zero other exposure or
+cash verification from the $49.61 number.
+
+The current Novig catalog still lists
+`01a17652-f647-7623-80da-3b945ce96b12` as OPEN, with `RECEPTIONS`,
+strike 1.5, two named outcomes, `voids=FMV`, and `WHEN_LIVE` fees. It does not
+provide listing-bound participation, period or overtime terms. Its current
+price is different from the saved Brevyn Spann-Ford draft, and no current
+qualifying sportsbook estimate overlaps it in the production state. Neither
+the old quote nor this catalog read is an executable mapping review.
+
+Novig's published eligibility guidance says its app checks the device's
+physical location when opened to trade. The owner can open the official app
+with device location permission enabled and review its eligibility result
+without placing an order. The Trading API/runtime has not supplied an
+account-bound, current location attestation for unattended recurring orders;
+an app result alone must not be silently copied into that field. Novig must
+confirm a supported account-bound API/location workflow before activation.
+Source: https://support.novig.com/en/articles/16194031-eligibility-legality
+
+`novig_ioc_win_loss_halt_on_exception` is the only settlement route the
+current adapter supports for this recurring scope. It reconciles a single
+managed order per native market on an ordinary WIN/LOSS grade. FMV, push,
+remediation or shared/netted positions halt new execution for manual cash
+review; they are not represented as ordinary losses or refunds. A recurring
+profile must select this exact narrow policy and disclose the halt behavior.
+Contract-specific settlement controls the trade, per
+https://support.novig.com/en/articles/9612523-market-rules; general FVS
+guidance at https://support.novig.com/en/articles/16163706-what-is-fair-value-settlement-fvs
+does not establish the participation or overtime term for this listing.
+
+No recurring owner approval is ready to record yet. The remaining factual
+inputs are complete aggregate exposure review (including Polymarket US's
+reservation), listing-bound normal-condition and participation rules, current
+Novig account-bound location, and one current exact mapping with eligible
+references. The existing $25 limits draft and proposed source scope remain
+unapplied and unapproved. The later owner instruction supersedes the fixed $25
+draft but does not turn a $5 reporting unit into an execution limit.
