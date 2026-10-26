@@ -138,19 +138,108 @@ def test_five_series_config_remains_bounded():
     assert KalshiMonitorConfig(discovery_series=series).discovery_series == series
 
 
-def test_existing_monitor_selects_exact_mlb_catalog_rows_for_native_subscription():
+def test_existing_monitor_selects_exact_mlb_catalog_rows_for_native_subscription(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: OBSERVED)
     game, total = source_market(), source_market("total", id="research:parlay:tbmil-total")
     monitor = SimpleNamespace(manifest=SimpleNamespace(name="kalshi"),
         research_catalog_at=OBSERVED, research_catalog_rows=[*game_rows(), *total_rows()],
         context=SimpleNamespace(config={"max_discovered_markets": 16}),
         engine=SimpleNamespace(reference_estimates={game.id: {}, total.id: {}},
                                markets={game.id: game, total.id: total}),
-        research_events={}, research_fee_metadata={GAME: {}, TOTAL: {}},
+        research_events={}, research_fee_metadata={
+            GAME: {"observed_at": OBSERVED}, TOTAL: {"observed_at": OBSERVED}},
         research_matches={}, _last_research_source_ids=frozenset())
     priority = asyncio.run(NativeMonitor._refresh_research_matches(monitor))
     assert set(monitor.research_matches) == {game.id, total.id}
     assert set(priority) == {f"{GAME}-TB", f"{GAME}-MIL", f"{TOTAL}-7"}
     assert len(priority) == 3  # Both YES/NO directions share the same monitored ticker.
+
+
+def _fee_refresh_monitor(client, metadata):
+    market = source_market("total")
+    return SimpleNamespace(manifest=SimpleNamespace(name="kalshi"), client=client,
+        research_catalog_at=OBSERVED, research_catalog_rows=total_rows(),
+        context=SimpleNamespace(config={"max_discovered_markets": 8}),
+        engine=SimpleNamespace(reference_estimates={market.id: {}}, markets={market.id: market}),
+        research_events={}, research_fee_metadata={TOTAL: metadata},
+        research_fee_refresh_attempts={}, research_matches={},
+        _last_research_source_ids=frozenset())
+
+
+def test_kalshi_research_fee_metadata_refreshes_before_pricing_expiry(monkeypatch):
+    clock = [OBSERVED + timedelta(seconds=299)]
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: clock[0])
+
+    class Client:
+        def __init__(self):
+            self.requests = []
+
+        async def request(self, method, path, **kwargs):
+            self.requests.append((method, path, kwargs))
+            return {"path": path}
+
+    client = Client()
+    monitor = _fee_refresh_monitor(client, {"observed_at": OBSERVED, "series": {"old": True}})
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert client.requests == []
+    assert monitor.research_fee_metadata[TOTAL]["observed_at"] == OBSERVED
+
+    clock[0] = OBSERVED + timedelta(seconds=300)
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert [path for _, path, _ in client.requests] == [
+        "/series/KXMLBTOTAL", f"/events/{TOTAL}",
+        "/series/fee_changes", "/events/fee_changes"]
+    assert monitor.research_fee_metadata[TOTAL]["observed_at"] == clock[0]
+    assert "old" not in monitor.research_fee_metadata[TOTAL]["series"]
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert len(client.requests) == 4
+
+
+def test_kalshi_failed_fee_refresh_invalidates_old_evidence_and_bounds_retries(monkeypatch):
+    clock = [OBSERVED + timedelta(seconds=361)]
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: clock[0])
+
+    class FailedClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def request(self, *_args, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("provider unavailable")
+
+    client = FailedClient()
+    monitor = _fee_refresh_monitor(client, {"observed_at": OBSERVED})
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert TOTAL not in monitor.research_fee_metadata
+    assert client.calls == 1
+    clock[0] += timedelta(seconds=30)
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert client.calls == 1
+    clock[0] += timedelta(seconds=270)
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert client.calls == 2
+
+
+def test_kalshi_failed_early_fee_refresh_keeps_only_unexpired_evidence(monkeypatch):
+    clock = [OBSERVED + timedelta(seconds=300)]
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: clock[0])
+
+    class FailedClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def request(self, *_args, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("provider unavailable")
+
+    client = FailedClient()
+    monitor = _fee_refresh_monitor(client, {"observed_at": OBSERVED})
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert monitor.research_fee_metadata[TOTAL]["observed_at"] == OBSERVED
+    clock[0] = OBSERVED + timedelta(seconds=360)
+    asyncio.run(NativeMonitor._refresh_research_matches(monitor))
+    assert TOTAL not in monitor.research_fee_metadata
+    assert client.calls == 1  # Expiration does not bypass the request cooldown.
 
 
 def test_monitor_prewarms_exact_total_without_fair_or_fee_requests(monkeypatch):

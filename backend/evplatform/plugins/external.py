@@ -3,6 +3,7 @@ import asyncio
 import os
 import time
 from dataclasses import replace
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -494,6 +495,7 @@ class NativeMonitor(Plugin):
         self.focused_prop_source_ids: list[str] = []
         self.research_events: dict[str, dict] = {}
         self.research_fee_metadata: dict[str, dict] = {}
+        self.research_fee_refresh_attempts: dict[str, datetime] = {}
         self._last_research_source_ids = frozenset()
         self._market_data_updates = 0
         self._last_market_data_at = None
@@ -538,6 +540,7 @@ class NativeMonitor(Plugin):
         self.focused_prop_source_ids = []
         self.research_events = {}
         self.research_fee_metadata = {}
+        self.research_fee_refresh_attempts = {}
         self._last_research_source_ids = frozenset()
         self._market_data_updates = 0
         self._last_market_data_at = None
@@ -829,9 +832,26 @@ class NativeMonitor(Plugin):
         if self.manifest.name == "kalshi":
             events = list(dict.fromkeys(item.native_event_id for market_id, matches in result.items()
                 if market_id in source_ids for item in matches))[:8]
+            now = utcnow()
+            attempts = getattr(self, "research_fee_refresh_attempts", {})
+            self.research_fee_refresh_attempts = attempts
             for event_id in events:
-                if event_id in self.research_fee_metadata:
+                metadata = self.research_fee_metadata.get(event_id)
+                observed_at = metadata.get("observed_at") if isinstance(metadata, dict) else None
+                try:
+                    age = (now - observed_at).total_seconds()
+                except TypeError:
+                    age = float("inf")
+                # Pricing rejects fee evidence at 360 seconds. Refresh ahead of
+                # that limit without relabeling old metadata as newly observed.
+                if 0 <= age < 300:
                     continue
+                if age >= 360 or age < 0:
+                    self.research_fee_metadata.pop(event_id, None)
+                last_attempt = attempts.get(event_id)
+                if last_attempt is not None and 0 <= (now - last_attempt).total_seconds() < 300:
+                    continue
+                attempts[event_id] = now
                 series = event_id.split("-", 1)[0]
                 try:
                     self.research_fee_metadata[event_id] = {
@@ -844,7 +864,10 @@ class NativeMonitor(Plugin):
                         "observed_at": utcnow(),
                     }
                 except Exception:
-                    self.research_fee_metadata.pop(event_id, None)
+                    # A failed refresh must not move the evidence clock. The
+                    # old snapshot may remain usable only until its real expiry.
+                    if age >= 360 or age < 0:
+                        self.research_fee_metadata.pop(event_id, None)
         return list(dict.fromkeys(priority))
 
     def _research_match_refresh_due(self, elapsed: int) -> bool:
