@@ -202,6 +202,8 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "A saved limits draft is not an applied launch profile. Each selected account needs its own verified identity and market scope.")
     pricing = engine.settings.pricing
     reference_profiles_ready = True
+    reference_profiles_ready_by_venue = {venue: bool(profile.market_ids)
+        for venue, profile in profiles.items()}
     if pricing.reference_profile_mode == "strict":
         from .reference_profiles import profile_for_market
 
@@ -218,6 +220,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         for launch_profile, market, selected in scoped:
             if market is None or selected is None:
                 reference_profiles_ready = False
+                reference_profiles_ready_by_venue[launch_profile.venue] = False
                 continue
             _, profile = selected
             from .pricing import market_config
@@ -242,6 +245,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
             if (not profile.live_execution_allowed or len(rules) < profile.min_distinct_books
                     or not set(profile.required_any_anchor).intersection(rules)):
                 reference_profiles_ready = False
+                reference_profiles_ready_by_venue[launch_profile.venue] = False
         requirement("pricing.profiles", reference_profiles_ready, "Validate reference profiles for live execution",
             "Selected markets need either sufficient exact-source rules and an anchor, or an approved scoped provider-trust pilot; every current quote must still pass status, completeness and sensitivity checks.", external=True)
     relevant_software = [item for item in software_blockers if not profiles or item.scope in profiles]
@@ -277,6 +281,10 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "Every technical and account check must pass together. Quotes, fees and account facts are checked again before each order.")
     native_mode = engine.settings.mode == "production"
     activation_available = bool(native_mode and engine.settings.live_enabled and aggregate.safe_to_arm and reference_profiles_ready)
+    venue_activation = {venue: {"available": bool(native_mode and engine.settings.live_enabled
+            and report.safe_to_arm and reference_profiles_ready_by_venue.get(venue)),
+            "scope_digest": profile.digest()}
+        for venue, profile in profiles.items() for report in (native.report(venue),)}
     activation_reason = (
         "Current checks passed. Final activation remains an explicit operator action." if activation_available
         else "Finish the current launch checks before enabling real orders." if not aggregate.safe_to_arm or not reference_profiles_ready
@@ -298,10 +306,12 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "safe_to_arm": aggregate.safe_to_arm and reference_profiles_ready,
         "activation": {"available": activation_available,
             "scope_digest": aggregate.profile_digest,
+            "by_venue": venue_activation,
             "requires_restart": not native_mode or not engine.settings.live_enabled,
             "action_label": "Enable live trading", "reason": activation_reason},
         "switches": {"live_enabled": engine.settings.live_enabled, "auto_trade": engine.risk.auto_trade,
-                     "kill_switch": engine.risk.kill_switch},
+                     "kill_switch": engine.risk.kill_switch,
+                     "native_enabled_venues": sorted(engine.risk.native_enabled_venues)},
         "scope": {"profile_count": len(profiles), "verified_native_markets": len(native_markets),
             "real_reference_markets": len(real_reference_markets), "native_candidates": len(native.candidates),
             "synthetic_candidates": sum(bool(item.synthetic) for item in engine.opportunities.values())},

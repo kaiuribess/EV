@@ -41,6 +41,9 @@ class RiskEngine:
         # Native permission is process-local and time-bounded. A restart never
         # rehydrates this lease from the durable account or order ledger.
         self.native_authorization_expires_at = None
+        # A live lease selects reviewed execution venues. Research feeds and
+        # other portfolio profiles remain available without placement rights.
+        self.native_enabled_venues = frozenset()
         self.daily_realized = Decimal(0)
         self.daily_date = utcnow().date()
         self.orders: dict[str, Order] = {}
@@ -75,6 +78,7 @@ class RiskEngine:
     def halt(self, reason):
         self.kill_switch, self.auto_trade, self.kill_reason = True, False, reason
         self.native_authorization_expires_at = None
+        self.native_enabled_venues = frozenset()
         if self.on_halt:
             self.on_halt(reason)
 
@@ -113,6 +117,10 @@ class RiskEngine:
 
     def check_native_reservation(self, order, *, reserved=False, preview_only=False):
         """Shared limits for an exact-unit order; caller holds the shared OMS lock."""
+        if (not preview_only and order.mode in {"production", "sandbox"}
+                and getattr(order, "execution_origin", "automatic") == "automatic"
+                and order.venue not in self.native_enabled_venues):
+            raise RiskRejected("Native venue is outside the active execution lease")
         if order.mode == "production" and self.pending_external_orders:
             raise RiskRejected("Unbounded external account exposure blocks native execution")
         if preview_only:

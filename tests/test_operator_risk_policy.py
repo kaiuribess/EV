@@ -84,6 +84,7 @@ def test_native_cash_policy_still_enforces_five_dollar_all_in_cap(market):
     risk.auto_trade = True
     risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     valid = order(market)
+    risk.native_enabled_venues = frozenset({valid.venue})
     risk.check_native_reservation(valid)  # Cash/preflight is a separate required OMS check.
     too_large = valid.model_copy(update={"intent": valid.intent.model_copy(update={"quantity": Decimal("1200")})})
     with pytest.raises(RiskRejected, match="stake limit"):

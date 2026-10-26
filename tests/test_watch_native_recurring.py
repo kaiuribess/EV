@@ -27,6 +27,7 @@ def authorization():
 
 def recurring_state(*, armed=False):
     result = state(armed=armed)
+    result["native_enabled_venues"] = ["novig"] if armed else []
     result["risk"].update(max_native_order_attempts=None,
         max_order_stake=None, live_max_order_stake=None,
         max_total_exposure=None, max_venue_exposure=None)
@@ -35,6 +36,8 @@ def recurring_state(*, armed=False):
 
 def recurring_setup(*, ready=True):
     result = setup(ready=ready)
+    result["activation"]["by_venue"] = {"novig": {"available": ready,
+        "scope_digest": DIGEST}}
     result["launch_scope"][0]["validation_pilot"] = False
     result["launch_scope"][0]["settlement_policy"] = "full"
     result["risk_policy"]["values"].update(max_native_order_attempts=None,
@@ -65,8 +68,10 @@ def server(monkeypatch, tmp_path, *, armed=False, ready=True, orders=None):
             if body["auto_trade"]:
                 assert body["expected_launch_digest"] == DIGEST
                 assert body["authorization_expires_at"] == authorization()["expires_at"]
+                assert body["native_venues"] == ["novig"]
             current.update(auto_trade=body["auto_trade"], kill_switch=body["kill_switch"],
-                           native_authorization_expires_at=body.get("authorization_expires_at"))
+                           native_authorization_expires_at=body.get("authorization_expires_at"),
+                           native_enabled_venues=body.get("native_venues", []))
             return httpx.Response(200, json=current)
         return httpx.Response(200, json={
             "/api/state": current, "/api/launch/setup": launch,
@@ -95,9 +100,9 @@ def test_recurring_scope_and_uncertain_inventory_block_activation(monkeypatch, t
     assert gate.tick(now=NOW) == "waiting_for_recurring_source_review"
     assert ("POST", "/api/control") not in calls
     launch["pricing"]["trusted_pilot_policy"]["owner_approved"] = True
-    launch["activation"]["scope_digest"] = "e" * 64
+    launch["activation"]["by_venue"]["novig"]["scope_digest"] = "e" * 64
     assert gate.tick(now=NOW) == "reviewed_launch_digest_changed"
-    launch["activation"]["scope_digest"] = DIGEST
+    launch["activation"]["by_venue"]["novig"]["scope_digest"] = DIGEST
     assert gate.tick(now=NOW) == "armed"
     current.update(auto_trade=True, kill_switch=False)
     # An unknown transmission must be reconciled before the next order.
@@ -117,6 +122,20 @@ def test_recurring_scope_rejects_missing_monetary_limit(monkeypatch, tmp_path):
     assert gate.tick(now=NOW) == "waiting_for_reviewed_recurring_risk_limits"
     assert ("POST", "/api/control") not in calls
     assert current["kill_switch"] and not current["auto_trade"]
+
+
+def test_recurring_lease_selects_one_ready_venue_in_unready_portfolio(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path)
+    launch["launch_scope"].append({**launch["launch_scope"][0], "venue": "prophetx"})
+    launch["scope"]["profile_count"] = 2
+    launch["safe_to_arm"] = False
+    launch["activation"]["available"] = False
+    launch["activation"]["by_venue"]["prophetx"] = {
+        "available": False, "scope_digest": "e" * 64}
+    assert gate.tick(now=NOW, check_only=True) == "ready"
+    assert gate.tick(now=NOW) == "armed"
+    assert current["native_enabled_venues"] == ["novig"]
+    assert calls.count(("POST", "/api/control")) == 1
 
 
 def test_recurring_expiry_disarms_without_stopping_research(monkeypatch, tmp_path):

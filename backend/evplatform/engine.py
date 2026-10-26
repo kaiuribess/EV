@@ -962,9 +962,26 @@ class Engine:
         await self.notice("info", f"Simulated settlement recorded; realized P&L {realized:.2f}", "paper_settlement")
 
     async def control(self, *, auto_trade=None, kill_switch=None, expected_launch_digest=None,
-                      authorization_expires_at=None):
+                      authorization_expires_at=None, native_venues=None):
         standby_release = (self.settings.mode in {"sandbox", "production"}
                            and kill_switch is False and auto_trade is False)
+        native_mode = self.settings.mode in {"sandbox", "production"}
+        selected_venues = frozenset()
+        if native_venues is not None and (not native_mode or auto_trade is not True):
+            raise ValueError("Native venue selection requires an explicit native automation request")
+        if native_mode and auto_trade is True:
+            profiles = self.native.profiles_by_venue()
+            if native_venues is None:
+                if len(profiles) > 1:
+                    raise ValueError("Select the exact reviewed venues for automatic execution")
+                selected_venues = frozenset(profiles)
+            else:
+                selected_venues = frozenset(native_venues)
+                if (not selected_venues or len(selected_venues) != len(native_venues)
+                        or not selected_venues <= profiles.keys()):
+                    raise ValueError("Native execution venues are missing, duplicated or unreviewed")
+            if self.risk.auto_trade and selected_venues != self.risk.native_enabled_venues:
+                raise ValueError("Pause native automation before changing its venue scope")
         def check_native_activation():
             if self.settings.mode in {"demo", "paper"} or not (auto_trade or kill_switch is False):
                 return
@@ -976,7 +993,11 @@ class Engine:
                 existing = self.risk.native_authorization_expires_at
                 if existing is None or existing <= now or authorization_expires_at > existing:
                     raise ValueError("Release the kill switch with a bounded authorization before enabling orders")
-            report = self.native.report()
+            if auto_trade is True and selected_venues:
+                report = (self.native.report() if len(self.native.profiles_by_venue()) == 1
+                          and self.native.portfolio is None else self.native.report(venues=selected_venues))
+            else:
+                report = self.native.report()
             if (expected_launch_digest is None or expected_launch_digest != report.profile_digest):
                 raise ValueError("The reviewed launch scope changed; refresh and review before enabling")
             if not self.settings.live_enabled or (not standby_release and not report.safe_to_arm):
@@ -992,7 +1013,7 @@ class Engine:
         if kill_switch is not True:
             check_native_activation()
         previous_stop = (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted,
-                         self.risk.native_authorization_expires_at)
+                         self.risk.native_authorization_expires_at, self.risk.native_enabled_venues)
         if kill_switch is True:
             self.risk.halt("Operator emergency stop")
             await self.storage.save_config("kill_switch", True)
@@ -1019,12 +1040,15 @@ class Engine:
                     # takes precedence over the state from before this request.
                     if not self.risk.kill_switch:
                         (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted,
-                         self.risk.native_authorization_expires_at) = previous_stop
+                         self.risk.native_authorization_expires_at,
+                         self.risk.native_enabled_venues) = previous_stop
                     await self.storage.save_config("kill_switch", self.risk.kill_switch)
                 raise
             if auto_trade and self.risk.kill_switch:
                 raise ValueError("Reset kill switch first")
             self.risk.auto_trade = auto_trade
+            if native_mode:
+                self.risk.native_enabled_venues = selected_venues if auto_trade else frozenset()
             if not auto_trade:
                 await self.oms.cancel_all()
                 await self.native.manager.cancel_all()
@@ -1118,6 +1142,7 @@ class Engine:
             "kill_switch": self.risk.kill_switch, "kill_reason": self.risk.kill_reason,
             "native_authorization_expires_at": (self.risk.native_authorization_expires_at.isoformat()
                 if self.risk.native_authorization_expires_at else None),
+            "native_enabled_venues": sorted(self.risk.native_enabled_venues),
             "synthetic": self.settings.mode in {"demo", "paper"},
             "sample_feed_enabled": self.settings.sample_feed_enabled,
             "started_at": self.started_at.isoformat(),

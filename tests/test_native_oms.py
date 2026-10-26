@@ -99,6 +99,9 @@ async def system(tmp_path):
     await storage.open()
     risk = RiskEngine(RiskConfig(live_max_order_stake=D("1")))
     risk.auto_trade = True
+    # OMS fixtures exercise order accounting independently of the reviewed
+    # launch controller; the venue selector itself has separate gate tests.
+    risk.native_enabled_venues = frozenset({"novig", "kalshi", "prophetx", "polymarket_us"})
     risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     schemas = SchemaRegistry()
     schemas.register("native.order", 1, NativeOrder)
@@ -185,6 +188,7 @@ async def test_one_native_attempt_cap_survives_restart_and_unknown_outcome(syste
     assert len(adapter.submissions) == 1
     risk.kill_switch = False
     risk.auto_trade = True
+    risk.native_enabled_venues = frozenset({"novig"})
     risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
         await manager.execute(order(market))
@@ -192,6 +196,7 @@ async def test_one_native_attempt_cap_survives_restart_and_unknown_outcome(syste
     await manager.start()
     risk.kill_switch = False
     risk.auto_trade = True
+    risk.native_enabled_venues = frozenset({"novig"})
     risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
         await manager.execute(order(market))
@@ -211,6 +216,7 @@ async def test_recurring_daily_attempt_cap_counts_unknown_intent_after_restart(s
     await manager.start()
     risk.kill_switch = False
     risk.auto_trade = True
+    risk.native_enabled_venues = frozenset({"novig"})
     risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     with pytest.raises(RiskRejected, match="Daily native order attempt limit reached"):
         await manager.execute(order(market))

@@ -639,6 +639,7 @@ async def test_approved_trusted_pilot_emits_one_automatic_native_candidate_only_
     risk = RiskEngine(RiskConfig(max_order_stake=Decimal("1"), live_max_order_stake=Decimal("1"),
         live_stake_authorized=True, stake_sizing="quarter_kelly"))
     risk.auto_trade, risk.kill_switch = True, False
+    risk.native_enabled_venues = frozenset({"kalshi"})
     publish = AsyncMock()
     engine = SimpleNamespace(risk=risk, settings=SimpleNamespace(pricing=scoped, mode="production"),
         markets={market.id: market}, quotes={market.id: {q.bookmaker: q for q in quotes}},
@@ -828,7 +829,7 @@ def test_trusted_pilot_preflight_requires_armed_automatic_route_and_blocks_prior
         digest=lambda: "OFFLINE-profile",
         limits=SimpleNamespace(max_native_order_attempts=1))
     runtime = SimpleNamespace(
-        report=lambda: SimpleNamespace(safe_to_arm=True, live_trading_ready=True,
+        report=lambda *args: SimpleNamespace(safe_to_arm=True, live_trading_ready=True,
                                        sandbox_trading_ready=False),
         profile_for=lambda venue: profile,
         account_snapshots={"novig": SimpleNamespace(cash_available_verified=True,
@@ -884,7 +885,7 @@ def test_recurring_trusted_preflight_accepts_cash_sized_order_above_one_unit_onl
         digest=lambda: "OFFLINE-recurring-profile",
         limits=SimpleNamespace(max_native_order_attempts=None, available_cash_only=True,
                                stake_sizing="quarter_kelly", max_order_stake_usd=None))
-    runtime = SimpleNamespace(report=lambda: SimpleNamespace(safe_to_arm=True,
+    runtime = SimpleNamespace(report=lambda *args: SimpleNamespace(safe_to_arm=True,
         live_trading_ready=True, sandbox_trading_ready=False),
         profile_for=lambda venue: profile,
         account_snapshots={"novig": SimpleNamespace(cash_available_verified=True,

@@ -43,7 +43,7 @@ def _authorization(data: dict, now: datetime) -> tuple[str, datetime, str]:
             or shared._money(data.get("unit_size_usd")) != Decimal("5")
             or shared._money(data.get("minimum_ev")) != MIN_EV
             or shared._money(data.get("uncertainty_probability")) != UNCERTAINTY
-            or not isinstance(data.get("venues"), list) or not data["venues"]
+            or not isinstance(data.get("venues"), list) or len(data["venues"]) != 1
             or len(set(data["venues"])) != len(data["venues"])
             or not set(data["venues"]) <= shared.VENUES):
         raise ValueError("recurring_authorization_invalid")
@@ -61,10 +61,11 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
             or risk.get("live_stake_authorized") is not True
             or shared._money(risk.get("unit_size_usd")) != Decimal("5")):
         return "recurring_cash_kelly_scope_unavailable"
-    profiles = setup.get("launch_scope") or []
+    all_profiles = setup.get("launch_scope") or []
+    profiles = [p for p in all_profiles if p.get("venue") in venues]
     policy_state = setup.get("risk_policy") or {}
     limits = policy_state.get("values") or {}
-    if (not profiles or len(profiles) != (setup.get("scope") or {}).get("profile_count")
+    if (len(profiles) != 1 or len(all_profiles) != (setup.get("scope") or {}).get("profile_count")
             or policy_state.get("source") not in {"launch_profile", "launch_portfolio"}
             or policy_state.get("applied") is not True
             or limits.get("max_native_order_attempts") is not None
@@ -133,9 +134,10 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
                     or minimum < MIN_EV):
                 return "waiting_for_recurring_source_review"
     activation = setup.get("activation") or {}
-    if (activation.get("scope_digest") != authorized_digest):
+    venue_activation = (activation.get("by_venue") or {}).get(next(iter(venues)), {})
+    if venue_activation.get("scope_digest") != authorized_digest:
         return "reviewed_launch_digest_changed"
-    if setup.get("safe_to_arm") is not True or activation.get("available") is not True:
+    if venue_activation.get("available") is not True:
         return "waiting_for_live_checks"
     return "ready"
 
@@ -212,6 +214,7 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
         running_expiry = shared._time(state.get("native_authorization_expires_at"))
         if state.get("auto_trade") is True:
             if (state.get("kill_switch") is True or running_expiry != expires
+                    or set(state.get("native_enabled_venues") or []) != set(saved["venues"])
                     or phase not in {"ready", "waiting_for_live_checks"}):
                 disarm()
                 _status("blocked", "Running scope or authorization changed", identity)
@@ -235,7 +238,8 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
             return "ready"
         _status("arming", "One bounded recurring activation attempted", identity, arm_attempted=True)
         try:
-            updated = shared._control(client, arm=True, digest=digest, expires=expires)
+            updated = shared._control(client, arm=True, digest=digest, expires=expires,
+                                      native_venues=saved["venues"])
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 409:
                 raise

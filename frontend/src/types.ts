@@ -4,6 +4,7 @@ export interface State extends Json {
   mode: string
   auto_trade: boolean
   kill_switch: boolean
+  native_enabled_venues: string[]
   plugins: Json[]
   markets: Json[]
   quotes: Json[]
@@ -19,13 +20,14 @@ export interface State extends Json {
   quarantine: Json[]
 }
 export const emptyState: State = {
-  mode: 'disconnected', auto_trade: false, kill_switch: false, plugins: [],
+  mode: 'disconnected', auto_trade: false, kill_switch: false, native_enabled_venues: [], plugins: [],
   markets: [], quotes: [], opportunities: [], reference_estimates: [], arbitrage_research: [], orders: [], positions: [],
   metrics: {}, risk: {}, events: [], signals: [], quarantine: [],
 }
 export const normalizeState = (data: Json): State => ({
   ...emptyState, ...data,
   plugins: Array.isArray(data.plugins) ? data.plugins : [],
+  native_enabled_venues: Array.isArray(data.native_enabled_venues) ? data.native_enabled_venues : [],
   markets: Array.isArray(data.markets) ? data.markets : [],
   quotes: Array.isArray(data.quotes) ? data.quotes : [],
   opportunities: Array.isArray(data.opportunities) ? data.opportunities : [],

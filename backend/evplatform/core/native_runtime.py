@@ -773,7 +773,7 @@ class NativeRuntime:
                 frozenset(risk.settled), frozenset(self.manager.invalidated_settlements))
 
     def require_preflight(self, order, *, preview_only=False):
-        report = self.report()
+        report = self.report(getattr(order, "venue", None))
         manual = order.execution_origin == "manual" and self.engine.risk.manual_order_active(order.id)
         dry_run = (preview_only and order.execution_origin == "manual"
                    and report.safe_to_arm and self.engine.settings.live_enabled)
@@ -1041,7 +1041,8 @@ class NativeRuntime:
         await self.engine.bus.publish(Envelope(schema_name="native.signal", source="native_positive_ev", payload=observation))
         for candidate in candidates:
             self.candidates[(candidate.market_id, candidate.venue, candidate.outcome)] = candidate
-            if (candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch):
+            if (candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch
+                    and candidate.venue in self.engine.risk.native_enabled_venues):
                 await self.engine.bus.publish(Envelope(schema_name="trade.native_candidate", source=candidate.strategy, payload=candidate))
 
     def bind_client(self, venue, client):
@@ -1409,7 +1410,8 @@ class NativeRuntime:
             reconciliation_discrepancies=(1 if snapshot and not snapshot.reconciled else 0) + len(self.manager.invalidated_settlements),
             native_pilot_prior_attempts=prior_attempts,
             feeds=tuple(feeds), markets=tuple(markets), live_enabled=engine.settings.live_enabled,
-            auto_trade=engine.risk.auto_trade, kill_switch=engine.risk.kill_switch)
+            auto_trade=engine.risk.auto_trade and venue in engine.risk.native_enabled_venues,
+            kill_switch=engine.risk.kill_switch)
 
     def reports(self):
         return {venue: evaluate_readiness(p, self.runtime_facts(venue))
@@ -1418,8 +1420,34 @@ class NativeRuntime:
     def runtime_facts_by_venue(self):
         return {venue: self.runtime_facts(venue) for venue in self.profiles_by_venue()}
 
-    def report(self, venue=None):
-        if not getattr(self, "portfolio", None) or venue is not None:
+    def scope_digest(self, venues):
+        profiles = self.profiles_by_venue()
+        selected = set(venues)
+        if not selected or not selected <= profiles.keys():
+            raise ValueError("Select reviewed native execution venues")
+        if len(selected) == 1:
+            return profiles[next(iter(selected))].digest()
+        return digest_json({venue: profiles[venue].digest() for venue in sorted(selected)})
+
+    def report(self, venue=None, *, venues=None):
+        if venues is not None:
+            selected = set(venues)
+            if not selected or not selected <= self.profiles_by_venue().keys():
+                raise ValueError("Select reviewed native execution venues")
+            if len(selected) == 1:
+                return self.report(next(iter(selected)))
+            reports = {name: self.report(name) for name in selected}
+            report = ReadinessReport(evaluated_at=utcnow(), environment=self.engine.settings.mode,
+                venue="portfolio", profile_digest=self.scope_digest(selected),
+                technical_ready=all(r.technical_ready for r in reports.values()),
+                authorization_ready=all(r.authorization_ready for r in reports.values()),
+                safe_to_arm=all(r.safe_to_arm for r in reports.values()),
+                live_trading_ready=all(r.live_trading_ready for r in reports.values()),
+                sandbox_trading_ready=all(r.sandbox_trading_ready for r in reports.values()),
+                blockers=tuple(b.model_copy(update={"scope": f"{v}/{b.scope}"})
+                    for v, r in reports.items() for b in r.blockers),
+                performance=next(iter(reports.values())).performance)
+        elif not getattr(self, "portfolio", None) or venue is not None:
             report = evaluate_readiness(self.profile_for(venue), self.runtime_facts(venue))
         else:
             reports = self.reports()

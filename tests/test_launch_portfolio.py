@@ -119,7 +119,7 @@ def scoped_portfolio(runtime, market):
     a = a.model_copy(update={"venue": "novig", "market_ids": (market.id,), "strategy_ids": ("native_positive_ev",)})
     b = a.model_copy(update={"venue": "second", "account_fingerprint": "e"*64})
     runtime.portfolio = LaunchPortfolio(profiles=(a,b))
-    runtime.report = lambda: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
+    runtime.report = lambda *args, **kwargs: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
     runtime.engine.risk.config.available_cash_only = True
     runtime.account_snapshots = {"novig": SimpleNamespace(cash_available_verified=True, balance_usd=Decimal(".1")),
         "second": SimpleNamespace(cash_available_verified=True, balance_usd=Decimal("100"))}

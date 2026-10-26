@@ -31,6 +31,7 @@ class ControlBody(BaseModel):
     kill_switch: bool | None = None
     expected_launch_digest: str | None = None
     authorization_expires_at: datetime | None = None
+    native_venues: list[Literal["kalshi", "novig", "prophetx", "polymarket_us"]] | None = None
 
 
 class ToggleBody(BaseModel):

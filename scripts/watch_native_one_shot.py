@@ -233,10 +233,12 @@ def _get(client: httpx.Client, path: str) -> dict:
 
 
 def _control(client: httpx.Client, *, arm: bool, digest: str | None = None,
-             expires: datetime | None = None) -> dict:
+             expires: datetime | None = None, native_venues: list[str] | None = None) -> dict:
     body = {"auto_trade": arm, "kill_switch": not arm}
     if arm:
         body.update(expected_launch_digest=digest, authorization_expires_at=expires.isoformat())
+        if native_venues is not None:
+            body["native_venues"] = native_venues
     response = client.post("/api/control", json=body, headers=CONTROL_HEADER)
     response.raise_for_status()
     return response.json()
