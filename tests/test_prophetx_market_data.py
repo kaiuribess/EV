@@ -62,6 +62,21 @@ def test_talaria_value_is_usd_stake_not_legacy_quantity_and_multiple_levels():
     assert {row["strike_id"] for row in view["levels"]} == {"home-strike", "away-strike"}
 
 
+def test_exact_market_filter_runs_before_level_limit_without_refreshing_book():
+    data = seeded()
+    data.apply(frame(), received_at=NOW)
+    view = data.snapshot(now=NOW + timedelta(seconds=2), connected=True, limit=1,
+                         event_id="123", market_id="219", strike_id="home-strike")
+    assert view["filtered_level_count"] == 2
+    assert len(view["levels"]) == 1
+    assert view["levels"][0]["strike_id"] == "home-strike"
+    assert view["levels"][0]["executable_stake_usd"] == "1387.08"
+    assert view["current_game_markets"] == 1
+    assert data.snapshot(now=NOW + timedelta(seconds=31), connected=True, limit=1,
+                         event_id="123", market_id="219", strike_id="home-strike")["levels"][0][
+                             "executable_stake_usd"] == "0"
+
+
 def test_prop_scope_must_match_catalog_and_exact_strike_identity():
     data = seeded()
     data.apply(frame(300, subtype="player_to_record_a_double_double"), received_at=NOW)

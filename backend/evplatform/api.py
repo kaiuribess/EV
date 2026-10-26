@@ -183,8 +183,14 @@ def create_app(settings=None):
         return engine.state()
 
     @app.get("/api/native/market-data/prophetx")
-    async def prophetx_market_data(limit: int = Query(20, ge=1, le=100)):
-        return engine.native.prophetx_research_books(limit=limit)
+    async def prophetx_market_data(
+        limit: int = Query(20, ge=1, le=100),
+        event_id: str | None = Query(None, pattern=r"^[0-9]{1,20}$"),
+        market_id: str | None = Query(None, pattern=r"^[0-9]{1,20}$"),
+        strike_id: str | None = Query(None, pattern=r"^[a-f0-9]{32}$"),
+    ):
+        return engine.native.prophetx_research_books(
+            limit=limit, event_id=event_id, market_id=market_id, strike_id=strike_id)
 
     @app.get("/api/native/market-data/polymarket-us")
     async def polymarket_us_market_data(limit: int = Query(20, ge=1, le=50)):

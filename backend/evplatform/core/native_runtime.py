@@ -1101,7 +1101,8 @@ class NativeRuntime:
                 await self.engine.bus.publish(Envelope(schema_name="sports.market", source=venue, payload=market))
                 await self.engine.bus.publish(Envelope(schema_name="exchange.native_book", source=venue, payload=book))
 
-    def prophetx_research_books(self, *, limit: int = 20) -> dict:
+    def prophetx_research_books(self, *, limit: int = 20, event_id: str | None = None,
+                                market_id: str | None = None, strike_id: str | None = None) -> dict:
         """Read-only native research view; no canonical or execution mapping."""
         record = self.engine.registry.records.get("prophetx")
         monitor = record.plugin if record and record.enabled else None
@@ -1113,7 +1114,9 @@ class NativeRuntime:
                      and client.health_check().get("streaming") is True)
         return {"available": True, "environment": client.settings.environment,
                 "streaming": connected,
-                **client.public_market_data.snapshot(now=utcnow(), connected=connected, limit=limit)}
+                **client.public_market_data.snapshot(
+                    now=utcnow(), connected=connected, limit=limit, event_id=event_id,
+                    market_id=market_id, strike_id=strike_id)}
 
     def polymarket_us_research_books(self, *, limit: int = 20) -> dict:
         """Current public/streamed US instrument depth, before mapping approval."""

@@ -189,7 +189,9 @@ class ProphetXMarketData:
                                "stream_market_status": info.get("status")}
 
     def snapshot(self, *, now: datetime, connected: bool, limit: int = 20,
-                 max_receipt_age_seconds: int = 30, max_catalog_age_seconds: int = 600) -> dict:
+                 max_receipt_age_seconds: int = 30, max_catalog_age_seconds: int = 600,
+                 event_id: str | None = None, market_id: str | None = None,
+                 strike_id: str | None = None) -> dict:
         rows = []
         catalog_current = (self.catalog_at is not None and
                            0 <= (now - self.catalog_at).total_seconds() <= max_catalog_age_seconds)
@@ -213,8 +215,12 @@ class ProphetXMarketData:
                              "local_receipt_age_seconds": round(age, 3), "stream_current": level_current,
                              "executable_stake_usd": level["available_stake_usd"] if level_current else "0",
                              "research_only": True})
-        rows.sort(key=lambda item: (not item["stream_current"], item["local_receipt_age_seconds"],
-                                    item["event_id"], item["market_id"], item["strike_id"]))
+        visible_rows = [row for row in rows
+                        if (event_id is None or row["event_id"] == event_id)
+                        and (market_id is None or row["market_id"] == market_id)
+                        and (strike_id is None or row["strike_id"] == strike_id)]
+        visible_rows.sort(key=lambda item: (not item["stream_current"], item["local_receipt_age_seconds"],
+                                            item["event_id"], item["market_id"], item["strike_id"]))
         rest_props = [{"event_id": event_id, "market_id": market_id,
                        "market_name": self.catalog[(event_id, market_id)]["name"],
                        "market_sub_type": self.catalog[(event_id, market_id)]["sub_type"],
@@ -238,5 +244,6 @@ class ProphetXMarketData:
                                                     if r["stream_current"] and r["channel_scope_sub_type"] is not None}),
                 "current_player_prop_samples": [r for r in rows
                                                 if r["stream_current"] and r["channel_scope_sub_type"] is not None][:5],
-                "levels": rows[:limit], "truncated": len(rows) > limit,
+                "levels": visible_rows[:limit], "truncated": len(visible_rows) > limit,
+                "filtered_level_count": len(visible_rows),
                 "read_only": True, "execution_mapping_verified": False}
