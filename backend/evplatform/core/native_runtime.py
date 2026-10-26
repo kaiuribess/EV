@@ -72,6 +72,7 @@ class NativeRuntime:
         self.signals = {}
         self.account_snapshots = {}
         self.external_positions = ()
+        self.pending_external_orders = ()
         # Pre-profile diagnostics are never consulted by risk, sizing or the
         # release gate. They let an operator identify an account before writing
         # the reviewed launch profile that enables normal account probing.
@@ -99,14 +100,16 @@ class NativeRuntime:
     async def start(self):
         self.build_id = await asyncio.to_thread(build_fingerprint)
         from .paths import runtime_data_file
-        from .external_inventory import load_external_inventory
+        from .external_inventory import load_external_inventory_review
         from .structural_review import StructuralPilotReview
 
         external_inventory_error = ""
         if self.engine.settings.mode == "production":
             external_path = runtime_data_file("external_native_positions.json", self.engine.settings.data_dir)
             try:
-                self.external_positions = await asyncio.to_thread(load_external_inventory, external_path)
+                review = await asyncio.to_thread(load_external_inventory_review, external_path)
+                self.external_positions = review.positions
+                self.pending_external_orders = review.pending_orders
                 self.engine.risk.external_positions = self.external_positions
             except (OSError, ValueError, KeyError, TypeError):
                 external_inventory_error = "External native inventory review is invalid; native execution is blocked"
@@ -160,6 +163,9 @@ class NativeRuntime:
             self.profile_error = "Native mappings are invalid; review the exact market and fee evidence"
         if external_inventory_error:
             self.profile_error = (self.profile_error + "; " if self.profile_error else "") + external_inventory_error
+        if self.pending_external_orders:
+            self.profile_error = (self.profile_error + "; " if self.profile_error else "") + \
+                "External native orders need authoritative inventory and settlement review before execution"
         await self.manager.start()
 
     def close(self):

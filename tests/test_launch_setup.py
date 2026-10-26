@@ -58,10 +58,13 @@ def test_all_registered_native_monitors_appear_without_launch_profile(engine):
 def test_external_inventory_is_visible_but_not_an_oms_order_or_verified_account(engine):
     engine.native.external_positions = (SimpleNamespace(venue="novig", account_fingerprint="a" * 64,
         cost_usd=Decimal(".97175")),)
+    engine.native.pending_external_orders = (SimpleNamespace(venue="kalshi"),)
     report = launch_setup(engine)
     assert report["external_inventory"]["loaded_count"] == 1
     assert report["external_inventory"]["unsettled_cost_usd"] == "0.97175"
     assert report["external_inventory"]["account_reconciled"] is False
+    assert report["external_inventory"]["pending_order_count"] == 1
+    assert report["external_inventory"]["pending_venues"] == ["kalshi"]
     assert report["safe_to_arm"] is False
 
 

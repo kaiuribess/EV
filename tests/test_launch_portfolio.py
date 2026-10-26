@@ -2,11 +2,13 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from decimal import Decimal
+import hashlib
 
 import pytest
 from pydantic import ValidationError
 
 from evplatform.core.config import Settings
+from evplatform.core.external_inventory import ExternalInventoryFile, PendingExternalOrder
 from evplatform.core.native_runtime import NativeRuntime
 from evplatform.core.portfolio import LaunchPortfolio
 from evplatform.engine import Engine
@@ -77,6 +79,25 @@ async def test_both_launch_files_fail_closed(tmp_path, monkeypatch):
     await runtime.start()
     assert "conflicting" in runtime.profile_error
     assert not runtime.profiles_by_venue() and runtime.execution_lease is None
+    assert not runtime.report().safe_to_arm
+
+
+async def test_pending_external_raw_order_blocks_production_execution(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    receipt = data / "kalshi_raw_smoke_attempt.json"
+    receipt.write_text('{"order_id":"external-1","status":"filled_unsettled"}', encoding="utf-8")
+    row = PendingExternalOrder(venue="kalshi", native_order_id="external-1",
+        source_artifact=receipt.name, source_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
+    (data / "external_native_positions.json").write_text(
+        ExternalInventoryFile(pending_orders=(row,)).model_dump_json(), encoding="utf-8")
+    engine = Engine(Settings(mode="production", data_dir=str(data),
+        database_path=str(tmp_path / "native.db")))
+    runtime = NativeRuntime(engine)
+    runtime.manager.start = AsyncMock()
+    await runtime.start()
+    assert len(runtime.pending_external_orders) == 1
+    assert "External native orders" in runtime.profile_error
     assert not runtime.report().safe_to_arm
 
 

@@ -37,10 +37,20 @@ class ExternalPosition(BaseModel):
         return self
 
 
+class PendingExternalOrder(BaseModel):
+    """Known raw placement whose current exposure cannot yet be certified."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    venue: Literal["kalshi", "prophetx", "polymarket_us"]
+    native_order_id: str = Field(min_length=1)
+    source_artifact: str = Field(pattern=r"^[a-zA-Z0-9_-]+\.json$")
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ExternalInventoryFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal[1] = 1
     positions: tuple[ExternalPosition, ...] = ()
+    pending_orders: tuple[PendingExternalOrder, ...] = ()
 
     @model_validator(mode="after")
     def distinct_native_positions(self):
@@ -48,13 +58,24 @@ class ExternalInventoryFile(BaseModel):
                  row.native_outcome_id) for row in self.positions]
         if len(keys) != len(set(keys)):
             raise ValueError("Duplicate external position identity")
+        pending_keys = [(row.venue, row.native_order_id) for row in self.pending_orders]
+        if len(pending_keys) != len(set(pending_keys)):
+            raise ValueError("Duplicate pending external order identity")
         return self
 
 
-def load_external_inventory(path: Path) -> tuple[ExternalPosition, ...]:
+def load_external_inventory_review(path: Path) -> ExternalInventoryFile:
     if not path.exists():
-        return ()
+        return ExternalInventoryFile()
     inventory = ExternalInventoryFile.model_validate_json(path.read_text(encoding="utf-8"))
+    for row in inventory.pending_orders:
+        artifact = path.parent / row.source_artifact
+        if (not row.source_artifact.startswith(row.venue + "_") or not artifact.is_file()
+                or hashlib.sha256(artifact.read_bytes()).hexdigest() != row.source_sha256):
+            raise ValueError("Pending external order artifact changed or is missing")
+        receipt = json.loads(artifact.read_text(encoding="utf-8"))
+        if receipt.get("order_id") != row.native_order_id or receipt.get("status") != "filled_unsettled":
+            raise ValueError("Pending external order differs from raw placement receipt")
     for row in inventory.positions:
         def verified_json(filename: str, digest: str):
             artifact = path.parent / filename
@@ -85,4 +106,8 @@ def load_external_inventory(path: Path) -> tuple[ExternalPosition, ...]:
             raise ValueError("External position evidence is malformed") from exc
         if not matches:
             raise ValueError("External position identity differs from reviewed receipt or catalog")
-    return inventory.positions
+    return inventory
+
+
+def load_external_inventory(path: Path) -> tuple[ExternalPosition, ...]:
+    return load_external_inventory_review(path).positions

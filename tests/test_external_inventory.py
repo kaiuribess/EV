@@ -4,7 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from evplatform.core.external_inventory import ExternalInventoryFile, ExternalPosition, load_external_inventory
+from evplatform.core.external_inventory import (ExternalInventoryFile, ExternalPosition,
+    PendingExternalOrder, load_external_inventory, load_external_inventory_review)
 from evplatform.core.risk import RiskEngine
 from evplatform.core.config import RiskConfig
 
@@ -65,3 +66,16 @@ def test_duplicate_external_position_identity_is_rejected(tmp_path):
     _, _, row = evidence(tmp_path)
     with pytest.raises(ValueError, match="Duplicate external position"):
         ExternalInventoryFile(positions=(row, row))
+
+
+def test_pending_raw_order_blocks_review_until_authoritative_inventory_exists(tmp_path):
+    artifact = tmp_path / "kalshi_raw_smoke_attempt.json"
+    artifact.write_text('{"order_id":"external-1","status":"filled_unsettled"}', encoding="utf-8")
+    pending = PendingExternalOrder(venue="kalshi", native_order_id="external-1",
+        source_artifact=artifact.name, source_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
+    path = tmp_path / "external_native_positions.json"
+    path.write_text(ExternalInventoryFile(pending_orders=(pending,)).model_dump_json(), encoding="utf-8")
+    assert load_external_inventory_review(path).pending_orders == (pending,)
+    artifact.write_text('{"order_id":"external-2","status":"filled_unsettled"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact changed"):
+        load_external_inventory_review(path)

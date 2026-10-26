@@ -308,6 +308,8 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "external_inventory": {"loaded_count": len(native.external_positions),
             "unsettled_cost_usd": str(sum((item.cost_usd for item in native.external_positions), Decimal(0))),
             "venues": sorted({item.venue for item in native.external_positions}),
+            "pending_order_count": len(native.pending_external_orders),
+            "pending_venues": sorted({item.venue for item in native.pending_external_orders}),
             "account_reconciled": bool(native.external_positions) and all(
                 any(snapshot.account_fingerprint == item.account_fingerprint and snapshot.reconciled
                     for snapshot in native.account_snapshots.values())
