@@ -596,6 +596,36 @@ def test_rule_bound_novig_nfl_pilot_pricing_accepts_only_reviewed_new_questions(
         assert not result.live_execution_allowed
 
 
+def test_prophetx_recurring_scope_requires_reviewed_exact_nfl_moneyline():
+    base, _, _, _ = approved_pilot_case()
+    rule_id = "OFFLINE-reviewed-prophetx-nfl-winner-rule"
+    market = base.model_copy(update={
+        "sport": "football", "league": "NFL", "market_type": "moneyline",
+        "participants": ("Team A", "Team B"), "outcomes": ("Team A", "Team B"),
+        "player": None, "player_id": None, "statistic": None, "line": None,
+        "settlement": base.settlement.model_copy(update={"period": "FULL", "overtime": "included"}),
+        "extensions": {"reviewed_normal_rule_id": rule_id, "normal_outcome_reviewed": True},
+    })
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
+        market_type="moneyline", reviewed_normal_rule_id=rule_id)
+    assert scope.matches(market)
+    for altered in (
+        market.model_copy(update={"outcomes": ("Team A", "Draw")}),
+        market.model_copy(update={"player": "Unknown Player"}),
+        market.model_copy(update={"extensions": {"normal_outcome_reviewed": True}}),
+        market.model_copy(update={"extensions": {"reviewed_normal_rule_id": rule_id,
+            "normal_outcome_reviewed": True, "research_only": True}}),
+        market.model_copy(update={"settlement": market.settlement.model_copy(update={"period": "1H"})}),
+    ):
+        assert not scope.matches(altered)
+    with pytest.raises(ValueError, match="ProphetX pilot scope"):
+        TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
+            market_type="player_prop", statistics=("receptions",), reviewed_normal_rule_id=rule_id)
+    with pytest.raises(ValueError, match="Novig pilot scope"):
+        TrustedPilotMarketScope(venue="novig", sport="football", league="NFL",
+            market_type="moneyline", reviewed_normal_rule_id=rule_id)
+
+
 @pytest.mark.asyncio
 async def test_approved_trusted_pilot_emits_one_automatic_native_candidate_only_while_armed():
     from types import SimpleNamespace

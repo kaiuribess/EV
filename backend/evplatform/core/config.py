@@ -11,11 +11,11 @@ from .paths import PROJECT_ROOT
 class TrustedPilotMarketScope(BaseModel):
     """A rule-bound normal question, not approval of a discovered native ID."""
     model_config = ConfigDict(extra="forbid")
-    venue: Literal["novig"]
+    venue: Literal["novig", "prophetx"]
     sport: Literal["football"]
     league: Literal["NFL"]
-    market_type: Literal["player_prop"]
-    statistics: tuple[Literal["receptions", "receiving_yards"], ...] = Field(min_length=1)
+    market_type: Literal["player_prop", "moneyline"]
+    statistics: tuple[Literal["receptions", "receiving_yards"], ...] = ()
     period: Literal["FULL"] = "FULL"
     reviewed_normal_rule_id: str = Field(min_length=8)
 
@@ -23,16 +23,25 @@ class TrustedPilotMarketScope(BaseModel):
     def distinct_statistics(self):
         if len(set(self.statistics)) != len(self.statistics):
             raise ValueError("Pilot statistics must be distinct")
+        if self.venue == "novig":
+            if self.market_type != "player_prop" or not self.statistics:
+                raise ValueError("Novig pilot scope requires reviewed NFL player props")
+        elif self.market_type != "moneyline" or self.statistics:
+            raise ValueError("ProphetX pilot scope permits reviewed NFL moneylines only")
         return self
 
     def matches(self, market) -> bool:
-        return bool(market.sport == self.sport and market.league == self.league
-            and market.market_type == self.market_type and market.statistic in self.statistics
-            and market.settlement.period == self.period
-            and market.settlement.overtime == "included"
+        same_question = (market.statistic in self.statistics
             and market.player and market.player_id and market.line is not None
             and market.line != market.line.to_integral_value()
-            and set(market.outcomes) == {"over", "under"}
+            and set(market.outcomes) == {"over", "under"}) if self.market_type == "player_prop" else (
+            market.player is None and market.player_id is None and market.statistic is None
+            and market.line is None and len(market.participants) == 2
+            and set(market.outcomes) == set(market.participants))
+        return bool(market.sport == self.sport and market.league == self.league
+            and market.market_type == self.market_type and same_question
+            and market.settlement.period == self.period
+            and market.settlement.overtime == "included"
             and market.extensions.get("reviewed_normal_rule_id") == self.reviewed_normal_rule_id
             and market.extensions.get("normal_outcome_reviewed") is True
             and market.extensions.get("research_only") is not True)
