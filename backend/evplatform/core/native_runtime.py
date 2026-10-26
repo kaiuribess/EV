@@ -987,6 +987,11 @@ class NativeRuntime:
             raise RiskRejected("Native candidate or order book changed")
         order = self.build_order(candidate, execution_origin=execution_origin)
         try:
+            # Manual review checks location before entering this method. The
+            # automatic path must bind the same short-lived check to this
+            # exact order before the OMS's first preflight and durable intent.
+            if execution_origin == "automatic" and order.venue == "prophetx" and order.mode == "production":
+                await self.verify_prophetx_location(order)
             return await self.manager.execute(order)
         finally:
             if self._prophetx_location and self._prophetx_location[0] == order.id:
@@ -1406,6 +1411,9 @@ class NativeRuntime:
             account_identity_verified=account_current,
             geographic_attestation_current=bool(p and account_current and
                 current_geographic_attestation(snapshot, p.account_fingerprint, p.environment, now)),
+            order_bound_location_check_supported=bool(venue == "prophetx" and native_bound
+                and callable(getattr(client, "check_current_location", None))
+                and callable(getattr(client, "location_valid_for", None))),
             unresolved_unknown_orders=unknown,
             reconciliation_discrepancies=(1 if snapshot and not snapshot.reconciled else 0) + len(self.manager.invalidated_settlements),
             native_pilot_prior_attempts=prior_attempts,

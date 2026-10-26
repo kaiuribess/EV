@@ -191,6 +191,24 @@ def test_validation_pilot_allows_five_dollars_but_not_more():
         LaunchProfile.model_validate({**profile.model_dump(), "limits": values})
 
 
+def test_prophetx_order_bound_location_path_defers_only_location_evidence():
+    profile, runtime, now = pilot_fixture()
+    profile = LaunchProfile.model_validate({**profile.model_dump(), "venue": "prophetx",
+        "settlement_policy": "prophetx_funded_cash_win_loss_halt_on_exception",
+        "evidence": ()})
+    evidence = tuple(item.model_copy(update={"venue": "prophetx", "profile_digest": profile.digest()})
+        for item in pilot_fixture()[0].evidence if item.kind != "geographic_eligibility")
+    profile = profile.model_copy(update={"evidence": evidence})
+    runtime = runtime.model_copy(update={"venue": "prophetx", "configured_limits": profile.limits,
+        "enabled_strategy_ids": profile.strategy_ids,
+        "markets": (runtime.markets[0].model_copy(update={"order_minimum_verified": True}),),
+        "order_bound_location_check_supported": True})
+    assert evaluate_readiness(profile, runtime, now=now).safe_to_arm
+    blocked = evaluate_readiness(profile, runtime.model_copy(update={
+        "order_bound_location_check_supported": False}), now=now)
+    assert "evidence.geographic_eligibility" in codes(blocked)
+
+
 def test_legacy_profile_digest_stays_stable_without_pilot():
     profile, _, _ = ready_fixture()
     legacy = profile.model_dump(mode="json", exclude={"evidence"})

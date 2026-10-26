@@ -261,6 +261,9 @@ class RuntimeReadiness(StrictRecord):
     native_credentials_present: bool = False
     account_identity_verified: bool = False
     geographic_attestation_current: bool = False
+    # ProphetX can verify the actual owner's location for each exact order at
+    # dispatch. This is capability evidence, never a claim of current location.
+    order_bound_location_check_supported: bool = False
     unresolved_unknown_orders: int = Field(default=0, ge=0)
     reconciliation_discrepancies: int = Field(default=0, ge=0)
     native_pilot_prior_attempts: int = Field(default=0, ge=0)
@@ -453,6 +456,11 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         digest = profile.digest()
         for kind in ("account_access", "native_lifecycle", "restart_recovery", "settlement_reconciliation", "risk_authorization",
                      *(("geographic_eligibility",) if profile.environment == "production" else ())):
+            if (kind == "geographic_eligibility" and profile.venue == "prophetx"
+                    and runtime.order_bound_location_check_supported):
+                # A fresh, account/order-bound location result is required by
+                # the ProphetX preflight immediately before every submission.
+                continue
             if (pilot and runtime.native_pilot_prior_attempts == 0
                     and kind in {"native_lifecycle", "restart_recovery", "settlement_reconciliation"}
                     and not any(e.kind == kind for e in profile.evidence)):

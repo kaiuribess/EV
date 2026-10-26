@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from evplatform.core.native_runtime import NativeRuntime
+from evplatform.core.models import utcnow
 from evplatform.core.risk import RiskRejected
 from evplatform.venues.common import NativeTradingGate, VenueError
 from evplatform.venues.prophetx import ProphetXClient, ProphetXSettings
@@ -85,4 +86,33 @@ async def test_runtime_location_proof_is_order_bound_and_expires():
     client.check_current_location.return_value = False
     with pytest.raises(RiskRejected, match="current location check failed"):
         await runtime.verify_prophetx_location(order)
+    assert runtime._prophetx_location is None
+
+
+@pytest.mark.parametrize("eligible", [True, False])
+async def test_automatic_prophetx_checks_location_before_oms(eligible):
+    client = SimpleNamespace(check_current_location=AsyncMock(return_value=eligible),
+                             location_valid_for=lambda value: value == "client-1")
+    order = SimpleNamespace(id="order-1", venue="prophetx", mode="production",
+                            intent=SimpleNamespace(client_order_id="client-1"))
+    candidate = SimpleNamespace(market_id="m", venue="prophetx", outcome="yes",
+                                book_revision=4, calculated_at=utcnow(), qualified=True)
+    runtime = NativeRuntime.__new__(NativeRuntime)
+    runtime.engine = SimpleNamespace(markets={"m": SimpleNamespace(id="m")},
+        risk=SimpleNamespace(config=SimpleNamespace(max_candidate_age_ms=10000), native_orders={}))
+    runtime.books = {("m", "prophetx", "yes"): SimpleNamespace(revision=4)}
+    runtime.manager = SimpleNamespace(adapters={"prophetx": SimpleNamespace(client=client)},
+                                      execute=AsyncMock(return_value="saved-order"))
+    runtime.build_order = lambda value, execution_origin: order
+    runtime._prophetx_location = None
+    runtime.dirty_venues = set()
+    runtime.invalidate_account = lambda venue: None
+    if eligible:
+        assert await runtime.execute(candidate) == "saved-order"
+        runtime.manager.execute.assert_awaited_once_with(order)
+    else:
+        with pytest.raises(RiskRejected, match="current location check failed"):
+            await runtime.execute(candidate)
+        runtime.manager.execute.assert_not_awaited()
+    client.check_current_location.assert_awaited_once_with("client-1")
     assert runtime._prophetx_location is None
