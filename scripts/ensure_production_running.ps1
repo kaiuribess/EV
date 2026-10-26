@@ -47,7 +47,12 @@ function Managed-Process-Alive {
 function Invoke-OneShotGate {
     if ($Port -ne 8002) { return }
     $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
-    $gate = Join-Path $PSScriptRoot 'watch_native_one_shot.py'
+    $recurring = Join-Path $dataDir 'native_recurring_authorization.json'
+    $gate = if (Test-Path -LiteralPath $recurring) {
+        Join-Path $PSScriptRoot 'watch_native_recurring.py'
+    } else {
+        Join-Path $PSScriptRoot 'watch_native_one_shot.py'
+    }
     if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $gate)) {
         Write-SupervisorEvent 'One-shot gate unavailable; research scanner remains running.'
         return
