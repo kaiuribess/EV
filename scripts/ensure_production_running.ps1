@@ -38,9 +38,15 @@ function Managed-Process-Alive {
     try {
         $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
         $process = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$runtime.pid)"
-        return [bool]($process -and $process.CommandLine -match 'evplatform' -and
-            $process.CommandLine -match '--mode production' -and
-            $process.ExecutablePath -eq (Join-Path $projectRoot '.venv\Scripts\python.exe'))
+        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::1', '::') } | Select-Object -First 1
+        $parent = if ($process) { Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ParentProcessId)" }
+        $expected = "-m evplatform --mode production --port $Port"
+        return [bool]($process -and $listener -and $listener.OwningProcess -eq $process.ProcessId -and
+            $process.CommandLine -match [regex]::Escape($expected) -and
+            (!$runtime.started_at -or $process.CreationDate -eq $runtime.started_at) -and
+            ($process.ExecutablePath -eq (Join-Path $projectRoot '.venv\Scripts\python.exe') -or
+             $parent.ExecutablePath -eq (Join-Path $projectRoot '.venv\Scripts\python.exe')))
     } catch { return $false }
 }
 
