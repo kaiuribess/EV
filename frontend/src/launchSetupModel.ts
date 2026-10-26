@@ -29,6 +29,8 @@ export type SetupReport = {
     by_venue?: Record<string, { available: boolean; scope_digest: string }> };
   switches: { live_enabled: boolean; auto_trade: boolean; kill_switch: boolean; native_enabled_venues?: string[] };
   scope: { profile_count: number; verified_native_markets: number; real_reference_markets: number; native_candidates: number; synthetic_candidates: number };
+  external_inventory?: { loaded_count: number; owner_tracked_count?: number; unsettled_cost_usd: string;
+    pending_order_count: number; pending_venues: string[]; account_reconciled: boolean; note: string };
   risk_policy: { source: string; values: RecordValue | null; applied: boolean; error: string | null };
   accounts: SetupAccount[];
   launch_scope: { venue: string; environment: string; account_fingerprint: string;

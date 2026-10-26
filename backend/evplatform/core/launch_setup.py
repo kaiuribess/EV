@@ -316,6 +316,8 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
             "real_reference_markets": len(real_reference_markets), "native_candidates": len(native.candidates),
             "synthetic_candidates": sum(bool(item.synthetic) for item in engine.opportunities.values())},
         "external_inventory": {"loaded_count": len(native.external_positions),
+            "owner_tracked_count": sum(getattr(item, "tracking_basis", None) == "owner_attested_raw_fill"
+                for item in native.external_positions),
             "unsettled_cost_usd": str(sum((item.cost_usd for item in native.external_positions), Decimal(0))),
             "venues": sorted({item.venue for item in native.external_positions}),
             "pending_order_count": len(native.pending_external_orders),
@@ -324,7 +326,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                 any(snapshot.account_fingerprint == item.account_fingerprint and snapshot.reconciled
                     for snapshot in native.account_snapshots.values())
                 for item in native.external_positions),
-            "note": "External positions remain outside OMS order history; cash already reflects their debit."},
+            "note": "External positions remain outside OMS order history. Owner-tracked raw fills reserve risk conservatively, but do not verify current native inventory or settlement; cash already reflects the original debit."},
         "risk_policy": risk_policy, "accounts": accounts, "requirements": requirements,
         "launch_scope": launch_scope,
         "structural_review": ({**structural.model_dump(mode="json"),

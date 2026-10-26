@@ -37,6 +37,36 @@ class ExternalPosition(BaseModel):
         return self
 
 
+class OwnerTrackedProphetXPosition(BaseModel):
+    """Owner-tracked raw fill; conservatively reserved until separately released.
+
+    The receipt proves the original fill, not current account inventory or
+    settlement. This record never grants trading or becomes an OMS order.
+    """
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    venue: Literal["prophetx"] = "prophetx"
+    environment: Literal["production"] = "production"
+    account_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    native_order_id: str = Field(min_length=1)
+    native_event_id: str = Field(min_length=1)
+    native_market_id: str = Field(min_length=1)
+    native_outcome_id: str = Field(min_length=1)
+    sport: Literal["basketball", "football", "baseball", "hockey"]
+    quantity: Decimal = Field(gt=0)  # ProphetX USD stake, not contracts.
+    cost_usd: Decimal = Field(gt=0)
+    recorded_at: datetime
+    source_artifact: str = Field(pattern=r"^prophetx_[a-zA-Z0-9_-]+\.json$")
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tracking_basis: Literal["owner_attested_raw_fill"] = "owner_attested_raw_fill"
+
+    @model_validator(mode="after")
+    def exact_stake(self):
+        if (not self.quantity.is_finite() or not self.cost_usd.is_finite()
+                or self.quantity != self.cost_usd or self.recorded_at.tzinfo is None):
+            raise ValueError("Owner-tracked ProphetX stake requires exact positive USD cash risk and zoned time")
+        return self
+
+
 class PendingExternalOrder(BaseModel):
     """Known raw placement whose current exposure cannot yet be certified."""
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -49,7 +79,7 @@ class PendingExternalOrder(BaseModel):
 class ExternalInventoryFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal[1] = 1
-    positions: tuple[ExternalPosition, ...] = ()
+    positions: tuple[ExternalPosition | OwnerTrackedProphetXPosition, ...] = ()
     pending_orders: tuple[PendingExternalOrder, ...] = ()
 
     @model_validator(mode="after")
@@ -61,6 +91,8 @@ class ExternalInventoryFile(BaseModel):
         pending_keys = [(row.venue, row.native_order_id) for row in self.pending_orders]
         if len(pending_keys) != len(set(pending_keys)):
             raise ValueError("Duplicate pending external order identity")
+        if set(pending_keys).intersection((row.venue, row.native_order_id) for row in self.positions):
+            raise ValueError("External order cannot be both pending and tracked")
         return self
 
 
@@ -83,6 +115,26 @@ def load_external_inventory_review(path: Path) -> ExternalInventoryFile:
                 raise ValueError("External position evidence artifact changed or is missing")
             return json.loads(artifact.read_text(encoding="utf-8"))
 
+        if isinstance(row, OwnerTrackedProphetXPosition):
+            receipt = verified_json(row.source_artifact, row.source_sha256)
+            try:
+                matches = (receipt.get("venue") == "prophetx"
+                    and receipt.get("environment") == row.environment
+                    and receipt.get("order_id") == row.native_order_id
+                    and receipt.get("event_id") == row.native_event_id
+                    and receipt.get("market_id") == row.native_market_id
+                    and receipt.get("strike_id") == row.native_outcome_id
+                    and receipt.get("status") == "filled_unsettled"
+                    and receipt.get("matching_status") == "fully_matched"
+                    and receipt.get("open_stake_usd") == "0"
+                    and Decimal(str(receipt.get("filled_stake_usd"))) == row.quantity
+                    and Decimal(str(receipt.get("maximum_loss_usd"))) == row.cost_usd
+                    and datetime.fromisoformat(receipt["recorded_at"]) == row.recorded_at)
+            except (KeyError, TypeError, InvalidOperation) as exc:
+                raise ValueError("Owner-tracked ProphetX receipt is malformed") from exc
+            if not matches:
+                raise ValueError("Owner-tracked ProphetX position differs from its raw fill receipt")
+            continue
         try:
             receipt = verified_json(row.source_artifact, row.source_sha256)
             catalog = verified_json(row.catalog_artifact, row.catalog_sha256)
@@ -109,5 +161,5 @@ def load_external_inventory_review(path: Path) -> ExternalInventoryFile:
     return inventory
 
 
-def load_external_inventory(path: Path) -> tuple[ExternalPosition, ...]:
+def load_external_inventory(path: Path) -> tuple[ExternalPosition | OwnerTrackedProphetXPosition, ...]:
     return load_external_inventory_review(path).positions
