@@ -35,6 +35,28 @@ async def test_signal_worker_keeps_research_running_after_stale_observation():
         await worker
 
 
+async def test_signal_publication_stamps_queue_order_after_concurrent_evaluations(market):
+    engine = Engine.__new__(Engine)
+    engine._signal_publish_lock = asyncio.Lock()
+    published = []
+
+    async def publish(event):
+        if not published:
+            await asyncio.sleep(0.01)
+        published.append(event.payload.evaluated_at)
+
+    engine.bus = SimpleNamespace(publish=publish)
+    item = SignalObservation(market=market, status="NO SIGNAL", reason="fixture")
+    first = asyncio.create_task(engine._publish_signal_observation(item.model_copy(
+        update={"evaluated_at": utcnow()-timedelta(seconds=10)})))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(engine._publish_signal_observation(item.model_copy(
+        update={"evaluated_at": utcnow()-timedelta(seconds=20)})))
+    await asyncio.gather(first, second)
+    assert len(published) == 2 and published[0] <= published[1]
+    assert published[0] > item.evaluated_at-timedelta(seconds=10)
+
+
 @pytest.fixture
 async def ledger(tmp_path):
     storage = Storage(str(tmp_path / "signals.db"))

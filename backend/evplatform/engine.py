@@ -85,6 +85,7 @@ class Engine:
         # times without creating a new signal episode.
         self._signal_audit_state = OrderedDict()
         self._signal_audit_estimate_fingerprints = {}
+        self._signal_publish_lock = asyncio.Lock()
         self.history = {}
         self.latest_typed = {}
         self.expirations = []
@@ -381,7 +382,16 @@ class Engine:
             strategies=tuple(name for name, record in self.registry.records.items()
                              if isinstance(record.plugin, StrategyPlugin)),
         )
-        await self.bus.publish(Envelope(schema_name="signal.observation", source="strategy-engine", payload=observation))
+        await self._publish_signal_observation(observation)
+
+    async def _publish_signal_observation(self, observation):
+        # Expiration and feed workers can finish evaluations concurrently.
+        # Stamp under one publish lock so queue order and the durable signal
+        # cursor agree; source quote clocks in the payload remain unchanged.
+        async with self._signal_publish_lock:
+            ordered = observation.model_copy(update={"evaluated_at": utcnow()})
+            await self.bus.publish(Envelope(schema_name="signal.observation",
+                                            source="strategy-engine", payload=ordered))
 
     async def record_signal_result(self, payload: SignalResultImport):
         # Complete all earlier observations before matching a supplied result.
