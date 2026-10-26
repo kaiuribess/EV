@@ -97,7 +97,10 @@ async def test_pending_external_raw_order_blocks_production_execution(tmp_path):
     runtime.manager.start = AsyncMock()
     await runtime.start()
     assert len(runtime.pending_external_orders) == 1
-    assert "External native orders" in runtime.profile_error
+    assert runtime.profile_error == ""
+    assert runtime.engine.risk.pending_external_orders == (row,)
+    assert not runtime.runtime_facts().external_exposure_bounded
+    assert "runtime.external_exposure_bounded" in {b.code for b in runtime.report().blockers}
     assert not runtime.report().safe_to_arm
 
 

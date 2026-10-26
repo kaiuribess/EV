@@ -51,6 +51,9 @@ class RiskEngine:
         # Authenticated cash already reflects their debit; they contribute only
         # to exposure and conservative position-conflict checks.
         self.external_positions = ()
+        # Other venues can be disabled independently, but their unknown
+        # exposure still vetoes every real-money reservation until bounded.
+        self.pending_external_orders = ()
         self.duplicates = {}
         self.settled: set[str] = set()
         self.authority = RiskAuthority()
@@ -110,6 +113,8 @@ class RiskEngine:
 
     def check_native_reservation(self, order, *, reserved=False, preview_only=False):
         """Shared limits for an exact-unit order; caller holds the shared OMS lock."""
+        if order.mode == "production" and self.pending_external_orders:
+            raise RiskRejected("Unbounded external account exposure blocks native execution")
         if preview_only:
             # Dry-run inspects every monetary/position limit while disarmed.
             # The OMS and dispatch guard always call the default armed path.

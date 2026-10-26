@@ -111,6 +111,7 @@ class NativeRuntime:
                 self.external_positions = review.positions
                 self.pending_external_orders = review.pending_orders
                 self.engine.risk.external_positions = self.external_positions
+                self.engine.risk.pending_external_orders = self.pending_external_orders
             except (OSError, ValueError, KeyError, TypeError):
                 external_inventory_error = "External native inventory review is invalid; native execution is blocked"
         review_path = runtime_data_file("nba_pilot_structural_review.json", self.engine.settings.data_dir)
@@ -163,9 +164,6 @@ class NativeRuntime:
             self.profile_error = "Native mappings are invalid; review the exact market and fee evidence"
         if external_inventory_error:
             self.profile_error = (self.profile_error + "; " if self.profile_error else "") + external_inventory_error
-        if self.pending_external_orders:
-            self.profile_error = (self.profile_error + "; " if self.profile_error else "") + \
-                "External native orders need authoritative inventory and settlement review before execution"
         await self.manager.start()
 
     def close(self):
@@ -740,6 +738,8 @@ class NativeRuntime:
                 snapshot = await asyncio.wait_for(probe_native_account(
                     client, managed_orders=tuple(self.engine.risk.native_orders.values()),
                     settled_order_ids=frozenset(self.engine.risk.settled),
+                    external_positions=tuple(row for row in self.external_positions
+                        if row.venue == venue),
                     **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
                     **({"adapter": self.manager.adapters.get(venue)} if venue == "polymarket_us"
                        and getattr(self.manager.adapters.get(venue), "client", None) is client else {}),
@@ -1387,6 +1387,7 @@ class NativeRuntime:
             configured_limits=limits, enabled_strategy_ids=tuple(name for name,r in engine.registry.records.items()
                 if r.enabled and name == "native_positive_ev"),
             central_risk_enforced=execution_workers and available_queue("risk_queue"), opposing_position_guards=True,
+            external_exposure_bounded=not getattr(self, "pending_external_orders", ()),
             durable_intents=storage_healthy and execution_workers,
             persistence_healthy=storage_healthy and worker("audit-enqueue") and available_queue("audit_queue"),
             signal_ledger_healthy=engine.signal_ledger.started and storage_healthy and worker("signal-ledger") and available_queue("signal_queue"),

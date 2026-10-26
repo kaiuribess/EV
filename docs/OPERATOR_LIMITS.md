@@ -1,5 +1,12 @@
 # Operator limits and overlap protection
 
+The saved `data/operator_launch_limits.json` remains an unapplied draft. For
+recurring production trading, the owner must separately approve a finite
+per-order debit, total open exposure, daily debit, daily realized-loss stop,
+and daily attempt limit in the account-bound launch scope. `unit_size_usd=5`
+is only a reporting unit. The null caps and null daily-loss limit below do
+not authorize recurring trading.
+
 The current requested launch policy is **quarter Kelly**, with **$5 = one
 reporting unit**, each account's verified available cash as its spending cap,
 no fixed dollar stake cap, no daily-loss stop, and one active/unsettled bet per

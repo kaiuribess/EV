@@ -246,6 +246,7 @@ class RuntimeReadiness(StrictRecord):
     configured_limits: LiveLimits | None = None
     enabled_strategy_ids: tuple[str, ...] = ()
     central_risk_enforced: bool = False
+    external_exposure_bounded: bool = False
     opposing_position_guards: bool = False
     durable_intents: bool = False
     persistence_healthy: bool = False
@@ -319,6 +320,7 @@ class ReadinessReport(StrictRecord):
 
 _RUNTIME_FLAGS = {
     "central_risk_enforced": "Connect every native submission to central risk approval",
+    "external_exposure_bounded": "Reconcile or conservatively bound external account exposure before native submission",
     "opposing_position_guards": "Enable global opposing and correlated position checks",
     "durable_intents": "Persist and acknowledge each order intent before transmission",
     "persistence_healthy": "Restore the audit writer and durable order store",

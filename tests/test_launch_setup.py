@@ -286,6 +286,36 @@ async def test_preprofile_account_probe_is_diagnostic_only(engine, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_novig_preprofile_probe_includes_reviewed_external_inventory(engine, monkeypatch):
+    from evplatform.venues import account_probe
+
+    record = engine.registry.records["novig"]
+    record.enabled = True
+    record.health = {"authenticated": True}
+    record.plugin.task = RunningWorker()
+    client = SimpleNamespace(settings=SimpleNamespace(environment="production"))
+    record.plugin.client = client
+    external = SimpleNamespace(venue="novig")
+    other_venue = SimpleNamespace(venue="kalshi")
+    engine.native.external_positions = (external, other_venue)
+    expected = NativeAccountSnapshot(venue="novig", environment="production",
+        observed_at=utcnow(), identity_verified=True, account_fingerprint="a" * 64,
+        balance_usd=Decimal("24.02825"), cash_available_verified=True,
+        reconciled=True, external_position_count=1, external_cost_usd=Decimal(".97175"))
+
+    async def fake_probe(probed_client, **kwargs):
+        assert probed_client is client
+        assert kwargs["external_positions"] == (external,)
+        return expected
+
+    monkeypatch.setattr(account_probe, "probe_native_account", fake_probe)
+    result = await engine.native.probe_monitor_account("novig")
+    assert result["inventory_reconciled"] is True
+    assert result["balance_usd"] == "24.02825"
+    assert result["usable_for_execution"] is False
+
+
+@pytest.mark.asyncio
 async def test_preprofile_probe_requires_authenticated_monitor_and_redacts_errors(engine, monkeypatch):
     from evplatform.venues import account_probe
 

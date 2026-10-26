@@ -15,6 +15,7 @@ from evplatform.core.native_accounting import NativeCumulativeSnapshot, NativeFi
 from evplatform.core.native_oms import NativeOrder, NativeOrderManager, NativeSettlement
 from evplatform.core.pricing import fair_value, opportunity
 from evplatform.core.risk import RiskEngine, RiskRejected
+from evplatform.core.external_inventory import PendingExternalOrder
 from evplatform.core.storage import Storage
 from evplatform.venues.reconciliation import NativeCancelReport, NativeOrderReport
 
@@ -57,6 +58,16 @@ async def test_kalshi_shard_three_persists_with_unknown_intent_across_restart(sy
     assert saved.account_fingerprint == uncertain.account_fingerprint
     assert saved.status == OrderStatus.UNKNOWN and recovered_risk.kill_switch
     assert not recovered_risk.auto_trade
+
+
+def test_other_venue_pending_external_order_blocks_real_reservation_but_not_research(market):
+    risk = RiskEngine(RiskConfig())
+    risk.pending_external_orders = (PendingExternalOrder(venue="kalshi", native_order_id="outside",
+        source_artifact="kalshi_smoke.json", source_sha256="a" * 64),)
+    base = order(market)
+    proposed = base.model_copy(update={"intent": base.intent.model_copy(update={"mode": "production"})})
+    with pytest.raises(RiskRejected, match="Unbounded external account exposure"):
+        risk.check_native_reservation(proposed, preview_only=True)
 
 
 class Adapter:
