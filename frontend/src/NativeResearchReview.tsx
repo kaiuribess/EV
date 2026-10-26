@@ -46,6 +46,7 @@ export function NativeResearchReview({ state, mutate, notify, connected }: Props
       await mutate('/api/native/research-review/drafts', {
         source_market_id: row.market_id, venue: offer.venue,
         native_market_id: offer.native_market_id, native_outcome_id: offer.native_outcome_id,
+        strategy: row.strategy,
       })
       await reload()
       notify('Unapproved native mapping review saved. No trading permission was changed.')

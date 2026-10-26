@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--venue", choices=("kalshi", "novig"), required=True)
     parser.add_argument("--native-market-id", required=True)
     parser.add_argument("--native-outcome-id", required=True)
+    parser.add_argument("--strategy", choices=("multi_book_consensus", "sharp_books"))
     parser.add_argument("--url", default="http://127.0.0.1:8002")
     parser.add_argument("--data-dir", type=Path)
     args = parser.parse_args()
@@ -29,7 +30,7 @@ def main() -> None:
         response.raise_for_status()
         payload = review_payload(response.json(), source_market_id=args.source_market_id,
             venue=args.venue, native_market_id=args.native_market_id,
-            native_outcome_id=args.native_outcome_id)
+            native_outcome_id=args.native_outcome_id, strategy=args.strategy)
     target = save_review(payload, runtime_data_dir(args.data_dir) / "native_review_drafts")
     print(json.dumps({"saved": str(target), "status": payload["status"],
                       "execution_authorized": False}))

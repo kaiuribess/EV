@@ -9,12 +9,14 @@ from tempfile import NamedTemporaryFile
 
 
 def review_payload(state: dict, *, source_market_id: str, venue: str,
-                   native_market_id: str, native_outcome_id: str) -> dict:
+                   native_market_id: str, native_outcome_id: str,
+                   strategy: str | None = None) -> dict:
     if (state.get("mode") != "production" or state.get("auto_trade") is not False
             or state.get("kill_switch") is not True):
         raise ValueError("Export only from disarmed production")
     source = [row for row in state.get("reference_estimates", [])
-              if row.get("market_id") == source_market_id and not row.get("historical")]
+              if row.get("market_id") == source_market_id and not row.get("historical")
+              and (strategy is None or row.get("strategy") == strategy)]
     if len(source) != 1:
         raise ValueError("Select exactly one current sportsbook estimate")
     row = source[0]
@@ -36,7 +38,8 @@ def review_payload(state: dict, *, source_market_id: str, venue: str,
             "source_market_id": source_market_id, "venue": venue,
             "native_market_id": native_market_id, "native_outcome_id": native_outcome_id,
             "runtime_started_at": state.get("started_at"), "captured_at": state.get("timestamp"),
-            "source": {"event_name": row.get("event_name"), "start_time": row.get("start_time"),
+            "source": {"strategy": row.get("strategy"), "event_name": row.get("event_name"),
+                       "start_time": row.get("start_time"),
                        "market_type": row.get("market_type"), "statistic": row.get("statistic"),
                        "player": row.get("player"), "line": row.get("line"),
                        "probabilities": row.get("probabilities"), "references": row.get("references"),

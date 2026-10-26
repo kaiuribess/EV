@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -98,6 +99,7 @@ class NativeResearchReviewBody(BaseModel):
     venue: str = Field(pattern="^(kalshi|novig)$")
     native_market_id: str = Field(min_length=1)
     native_outcome_id: str = Field(min_length=1)
+    strategy: Literal["multi_book_consensus", "sharp_books"] | None = None
 
 
 def local_origin(value, port=8000):

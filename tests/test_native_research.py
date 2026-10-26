@@ -448,6 +448,28 @@ def test_exact_research_review_draft_persists_without_approving_mapping(tmp_path
         review_payload(state | {"kill_switch": False}, **arguments)
 
 
+def test_research_review_requires_strategy_when_two_pricing_rows_share_market_id():
+    from evplatform.core.research_review import review_payload
+    match = kalshi_moneyline_matches(market(), kalshi_rows(), observed_at=NOW)[0]
+    lead = {**match.public(), "quality": "provisional_native_research",
+            "mapping_reviewed": False, "execution_eligible": False}
+    source = {"market_id": market().id, "event_name": market().event_name,
+              "native_research_estimates": [lead]}
+    state = {"mode": "production", "auto_trade": False, "kill_switch": True,
+             "reference_estimates": [source | {"strategy": "multi_book_consensus"},
+                                     source | {"strategy": "sharp_books"}]}
+    arguments = dict(source_market_id=market().id, venue="kalshi",
+                     native_market_id=lead["native_market_id"],
+                     native_outcome_id=lead["native_outcome_id"])
+    with pytest.raises(ValueError, match="exactly one"):
+        review_payload(state, **arguments)
+    payload = review_payload(state, **arguments, strategy="multi_book_consensus")
+    assert payload["source"]["strategy"] == "multi_book_consensus"
+    assert payload["execution_authorized"] is False
+    with pytest.raises(ValueError, match="exactly one"):
+        review_payload(state, **arguments, strategy="other")
+
+
 def test_research_review_api_saves_only_unapproved_draft(tmp_path):
     from fastapi.testclient import TestClient
     from evplatform.api import create_app
