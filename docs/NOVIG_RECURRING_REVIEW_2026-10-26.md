@@ -98,13 +98,19 @@ qualifying sportsbook estimate overlaps it in the production state. Neither
 the old quote nor this catalog read is an executable mapping review.
 
 Novig's published eligibility guidance says its app checks the device's
-physical location when opened to trade. The owner can open the official app
-with device location permission enabled and review its eligibility result
-without placing an order. The Trading API/runtime has not supplied an
-account-bound, current location attestation for unattended recurring orders;
-an app result alone must not be silently copied into that field. Novig must
-confirm a supported account-bound API/location workflow before activation.
-Source: https://support.novig.com/en/articles/16194031-eligibility-legality
+physical location when opened to trade. A new permission prompt is not
+required if permission was previously granted; the owner's app opened without
+a prompt. The Trading API/runtime still has no account-bound location expiry
+field to populate its current preflight requirement. Novig's error contract
+explicitly says an authenticated read admits stale geolocation and only a
+placement can return `GEOLOCATION_EXPIRED`; other HTTP 451 codes reject a
+restricted network, failed location, or blocked device. Therefore another
+successful account read or Chrome visit cannot certify current placement
+eligibility. This is a preflight/venue-contract mismatch requiring an explicit
+review of venue-enforced-at-submission handling; do not fake an expiry time or
+submit an order merely to probe location.
+Sources: https://support.novig.com/en/articles/16194031-eligibility-legality
+and https://docs.novig.com/api/errors
 
 `novig_ioc_win_loss_halt_on_exception` is the only settlement route the
 current adapter supports for this recurring scope. It reconciles a single
@@ -119,8 +125,9 @@ does not establish the participation or overtime term for this listing.
 
 No recurring owner approval is ready to record yet. The remaining factual
 inputs are complete aggregate exposure review (including Polymarket US's
-reservation), listing-bound normal-condition and participation rules, current
-Novig account-bound location, and one current exact mapping with eligible
-references. The existing $25 limits draft and proposed source scope remain
+reservation), listing-bound normal-condition and participation rules, a
+reviewed location-enforcement route consistent with Novig's API contract, and
+one current exact mapping with eligible references. The existing $25 limits
+draft and proposed source scope remain
 unapplied and unapproved. The later owner instruction supersedes the fixed $25
 draft but does not turn a $5 reporting unit into an execution limit.
