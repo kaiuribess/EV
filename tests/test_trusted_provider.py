@@ -510,9 +510,9 @@ def test_recurring_trusted_pricing_uses_cash_kelly_not_reporting_unit_as_cap():
     market, quotes, book, scoped = approved_pilot_case()
     reviewed = scoped.trusted_pilot_policy.model_dump()
     reviewed.update(recurring_authorization=True, maximum_native_attempts=None,
-        automatic_followups=True, max_debit_usd=None, max_loss_usd=None)
+        automatic_followups=True, max_debit_usd=Decimal("25"), max_loss_usd=Decimal("25"))
     policy = TrustedPilotPolicy.model_validate(reviewed)
-    assert policy.cost_ceiling() is None
+    assert policy.cost_ceiling() == Decimal("25")
     scoped = scoped.model_copy(update={"trusted_pilot_policy": policy})
     book = book.model_copy(update={"asks": (NativeLevel(price="0.40", quantity="100"),)})
     fair = fair_value(market, quotes, scoped, NOW)
@@ -525,6 +525,15 @@ def test_recurring_trusted_pricing_uses_cash_kelly_not_reporting_unit_as_cap():
     assert five.intent.quantity == ten.intent.quantity
     assert five.intent.reserved_cost_usd > Decimal("5")
     assert five.sizing.unit_size_usd == Decimal("5")
+
+
+def test_recurring_trusted_source_policy_requires_separate_money_caps():
+    _, _, _, scoped = approved_pilot_case()
+    reviewed = scoped.trusted_pilot_policy.model_dump()
+    reviewed.update(recurring_authorization=True, maximum_native_attempts=None,
+        automatic_followups=True, max_debit_usd=None, max_loss_usd=None)
+    with pytest.raises(ValueError, match="exact, complete owner-reviewed source policy"):
+        TrustedPilotPolicy.model_validate(reviewed)
 
 
 
@@ -832,7 +841,7 @@ def test_recurring_trusted_preflight_accepts_cash_sized_order_above_one_unit_onl
     market, _, _, scoped = approved_pilot_case()
     reviewed = scoped.trusted_pilot_policy.model_dump()
     reviewed.update(recurring_authorization=True, maximum_native_attempts=None,
-        automatic_followups=True, max_debit_usd=None, max_loss_usd=None)
+        automatic_followups=True, max_debit_usd=Decimal("25"), max_loss_usd=Decimal("25"))
     policy = TrustedPilotPolicy.model_validate(reviewed)
     scoped = scoped.model_copy(update={"trusted_pilot_policy": policy})
     risk = RiskEngine(RiskConfig(available_cash_only=True, stake_sizing="quarter_kelly",

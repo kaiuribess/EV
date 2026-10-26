@@ -82,9 +82,7 @@ class TrustedPilotPolicy(BaseModel):
         if self.enabled:
             required = (self.provider_id, self.max_indicator_age_ms,
                         self.independent_crosscheck, self.uncertainty_margin_probability,
-                        self.approval_evidence)
-            if not self.recurring_authorization:
-                required += (self.max_debit_usd, self.max_loss_usd)
+                        self.approval_evidence, self.max_debit_usd, self.max_loss_usd)
             if (not self.owner_approved or any(value is None or value == "" for value in required)
                     or (self.exact_market_id is None) == (self.market_scope is None)
                     or len(set(self.trusted_books)) < self.min_distinct_books

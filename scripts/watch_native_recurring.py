@@ -72,6 +72,18 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
             or limits.get("stake_sizing") != "quarter_kelly"
             or shared._money(limits.get("unit_size_usd")) != Decimal("5")):
         return "waiting_for_reviewed_recurring_launch_profile"
+    monetary_caps = ("max_order_stake_usd", "max_event_exposure_usd",
+        "max_player_exposure_usd", "max_venue_exposure_usd",
+        "max_correlated_exposure_usd", "max_total_exposure_usd",
+        "daily_loss_limit_usd", "max_native_daily_debit_usd")
+    if any((cap := shared._money(limits.get(name))) is None or cap <= 0
+           for name in monetary_caps):
+        return "waiting_for_reviewed_recurring_risk_limits"
+    if (not isinstance(limits.get("max_open_orders"), int)
+            or limits["max_open_orders"] < 1
+            or not isinstance(limits.get("max_orders_per_minute"), int)
+            or limits["max_orders_per_minute"] < 1):
+        return "waiting_for_reviewed_recurring_risk_limits"
     if any(p.get("venue") not in venues or p.get("environment") != "production"
            or p.get("validation_pilot") is True
            or p.get("strategy_ids") != ["native_positive_ev"]

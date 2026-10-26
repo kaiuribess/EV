@@ -194,6 +194,12 @@ class RiskEngine:
         if debit_cap is not None:
             prior_debit = sum((max(item.reserved_cost,
                 item.filled_cost_usd + item.fees) for item in prior), Decimal(0))
+            # Reviewed raw fills are outside the OMS, but they still consumed
+            # this account's daily debit. Their cost is already reflected in
+            # available cash; this addition applies only to the daily budget.
+            prior_debit += sum((item.cost_usd for item in self.external_positions
+                if item.environment == order.mode and (item.recorded_at.tzinfo is None
+                    or item.recorded_at.astimezone(timezone.utc).date() >= today)), Decimal(0))
             if prior_debit + order.reserved_cost > debit_cap:
                 raise RiskRejected("Daily native upfront debit limit reached")
 

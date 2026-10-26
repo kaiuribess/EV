@@ -38,11 +38,15 @@ def recurring_setup(*, ready=True):
     result["launch_scope"][0]["validation_pilot"] = False
     result["launch_scope"][0]["settlement_policy"] = "full"
     result["risk_policy"]["values"].update(max_native_order_attempts=None,
-        max_order_stake_usd=None, available_cash_only=True,
-        stake_sizing="quarter_kelly", unit_size_usd="5")
+        max_order_stake_usd="25", max_event_exposure_usd="25",
+        max_player_exposure_usd="25", max_venue_exposure_usd="25",
+        max_correlated_exposure_usd="25", max_total_exposure_usd="25",
+        daily_loss_limit_usd="25", max_native_daily_debit_usd="25",
+        max_open_orders=1, max_orders_per_minute=1,
+        available_cash_only=True, stake_sizing="quarter_kelly", unit_size_usd="5")
     result["pricing"]["trusted_pilot_policy"].update(
         recurring_authorization=True, maximum_native_attempts=None,
-        automatic_followups=True, max_debit_usd=None, max_loss_usd=None)
+        automatic_followups=True, max_debit_usd="25", max_loss_usd="25")
     return result
 
 
@@ -104,6 +108,14 @@ def test_recurring_scope_and_uncertain_inventory_block_activation(monkeypatch, t
         assert gate.tick(now=NOW) == "blocked"
     finally:
         gate.shared._get = old
+    assert current["kill_switch"] and not current["auto_trade"]
+
+
+def test_recurring_scope_rejects_missing_monetary_limit(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path)
+    launch["risk_policy"]["values"]["max_native_daily_debit_usd"] = None
+    assert gate.tick(now=NOW) == "waiting_for_reviewed_recurring_risk_limits"
+    assert ("POST", "/api/control") not in calls
     assert current["kill_switch"] and not current["auto_trade"]
 
 

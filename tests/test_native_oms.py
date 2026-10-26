@@ -229,6 +229,20 @@ async def test_recurring_daily_debit_cap_uses_worst_case_intents(system, market)
     assert len(adapter.submissions) == 1
 
 
+def test_recurring_daily_debit_counts_reviewed_external_fill_without_cash_double_debit(market):
+    from types import SimpleNamespace
+    risk = RiskEngine(RiskConfig().model_copy(update={"max_native_daily_debit": D("1.40")}))
+    base = order(market)
+    proposed = base.model_copy(update={"intent": base.intent.model_copy(update={"mode": "production"})})
+    external = SimpleNamespace(environment="production", cost_usd=D(".97175"), recorded_at=utcnow())
+    risk.external_positions = (external,)
+    with pytest.raises(RiskRejected, match="Daily native upfront debit limit reached"):
+        risk.check_native_daily_budget(proposed)
+    risk.external_positions = (SimpleNamespace(environment="production", cost_usd=D(".97175"),
+        recorded_at=utcnow() - timedelta(days=1)),)
+    risk.check_native_daily_budget(proposed)
+
+
 async def test_external_position_blocks_same_sport_without_becoming_oms_order(system, market):
     from types import SimpleNamespace
     manager, risk, _, adapter = system
