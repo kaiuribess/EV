@@ -47,10 +47,12 @@ class LiveLimits(StrictRecord):
     max_orders_per_minute: int = Field(ge=1)
     # A durable intent counts even if submission fails or its outcome is unknown.
     max_native_order_attempts: int | None = Field(default=None, ge=1)
+    max_native_daily_attempts: int | None = Field(default=None, ge=1)
+    max_native_daily_debit_usd: Decimal | None = Field(default=None, gt=0)
 
     @field_validator("max_order_stake_usd", "max_event_exposure_usd", "max_player_exposure_usd",
                      "max_venue_exposure_usd", "max_correlated_exposure_usd",
-                     "max_total_exposure_usd", "daily_loss_limit_usd")
+                     "max_total_exposure_usd", "daily_loss_limit_usd", "max_native_daily_debit_usd")
     @classmethod
     def finite_money(cls, value: Decimal) -> Decimal:
         if value is not None and not value.is_finite():
@@ -185,6 +187,10 @@ class LaunchProfile(StrictRecord):
             payload.pop("validation_pilot")
         if self.limits.max_native_order_attempts is None:
             payload["limits"].pop("max_native_order_attempts")
+        if self.limits.max_native_daily_attempts is None:
+            payload["limits"].pop("max_native_daily_attempts")
+        if self.limits.max_native_daily_debit_usd is None:
+            payload["limits"].pop("max_native_daily_debit_usd")
         return digest_json(payload)
 
 

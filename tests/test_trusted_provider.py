@@ -506,6 +506,28 @@ def approved_pilot_case(at=NOW):
     return market, quotes, book, scoped
 
 
+def test_recurring_trusted_pricing_uses_cash_kelly_not_reporting_unit_as_cap():
+    market, quotes, book, scoped = approved_pilot_case()
+    reviewed = scoped.trusted_pilot_policy.model_dump()
+    reviewed.update(recurring_authorization=True, maximum_native_attempts=None,
+        automatic_followups=True, max_debit_usd=None, max_loss_usd=None)
+    policy = TrustedPilotPolicy.model_validate(reviewed)
+    assert policy.cost_ceiling() is None
+    scoped = scoped.model_copy(update={"trusted_pilot_policy": policy})
+    book = book.model_copy(update={"asks": (NativeLevel(price="0.40", quantity="100"),)})
+    fair = fair_value(market, quotes, scoped, NOW)
+    five = native_opportunity(market, fair, book, scoped, max_stake_usd=None,
+        mode="production", stake_sizing="quarter_kelly",
+        available_cash_usd=Decimal("1000"), unit_size_usd=Decimal("5"), now=NOW)
+    ten = native_opportunity(market, fair, book, scoped, max_stake_usd=None,
+        mode="production", stake_sizing="quarter_kelly",
+        available_cash_usd=Decimal("1000"), unit_size_usd=Decimal("10"), now=NOW)
+    assert five.intent.quantity == ten.intent.quantity
+    assert five.intent.reserved_cost_usd > Decimal("5")
+    assert five.sizing.unit_size_usd == Decimal("5")
+
+
+
 def test_rule_bound_novig_nfl_pilot_pricing_accepts_only_reviewed_new_questions():
     """An approved source scope cannot itself review a new market's identity."""
     base, old_quotes, _ = trusted_native_fixture()
@@ -799,6 +821,51 @@ def test_trusted_pilot_preflight_requires_armed_automatic_route_and_blocks_prior
     with pytest.raises(RiskRejected, match="already exists"):
         NativeRuntime.require_preflight(runtime, SimpleNamespace(**base, execution_origin="manual"),
                                         preview_only=True)
+
+
+def test_recurring_trusted_preflight_accepts_cash_sized_order_above_one_unit_only_when_armed():
+    from types import SimpleNamespace
+    from evplatform.core.native_runtime import NativeRuntime
+    from evplatform.core.risk import RiskEngine, RiskRejected
+    from evplatform.core.config import RiskConfig
+
+    market, _, _, scoped = approved_pilot_case()
+    reviewed = scoped.trusted_pilot_policy.model_dump()
+    reviewed.update(recurring_authorization=True, maximum_native_attempts=None,
+        automatic_followups=True, max_debit_usd=None, max_loss_usd=None)
+    policy = TrustedPilotPolicy.model_validate(reviewed)
+    scoped = scoped.model_copy(update={"trusted_pilot_policy": policy})
+    risk = RiskEngine(RiskConfig(available_cash_only=True, stake_sizing="quarter_kelly",
+                                 max_order_stake=None, live_stake_authorized=True))
+    account = "a" * 64
+    profile = SimpleNamespace(venue="novig", environment="production",
+        account_fingerprint=account, market_ids=(market.id,),
+        strategy_ids=("native_positive_ev",), validation_pilot=False,
+        settlement_policy="full", evidence=(SimpleNamespace(expires_at=utcnow()+timedelta(minutes=1)),),
+        digest=lambda: "OFFLINE-recurring-profile",
+        limits=SimpleNamespace(max_native_order_attempts=None, available_cash_only=True,
+                               stake_sizing="quarter_kelly", max_order_stake_usd=None))
+    runtime = SimpleNamespace(report=lambda: SimpleNamespace(safe_to_arm=True,
+        live_trading_ready=True, sandbox_trading_ready=False),
+        profile_for=lambda venue: profile,
+        account_snapshots={"novig": SimpleNamespace(cash_available_verified=True,
+            balance_usd=Decimal("25"), identity_verified=True, account_fingerprint=account,
+            environment="production",
+            geographic_attestation_expires_at=utcnow()+timedelta(minutes=1))},
+        manager=SimpleNamespace(adapters={"novig": SimpleNamespace(client=object(), preflight=None)}),
+        engine=SimpleNamespace(settings=SimpleNamespace(live_enabled=True, pricing=scoped),
+                               markets={market.id: market}, risk=risk))
+    order = SimpleNamespace(id="recurring", venue="novig", mode="production",
+        account_fingerprint=account, market_id=market.id, strategy="native_positive_ev",
+        reserved_cost=Decimal("6"), execution_origin="automatic")
+    with pytest.raises(RiskRejected, match="Recurring trusted-provider source policy"):
+        NativeRuntime.require_preflight(runtime, order)
+    risk.auto_trade, risk.kill_switch = True, False
+    NativeRuntime.require_preflight(runtime, order)
+    assert runtime.manager.adapters["novig"].preflight.native_trading_enabled is True
+    risk.kill_switch = True
+    with pytest.raises(RiskRejected, match="Recurring trusted-provider source policy"):
+        NativeRuntime.require_preflight(runtime, order)
 
 
 @pytest.mark.asyncio

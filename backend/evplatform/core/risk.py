@@ -1,7 +1,7 @@
 import secrets
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -120,6 +120,7 @@ class RiskEngine:
         if (not reserved and self.config.max_native_order_attempts is not None
                 and len(self.native_orders) >= self.config.max_native_order_attempts):
             raise RiskRejected("Native order attempt limit reached")
+        self.check_native_daily_budget(order)
         if order.synthetic or order.mode not in {"sandbox", "production"}:
             raise RiskRejected("Native execution requires an explicit native environment")
         if not metadata_consistent(order):
@@ -154,6 +155,34 @@ class RiskEngine:
         for orders, limit, label in limits:
             if limit is not None and sum((self.cost(o) for o in orders), Decimal(0)) + cost > limit:
                 raise RiskRejected(f"Native {label} exposure limit reached")
+
+    def check_native_daily_budget(self, order):
+        """Count durable native intents across venues on the UTC submission day.
+
+        Rejected, unfilled and uncertain intents still consume an attempt. Their
+        worst-case reserved debit remains charged to the daily budget; this is
+        deliberately conservative and survives process restart.
+        """
+        attempts_cap = self.config.max_native_daily_attempts
+        debit_cap = self.config.max_native_daily_debit
+        if attempts_cap is None and debit_cap is None:
+            return
+        today = utcnow().date()
+        prior = []
+        for existing in self.native_orders.values():
+            if existing.id == order.id or existing.mode != order.mode:
+                continue
+            stamp = existing.created_at
+            # Naive or future clocks cannot grant a fresh budget.
+            if stamp.tzinfo is None or stamp.astimezone(timezone.utc).date() >= today:
+                prior.append(existing)
+        if attempts_cap is not None and len(prior) + 1 > attempts_cap:
+            raise RiskRejected("Daily native order attempt limit reached")
+        if debit_cap is not None:
+            prior_debit = sum((max(item.reserved_cost,
+                item.filled_cost_usd + item.fees) for item in prior), Decimal(0))
+            if prior_debit + order.reserved_cost > debit_cap:
+                raise RiskRejected("Daily native upfront debit limit reached")
 
     def roll_day(self):
         if self.daily_date != utcnow().date():

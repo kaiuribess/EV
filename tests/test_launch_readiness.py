@@ -195,6 +195,8 @@ def test_legacy_profile_digest_stays_stable_without_pilot():
     legacy = profile.model_dump(mode="json", exclude={"evidence"})
     legacy.pop("validation_pilot")
     legacy["limits"].pop("max_native_order_attempts")
+    legacy["limits"].pop("max_native_daily_attempts")
+    legacy["limits"].pop("max_native_daily_debit_usd")
     assert profile.digest() == digest_json(legacy)
 
 

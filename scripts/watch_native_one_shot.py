@@ -180,6 +180,8 @@ def _scope(setup: dict, state: dict) -> tuple[str, str | None]:
                 or (configured_ev := _money(resolved.get("min_ev"))) is None or configured_ev < MIN_EV
                 or resolved.get("trusted_pilot_policy") != pilot
                 or not policy.enabled or not policy.owner_approved
+                or policy.recurring_authorization or policy.maximum_native_attempts != 1
+                or policy.automatic_followups
                 or _money(policy.uncertainty_margin_probability) != MARGIN
                 or (debit := _money(policy.max_debit_usd)) is None or debit > CAP
                 or (loss := _money(policy.max_loss_usd)) is None or loss > CAP):

@@ -57,9 +57,18 @@ class TrustedPilotPolicy(BaseModel):
     max_debit_usd: Decimal | None = Field(default=None, gt=0)
     max_loss_usd: Decimal | None = Field(default=None, gt=0)
     pregame_only: Literal[True] = True
-    maximum_native_attempts: Literal[1] = 1
-    automatic_followups: Literal[False] = False
+    # A recurring source approval is distinct from the original one-shot
+    # validation pilot. It still needs a separately reviewed launch profile
+    # and bounded, expiring runtime authorization before any order can route.
+    recurring_authorization: bool = False
+    maximum_native_attempts: int | None = Field(default=1, ge=1)
+    automatic_followups: bool = False
     approval_evidence: str | None = None
+
+    def cost_ceiling(self) -> Decimal | None:
+        """Optional execution cap; reporting unit size never supplies one."""
+        caps = [value for value in (self.max_debit_usd, self.max_loss_usd) if value is not None]
+        return min(caps) if caps else None
 
     def permits_market(self, market) -> bool:
         return bool(not market.extensions.get("research_only") and (
@@ -73,7 +82,9 @@ class TrustedPilotPolicy(BaseModel):
         if self.enabled:
             required = (self.provider_id, self.max_indicator_age_ms,
                         self.independent_crosscheck, self.uncertainty_margin_probability,
-                        self.max_debit_usd, self.max_loss_usd, self.approval_evidence)
+                        self.approval_evidence)
+            if not self.recurring_authorization:
+                required += (self.max_debit_usd, self.max_loss_usd)
             if (not self.owner_approved or any(value is None or value == "" for value in required)
                     or (self.exact_market_id is None) == (self.market_scope is None)
                     or len(set(self.trusted_books)) < self.min_distinct_books
@@ -81,8 +92,14 @@ class TrustedPilotPolicy(BaseModel):
                 raise ValueError("Trusted live pilot requires an exact, complete owner-reviewed source policy")
             if self.market_scope is not None and self.min_distinct_books < 3:
                 raise ValueError("Dynamic pilot requires at least three distinct sportsbook references")
-            if self.max_debit_usd > Decimal("5") or self.max_loss_usd > Decimal("5"):
+            if (not self.recurring_authorization and
+                    (self.max_debit_usd > Decimal("5") or self.max_loss_usd > Decimal("5"))):
                 raise ValueError("Trusted pilot debit and loss ceilings cannot exceed five dollars")
+            if self.recurring_authorization:
+                if self.maximum_native_attempts is not None or not self.automatic_followups:
+                    raise ValueError("Recurring trusted source approval needs explicit followups and no one-shot limit")
+            elif self.maximum_native_attempts != 1 or self.automatic_followups:
+                raise ValueError("One-shot trusted pilot cannot authorize recurring orders")
             if self.independent_crosscheck == "separate_provider" and (
                     not self.crosscheck_provider_id or self.crosscheck_provider_id == self.provider_id):
                 raise ValueError("A separate-provider cross-check needs a second named provider")
@@ -196,9 +213,15 @@ class RiskConfig(BaseModel):
     # Count durable native intents, including rejected/unknown attempts. Unlike
     # a rolling rate limit this remains exhausted across process restarts.
     max_native_order_attempts: int | None = Field(default=None, ge=1)
+    # Recurring native authority must bound attempts and worst-case upfront
+    # debits using durable intents, not a counter that resets on restart.
+    max_native_daily_attempts: int | None = Field(default=None, ge=1)
+    max_native_daily_debit: Decimal | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def require_cash_policy(self):
+        if self.max_native_daily_debit is not None and not self.max_native_daily_debit.is_finite():
+            raise ValueError("Daily native debit cap must be finite")
         if not self.available_cash_only and any(value is None for value in (
                 self.max_order_stake, self.max_event_exposure, self.max_player_exposure,
                 self.max_correlated_exposure, self.max_venue_exposure, self.max_total_exposure)):

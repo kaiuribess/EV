@@ -389,8 +389,9 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     scoped = market_config(config, market)
     if scoped.reference_quality_mode == "trusted_provider":
         pilot = scoped.trusted_pilot_policy
-        ceiling = min(pilot.max_debit_usd, pilot.max_loss_usd)
-        max_stake_usd = ceiling if max_stake_usd is None else min(D(max_stake_usd), ceiling)
+        ceiling = pilot.cost_ceiling()
+        if ceiling is not None:
+            max_stake_usd = ceiling if max_stake_usd is None else min(D(max_stake_usd), ceiling)
     sizing = None
     if stake_sizing == "quarter_kelly":
         margin = fair.trusted_pilot_margin_probability or D(0)
@@ -455,7 +456,7 @@ def native_revalidate_intent(intent: NativeOrderIntent, market: Market, fair: Fa
     scoped = market_config(config, market)
     if scoped.reference_quality_mode == "trusted_provider":
         pilot = scoped.trusted_pilot_policy
-        if intent.reserved_cost_usd > min(pilot.max_debit_usd, pilot.max_loss_usd):
+        if (ceiling := pilot.cost_ceiling()) is not None and intent.reserved_cost_usd > ceiling:
             raise NoSignal("Durable native intent exceeds the owner-approved pilot ceiling")
     if instrument_fingerprint(intent.instrument) != instrument_fingerprint(book.instrument):
         raise NoSignal("Native instrument or grid changed after intent creation")

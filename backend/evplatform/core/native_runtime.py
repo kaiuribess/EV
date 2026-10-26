@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import time
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from pydantic import Field
 
@@ -776,14 +777,23 @@ class NativeRuntime:
                 pilot = source_config.trusted_pilot_policy
                 automatic = (order.execution_origin == "automatic"
                              and self.engine.risk.auto_trade and not self.engine.risk.kill_switch)
+                one_shot_scope = (p.validation_pilot and p.limits.max_native_order_attempts == 1
+                    and pilot.maximum_native_attempts == 1 and not pilot.recurring_authorization
+                    and not pilot.automatic_followups)
+                recurring_scope = (not p.validation_pilot and pilot.recurring_authorization
+                    and pilot.automatic_followups and pilot.maximum_native_attempts is None
+                    and p.limits.max_native_order_attempts is None
+                    and p.limits.available_cash_only and p.limits.stake_sizing == "quarter_kelly")
                 if (not (manual or automatic or (preview_only and order.execution_origin == "manual"))
-                        or not p.validation_pilot
-                        or p.limits.max_native_order_attempts != 1
+                        or not (one_shot_scope or recurring_scope)
                         or not pilot.enabled or not pilot.owner_approved
                         or not pilot.permits_market(market)
                         or (pilot.market_scope is not None and pilot.market_scope.venue != order.venue)
-                        or order.reserved_cost > min(pilot.max_debit_usd, pilot.max_loss_usd)):
-                    raise RiskRejected("Trusted-provider pilot permits one scoped authorized attempt only")
+                        or ((ceiling := pilot.cost_ceiling()) is not None
+                            and order.reserved_cost > ceiling)):
+                    raise RiskRejected("Trusted-provider pilot permits one scoped authorized attempt only"
+                        if not pilot.recurring_authorization else
+                        "Recurring trusted-provider source policy does not authorize this launch scope")
                 if any(previous.id != order.id and previous.market_id == order.market_id
                        and previous.venue == order.venue and previous.mode == order.mode
                        and previous.account_fingerprint == order.account_fingerprint
@@ -881,7 +891,8 @@ class NativeRuntime:
                 caps = [v for v in (risk.max_order_stake, risk.live_max_order_stake) if v is not None]
                 if market_config(self.engine.settings.pricing, market).reference_quality_mode == "trusted_provider":
                     pilot = market_config(self.engine.settings.pricing, market).trusted_pilot_policy
-                    caps.extend((pilot.max_debit_usd, pilot.max_loss_usd))
+                    caps.extend(value for value in (pilot.max_debit_usd, pilot.max_loss_usd)
+                                if value is not None)
                 sizing = quarter_kelly_budget(book, min(probabilities),
                     _settlement_bounds(market, winner_only=fair.normal_outcome_policy == "winner_only_binary"),
                     available_cash_usd=self.sizing_cash(order.venue, exclude_order_id=order.id),
@@ -1251,7 +1262,9 @@ class NativeRuntime:
                     # count. Preserve their prior comparison while a pilot
                     # binds and rechecks its explicit one-attempt limit.
                     max_native_order_attempts=(risk.max_native_order_attempts
-                        if p and p.limits.max_native_order_attempts is not None else None))
+                        if p and p.limits.max_native_order_attempts is not None else None),
+                    max_native_daily_attempts=risk.max_native_daily_attempts,
+                    max_native_daily_debit_usd=risk.max_native_daily_debit)
         except (ValueError, TypeError):
             # Contradictory runtime limits are a missing authorization, not a
             # dashboard exception and never a reason to weaken the limits.

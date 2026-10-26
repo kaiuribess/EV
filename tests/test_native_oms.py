@@ -187,6 +187,37 @@ async def test_one_native_attempt_cap_survives_restart_and_unknown_outcome(syste
     assert len(adapter.submissions) == 1
 
 
+async def test_recurring_daily_attempt_cap_counts_unknown_intent_after_restart(system, market):
+    manager, risk, _, adapter = system
+    risk.config = risk.config.model_copy(update={
+        "max_native_order_attempts": None, "max_native_daily_attempts": 1,
+        "max_native_daily_debit": D("5")})
+    adapter.fail = True
+    first = await manager.execute(order(market))
+    assert first.status == OrderStatus.UNKNOWN
+    assert len(adapter.submissions) == 1
+    risk.native_orders.clear()
+    await manager.start()
+    risk.kill_switch = False
+    risk.auto_trade = True
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
+    with pytest.raises(RiskRejected, match="Daily native order attempt limit reached"):
+        await manager.execute(order(market))
+    assert len(adapter.submissions) == 1
+
+
+async def test_recurring_daily_debit_cap_uses_worst_case_intents(system, market):
+    manager, risk, _, adapter = system
+    risk.config = risk.config.model_copy(update={
+        "max_native_order_attempts": None, "max_native_daily_attempts": 3,
+        "max_native_daily_debit": D(".90")})
+    first = await manager.execute(order(market))
+    assert first.reserved_cost == D(".47")
+    with pytest.raises(RiskRejected, match="Daily native upfront debit limit reached"):
+        await manager.execute(order(market))
+    assert len(adapter.submissions) == 1
+
+
 async def test_unknown_transmission_never_retried_and_survives_restart(system, market):
     manager, risk, storage, adapter = system
     adapter.fail = True
