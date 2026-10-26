@@ -192,6 +192,8 @@ class ProphetXMarketData:
                  max_receipt_age_seconds: int = 30, max_catalog_age_seconds: int = 600,
                  event_id: str | None = None, market_id: str | None = None,
                  strike_id: str | None = None) -> dict:
+        requested_event_id, requested_market_id, requested_strike_id = (
+            event_id, market_id, strike_id)
         rows = []
         catalog_current = (self.catalog_at is not None and
                            0 <= (now - self.catalog_at).total_seconds() <= max_catalog_age_seconds)
@@ -216,9 +218,9 @@ class ProphetXMarketData:
                              "executable_stake_usd": level["available_stake_usd"] if level_current else "0",
                              "research_only": True})
         visible_rows = [row for row in rows
-                        if (event_id is None or row["event_id"] == event_id)
-                        and (market_id is None or row["market_id"] == market_id)
-                        and (strike_id is None or row["strike_id"] == strike_id)]
+                        if (requested_event_id is None or row["event_id"] == requested_event_id)
+                        and (requested_market_id is None or row["market_id"] == requested_market_id)
+                        and (requested_strike_id is None or row["strike_id"] == requested_strike_id)]
         visible_rows.sort(key=lambda item: (not item["stream_current"], item["local_receipt_age_seconds"],
                                             item["event_id"], item["market_id"], item["strike_id"]))
         rest_props = [{"event_id": event_id, "market_id": market_id,

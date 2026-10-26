@@ -65,15 +65,17 @@ def test_talaria_value_is_usd_stake_not_legacy_quantity_and_multiple_levels():
 def test_exact_market_filter_runs_before_level_limit_without_refreshing_book():
     data = seeded()
     data.apply(frame(), received_at=NOW)
+    data.apply(frame(300, subtype="player_to_record_a_double_double"),
+               received_at=NOW + timedelta(seconds=1))
     view = data.snapshot(now=NOW + timedelta(seconds=2), connected=True, limit=1,
-                         event_id="123", market_id="219", strike_id="home-strike")
-    assert view["filtered_level_count"] == 2
+                         event_id="123", market_id="219", strike_id="away-strike")
+    assert view["filtered_level_count"] == 1
     assert len(view["levels"]) == 1
-    assert view["levels"][0]["strike_id"] == "home-strike"
-    assert view["levels"][0]["executable_stake_usd"] == "1387.08"
+    assert view["levels"][0]["strike_id"] == "away-strike"
+    assert view["levels"][0]["executable_stake_usd"] == "20.00"
     assert view["current_game_markets"] == 1
     assert data.snapshot(now=NOW + timedelta(seconds=31), connected=True, limit=1,
-                         event_id="123", market_id="219", strike_id="home-strike")["levels"][0][
+                         event_id="123", market_id="219", strike_id="away-strike")["levels"][0][
                              "executable_stake_usd"] == "0"
 
 
