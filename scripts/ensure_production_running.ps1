@@ -42,9 +42,18 @@ function Managed-Process-Alive {
             Where-Object { $_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::1', '::') } | Select-Object -First 1
         $parent = if ($process) { Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ParentProcessId)" }
         $expected = "-m evplatform --mode production --port $Port"
+        $startedMatches = $true
+        if ($process -and $runtime.started_at) {
+            # The runtime receipt is millisecond precision; CIM retains
+            # finer fractions. Compare the same process clock with a narrow
+            # tolerance instead of requiring string equality.
+            $reported = [datetimeoffset]$runtime.started_at
+            $actual = [datetimeoffset]$process.CreationDate
+            $startedMatches = [Math]::Abs(($actual - $reported).TotalSeconds) -lt 2
+        }
         return [bool]($process -and $listener -and $listener.OwningProcess -eq $process.ProcessId -and
             $process.CommandLine -match [regex]::Escape($expected) -and
-            (!$runtime.started_at -or $process.CreationDate -eq $runtime.started_at) -and
+            $startedMatches -and
             ($process.ExecutablePath -eq (Join-Path $projectRoot '.venv\Scripts\python.exe') -or
              $parent.ExecutablePath -eq (Join-Path $projectRoot '.venv\Scripts\python.exe')))
     } catch { return $false }

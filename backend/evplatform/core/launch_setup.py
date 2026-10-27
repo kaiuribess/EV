@@ -318,15 +318,20 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "external_inventory": {"loaded_count": len(native.external_positions),
             "owner_tracked_count": sum(getattr(item, "tracking_basis", None) == "owner_attested_raw_fill"
                 for item in native.external_positions),
-            "unsettled_cost_usd": str(sum((item.cost_usd for item in native.external_positions), Decimal(0))),
+            "unsettled_cost_usd": str(sum((native.engine.risk.external_cost(item)
+                for item in native.external_positions), Decimal(0))),
             "venues": sorted({item.venue for item in native.external_positions}),
             "pending_order_count": len(native.pending_external_orders),
             "pending_venues": sorted({item.venue for item in native.pending_external_orders}),
+            "resolved_external_order_count": len(getattr(native, "resolved_external_orders", ())),
+            "unresolved_account_count": len(getattr(native, "unresolved_external_accounts", ())),
+            "unresolved_account_venues": sorted({item.venue for item in getattr(
+                native, "unresolved_external_accounts", ())}),
             "account_reconciled": bool(native.external_positions) and all(
                 any(snapshot.account_fingerprint == item.account_fingerprint and snapshot.reconciled
                     for snapshot in native.account_snapshots.values())
                 for item in native.external_positions),
-            "note": "External positions remain outside OMS order history. Owner-tracked raw fills reserve risk conservatively, but do not verify current native inventory or settlement; cash already reflects the original debit."},
+            "note": "External fills stay outside OMS history. Reviewed unsettled positions reserve cost and fees; resolved raw orders retain evidence without reserving current exposure. Cash already reflects original debits."},
         "risk_policy": risk_policy, "accounts": accounts, "requirements": requirements,
         "launch_scope": launch_scope,
         "structural_review": ({**structural.model_dump(mode="json"),

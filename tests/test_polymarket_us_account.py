@@ -66,6 +66,19 @@ async def test_empty_inventory_and_rfq_participant_never_fabricate_account_or_wr
     assert report.api_key_scopes==() and report.private_connection_generation==2
 
 
+async def test_nonzero_balance_reservation_is_disclosed_without_spendable_cash_claim():
+    client=ReadOnlyClient()
+    original=client.account_balances
+    async def reserved():
+        result=await original()
+        result["balances"][0]["balanceReservation"]="25"
+        return result
+    client.account_balances=reserved
+    report=await probe_polymarket_us_account(client,adapter=baseline())
+    assert "balanceReservation" in report.reason
+    assert not report.cash_available_verified and not report.reconciled
+
+
 async def test_missing_balance_source_clock_returns_unverified_inventory_diagnostic():
     client=ReadOnlyClient()
     original=client.account_balances

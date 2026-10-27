@@ -104,18 +104,16 @@ async def probe_native_account(client, managed_orders=(), *, settled_order_ids=f
     """
     venue, environment = client.venue_id, client.settings.environment
     if isinstance(client, KalshiClient):
-        if external_positions:
-            raise ReconciliationError("Kalshi external inventory is not reviewed for this account probe")
-        return await _probe_kalshi(client, managed_orders, settled_order_ids, exchange_index)
+        return await _probe_kalshi(client, managed_orders, settled_order_ids, exchange_index,
+                                   external_positions)
     if isinstance(client, ProphetXClient):
-        if external_positions:
-            raise ReconciliationError("ProphetX external inventory is not reviewed for this account probe")
         if not client._signin_confirmed or not client.health_check().get("authenticated"):
             return NativeAccountSnapshot(venue=venue, environment=environment, observed_at=utcnow(),
                 reason="ProphetX confirmed authenticated private identity is required")
         from .prophetx_account import probe_prophetx_account
         return await probe_prophetx_account(client, managed_orders, settled_order_ids=settled_order_ids,
-                                             review=getattr(client, "account_review", None))
+                                             review=getattr(client, "account_review", None),
+                                             external_positions=external_positions)
     if client.venue_id == "polymarket_us":
         if external_positions:
             raise ReconciliationError("Polymarket US external inventory is not reviewed for this account probe")
@@ -243,7 +241,7 @@ async def _kalshi_pages(client, path, collection, **params):
     raise ReconciliationError("Kalshi account inventory exceeds reconciliation page bound")
 
 
-async def _probe_kalshi(client, managed_orders, settled_order_ids, exchange_index):
+async def _probe_kalshi(client, managed_orders, settled_order_ids, exchange_index, external_positions=()):
     if exchange_index is not None and (type(exchange_index) is not int or exchange_index < 0):
         raise ReconciliationError("Invalid Kalshi exchange index")
     environment = client.settings.environment
@@ -347,6 +345,26 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids, exchange_inde
             expected_cost[ticker] += order.filled_cost_usd
             expected_fees[ticker] += order.fees
             expected_sides[ticker].add(order.intent.instrument.native_outcome)
+    external_cost = Decimal(0)
+    from ..core.external_inventory import ReviewedKalshiPosition
+    for external in external_positions:
+        if (not isinstance(external, ReviewedKalshiPosition)
+                or external.environment != environment or external.account_fingerprint != fingerprint):
+            reasons.append("Kalshi external position is not reviewed for this account")
+            continue
+        if exchange_index is not None and external.exchange_index != exchange_index:
+            # Scoped cash is still available for this shard, but exposure on
+            # other shards remains in the shared risk ledger.
+            continue
+        ticker = external.native_market_id
+        if ticker in expected_sides:
+            reasons.append("External and OMS Kalshi fills overlap or net")
+            continue
+        expected[ticker] += external.quantity * (1 if external.native_outcome_id == "yes" else -1)
+        expected_cost[ticker] += external.cost_usd
+        expected_fees[ticker] += external.fee_usd
+        expected_sides[ticker].add(external.native_outcome_id)
+        external_cost += external.cost_usd + external.fee_usd
     if any(len(sides) != 1 for sides in expected_sides.values()):
         reasons.append("Netted Kalshi exposure requires explicit cash allocation")
     actual = defaultdict(Decimal)
@@ -387,7 +405,8 @@ async def _probe_kalshi(client, managed_orders, settled_order_ids, exchange_inde
     return NativeAccountSnapshot(venue="kalshi", environment=environment, account_fingerprint=fingerprint,
         identity_verified=True, observed_at=utcnow(), balance_usd=cash, exchange_index=exchange_index,
         open_order_count=len(orders),
-        position_count=len(actual), reconciled=not reasons,
+        position_count=len(actual), external_position_count=len(external_positions),
+        external_cost_usd=external_cost, reconciled=not reasons,
         reason="; ".join(dict.fromkeys([*reasons, *([private_reason] if private_reason else [])])),
         # Official balance_dollars is available cash; portfolio_value is a
         # different field and is never funding capacity. Runtime still requires

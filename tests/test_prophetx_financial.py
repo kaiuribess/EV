@@ -360,6 +360,20 @@ async def test_inventory_missing_history_review_never_assumes_empty_account(case
     assert result.balance_usd == D("89.8")
 
 
+async def test_external_fill_allows_cash_diagnostic_without_certifying_inventory(case):
+    _, client, review = case
+    external = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint=review.account_fingerprint, cost_usd=D("1"))
+    result = await probe_prophetx_account(client, observed_at=NOW,
+                                          external_positions=(external,))
+    assert result.balance_usd == D("89.8") and result.cash_available_verified
+    assert result.external_position_count == 1 and result.external_cost_usd == D("1")
+    assert not result.reconciled and not result.trading_permission_verified
+    with pytest.raises(ReconciliationError, match="external fills"):
+        await probe_prophetx_account(client, review=review, observed_at=NOW,
+                                      external_positions=(external,))
+
+
 async def test_reviewed_current_empty_inventory_needs_no_lifetime_backfill(case):
     _, client, old_review = case
     client.balance.update(balance="50.10", matched_order_balance="0", unmatched_order_balance="0")

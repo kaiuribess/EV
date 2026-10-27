@@ -73,6 +73,8 @@ class NativeRuntime:
         self.account_snapshots = {}
         self.external_positions = ()
         self.pending_external_orders = ()
+        self.resolved_external_orders = ()
+        self.unresolved_external_accounts = ()
         # Pre-profile diagnostics are never consulted by risk, sizing or the
         # release gate. They let an operator identify an account before writing
         # the reviewed launch profile that enables normal account probing.
@@ -110,8 +112,11 @@ class NativeRuntime:
                 review = await asyncio.to_thread(load_external_inventory_review, external_path)
                 self.external_positions = review.positions
                 self.pending_external_orders = review.pending_orders
+                self.resolved_external_orders = review.resolved_orders
+                self.unresolved_external_accounts = review.unresolved_accounts
                 self.engine.risk.external_positions = self.external_positions
                 self.engine.risk.pending_external_orders = self.pending_external_orders
+                self.engine.risk.unresolved_external_accounts = self.unresolved_external_accounts
             except (OSError, ValueError, KeyError, TypeError):
                 external_inventory_error = "External native inventory review is invalid; native execution is blocked"
         review_path = runtime_data_file("nba_pilot_structural_review.json", self.engine.settings.data_dir)
@@ -1393,7 +1398,8 @@ class NativeRuntime:
             configured_limits=limits, enabled_strategy_ids=tuple(name for name,r in engine.registry.records.items()
                 if r.enabled and name == "native_positive_ev"),
             central_risk_enforced=execution_workers and available_queue("risk_queue"), opposing_position_guards=True,
-            external_exposure_bounded=not getattr(self, "pending_external_orders", ()),
+            external_exposure_bounded=not (getattr(self, "pending_external_orders", ())
+                or getattr(self, "unresolved_external_accounts", ())),
             durable_intents=storage_healthy and execution_workers,
             persistence_healthy=storage_healthy and worker("audit-enqueue") and available_queue("audit_queue"),
             signal_ledger_healthy=engine.signal_ledger.started and storage_healthy and worker("signal-ledger") and available_queue("signal_queue"),

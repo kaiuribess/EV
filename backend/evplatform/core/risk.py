@@ -57,6 +57,7 @@ class RiskEngine:
         # Other venues can be disabled independently, but their unknown
         # exposure still vetoes every real-money reservation until bounded.
         self.pending_external_orders = ()
+        self.unresolved_external_accounts = ()
         self.duplicates = {}
         self.settled: set[str] = set()
         self.authority = RiskAuthority()
@@ -101,7 +102,14 @@ class RiskEngine:
 
     def exposures(self):
         return (sum((self.cost(o) for o in self.all_orders()), Decimal(0))
-                + sum((o.cost_usd for o in self.external_positions), Decimal(0)))
+                + sum((self.external_cost(o) for o in self.external_positions), Decimal(0)))
+
+    @staticmethod
+    def external_cost(position):
+        # The wallet has already paid this amount. Reserve the remaining
+        # potential loss in the portfolio cap without subtracting it again
+        # from the exchange's reported spendable cash.
+        return position.cost_usd + getattr(position, "fee_usd", Decimal(0))
 
     def all_orders(self):
         return (*self.orders.values(), *self.native_orders.values())
@@ -121,7 +129,7 @@ class RiskEngine:
                 and getattr(order, "execution_origin", "automatic") == "automatic"
                 and order.venue not in self.native_enabled_venues):
             raise RiskRejected("Native venue is outside the active execution lease")
-        if order.mode == "production" and self.pending_external_orders:
+        if order.mode == "production" and (self.pending_external_orders or self.unresolved_external_accounts):
             raise RiskRejected("Unbounded external account exposure blocks native execution")
         if preview_only:
             # Dry-run inspects every monetary/position limit while disarmed.
@@ -171,7 +179,7 @@ class RiskEngine:
         if order.player_id:
             limits.append(([o for o in others if o.player_id == order.player_id], self.config.max_player_exposure, "player"))
         for orders, limit, label in limits:
-            external = sum((p.cost_usd for p in self.external_positions
+            external = sum((self.external_cost(p) for p in self.external_positions
                 if p.environment == order.mode and (label == "total" or
                     label == "venue" and p.venue == order.venue)), Decimal(0))
             if limit is not None and sum((self.cost(o) for o in orders), Decimal(0)) + external + cost > limit:
@@ -205,7 +213,7 @@ class RiskEngine:
             # Reviewed raw fills are outside the OMS, but they still consumed
             # this account's daily debit. Their cost is already reflected in
             # available cash; this addition applies only to the daily budget.
-            prior_debit += sum((item.cost_usd for item in self.external_positions
+            prior_debit += sum((self.external_cost(item) for item in self.external_positions
                 if item.environment == order.mode and (item.recorded_at.tzinfo is None
                     or item.recorded_at.astimezone(timezone.utc).date() >= today)), Decimal(0))
             if prior_debit + order.reserved_cost > debit_cap:

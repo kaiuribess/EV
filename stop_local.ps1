@@ -13,8 +13,13 @@ if (-not $listener) { Write-Host "Port $Port is already stopped."; return }
 $bound = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
 $parent = if ($bound) { Get-CimInstance Win32_Process -Filter "ProcessId = $($bound.ParentProcessId)" }
 $expectedCommand = "-m evplatform --mode $($runtime.mode) --port $Port"
-$sameRecordedProcess = ($processInfo -and $bound.ProcessId -eq $processInfo.ProcessId -and
-    (!$runtime.started_at -or $bound.CreationDate -eq $runtime.started_at))
+$startedMatches = $true
+if ($bound -and $runtime.started_at) {
+    $reported = [datetimeoffset]$runtime.started_at
+    $actual = [datetimeoffset]$bound.CreationDate
+    $startedMatches = [Math]::Abs(($actual - $reported).TotalSeconds) -lt 2
+}
+$sameRecordedProcess = ($processInfo -and $bound.ProcessId -eq $processInfo.ProcessId -and $startedMatches)
 $verifiedVenvChild = ($parent -and $parent.ExecutablePath -eq $expectedPython -and
     $parent.CommandLine -match [regex]::Escape($expectedCommand))
 if (-not $bound -or $bound.CommandLine -notmatch [regex]::Escape($expectedCommand) -or

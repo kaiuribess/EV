@@ -34,7 +34,8 @@ def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10), funded_cas
 
 
 async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids=frozenset(),
-                                review: ProphetXAccountReview | None = None, observed_at=None):
+                                review: ProphetXAccountReview | None = None, observed_at=None,
+                                external_positions=()):
     """Verify current cash independently; complete inventory never comes from a balance alone."""
     # Local import permits the shared dispatcher to import this adapter.
     from .account_probe import NativeAccountSnapshot
@@ -46,11 +47,20 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
     captured_fence = private.begin_probe(client=client) if private is not None else None
     before = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow(),
                            funded_cash_only=review is not None)
+    if external_positions and review is not None:
+        raise ReconciliationError("ProphetX external fills need an account-specific inventory review")
     if review is None:
         cash_verified = (authenticated_identity(client) == (user, fingerprint)
                          and (private is None or private.fence(client=client) == captured_fence))
+        external_cost = sum((row.cost_usd for row in external_positions
+                             if row.venue == "prophetx" and row.environment == client.settings.environment
+                             and row.account_fingerprint == fingerprint), Decimal(0))
+        if len(external_positions) != sum(row.account_fingerprint == fingerprint
+                                         for row in external_positions):
+            cash_verified = False
         return NativeAccountSnapshot(**base, balance_usd=before[0], cash_available_verified=cash_verified,
-            reason="Current cash is verified; LEC and older positions require a reviewed funded-cash inventory scope"
+            external_position_count=len(external_positions), external_cost_usd=external_cost,
+            reason="Current cash is verified; external fills, LEC and older positions require a reviewed funded-cash inventory scope"
                    if cash_verified else "ProphetX account identity changed during wallet read")
     if review.current_inventory_reviewed_at is not None:
         baseline = review.current_inventory_reviewed_at

@@ -96,6 +96,13 @@ async def probe_polymarket_us_account(client, managed_orders=(), *, settled_orde
     # currentBalance is only the fiat balance. Keep this reported capacity
     # unverified until account identity, clock and inventory can be certified.
     buying_power = number(usd[0].get("buyingPower"), "USD buying power")
+    reservation = (number(usd[0]["balanceReservation"], "USD balance reservation")
+                   if usd[0].get("balanceReservation") is not None else None)
+    if reservation:
+        # The public retail schema exposes this amount but does not say which
+        # positions or restrictions caused it, or whether buyingPower already
+        # excludes it. Never subtract it twice or spend it as free cash.
+        reasons.append("Nonzero balanceReservation lacks documented account allocation")
     try:
         source_time(usd[0].get("lastUpdated"), utcnow())
         balance_clock_valid = True
