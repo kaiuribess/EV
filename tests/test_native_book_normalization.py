@@ -27,7 +27,9 @@ def mapping(market, venue="kalshi", **kwargs):
         settlement_rules_fingerprint=market.identity(), verified=True, source="fixture reviewed mapping",
     )
     fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
-                         per_unit_usd="0.001", per_fill_usd="0", fixed_order_usd="0", verified=True,
+                         per_unit_usd="0.05" if venue == "prophetx" else "0.001",
+                         per_fill_usd="0", fixed_order_usd="0", verified=True,
+                         fee_payment_timing="winnings_only" if venue == "prophetx" else "upfront_or_unknown",
                          source="fixture fee cap", observed_at=utcnow()-timedelta(hours=1), valid_until=utcnow()+timedelta(hours=1))
     return NativeMarketMapping(market=market, instrument=instrument, fee_bound=fee,
                                opposing_outcome="outcome-away" if venue == "novig" else None,

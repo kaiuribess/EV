@@ -1,8 +1,7 @@
-"""Read-only, provider-trusted sportsbook consensus; never an order policy.
+"""Provider-trusted sportsbook consensus with separate research and live scopes.
 
-The execution engine continues to use the configured sharp/strict profile.
-This module builds a separate exact-market profile from eligible sportsbook
-pairs and deliberately disables the one-market trusted pilot authorization.
+Research remains isolated. The live scope requires an approved recurring
+source policy and continues through the existing native OMS and risk gates.
 """
 from __future__ import annotations
 
@@ -69,6 +68,59 @@ def consensus_scope(market: Market, quotes: list[Quote], config: PricingConfig,
         "min_references": 2, "trusted_pilot_policy": pilot, "market_overrides": {},
     })
     return research, weighting
+
+
+def live_consensus_scope(market: Market, quotes: list[Quote], config: PricingConfig,
+                         now: datetime | None = None) -> PricingConfig:
+    """Same complete-pair consensus, under separately approved live weights.
+
+    The research function above never carries this approval. A changing set of
+    eligible books renormalizes only the owner's fixed weights; no new weight
+    or bookmaker gains authority from discovery alone.
+    """
+    now = now or utcnow()
+    scoped = market_config(config, market)
+    policy = scoped.trusted_pilot_policy
+    if (not scoped.live_multi_book_enabled or not scoped.multi_book_consensus_enabled
+            or not policy.enabled or not policy.owner_approved
+            or not policy.recurring_authorization or not policy.permits_market(market)
+            or policy.reference_weights_percent is None):
+        raise NoSignal("No approved recurring multi-book policy for this market")
+    allowed = set(policy.trusted_books)
+    eligible = {quote.bookmaker for quote in quotes
+        if quote.provider in SOURCES and quote.bookmaker in allowed
+        and quote.market_id == market.id and quote.market_fingerprint == market.identity()
+        and set(quote.decimal_odds) == set(market.outcomes)
+        and trusted_quote_research_eligibility(scoped, market, quote, now)[0]}
+    if len(eligible) < policy.min_distinct_books:
+        raise NoSignal("Too few current complete approved sportsbook pairs")
+    raw = {book: policy.reference_weights_percent[book] for book in sorted(eligible)}
+    total = sum(raw.values())
+    weights = {book: value * 100 / total for book, value in raw.items()}
+    last = next(reversed(weights))
+    weights[last] += Decimal(100) - sum(weights.values())
+    profile = ReferenceProfile(selectors=(ProfileSelector(sport=market.sport,
+        league=market.league, market_type=market.market_type, statistic=market.statistic),),
+        weights_percent=weights, required_any_anchor=(),
+        min_distinct_books=policy.min_distinct_books, status="approved_multi_book",
+        live_execution_allowed=False, primary_devig="power",
+        sensitivity_devig="proportional",
+        note="Owner-approved scoped provider trust; final quote, account and OMS gates apply")
+    return scoped.model_copy(update={"reference_profile_mode": "strict",
+        "reference_quality_mode": "trusted_provider",
+        "reference_profiles": {"approved_multi_book": profile},
+        "enabled_reference_profiles": ["approved_multi_book"],
+        "eligible_books": sorted(eligible), "required_books": [], "weights": weights,
+        "min_references": policy.min_distinct_books, "market_overrides": {}})
+
+
+def native_live_pricing(market: Market, quotes: list[Quote], config: PricingConfig,
+                        now: datetime | None = None) -> PricingConfig:
+    """Return the unmodified legacy policy or the explicit live consensus."""
+    scoped = market_config(config, market)
+    return (live_consensus_scope(market, quotes, config, now)
+            if scoped.live_multi_book_enabled and scoped.trusted_pilot_policy.permits_market(market)
+            else config)
 
 
 def consensus_fair_value(market: Market, quotes: list[Quote], config: PricingConfig,

@@ -93,7 +93,10 @@ def _oldest(times) -> datetime | None:
 class NativeBookMapper:
     def __init__(self, mappings: list[NativeMarketMapping] | tuple[NativeMarketMapping, ...] = ()):
         self.mappings = tuple(NativeMarketMapping.model_validate(item) for item in mappings)
+        self._static_mappings = self.mappings
         self.mapping_digest = digest_json(NativeMappingFile(mappings=self.mappings).model_dump(mode="json"))
+        self.dynamic_rule_digests: dict[tuple[str, str, str], str] = {}
+        self.dynamic_evidence: dict[tuple[str, str, str], dict] = {}
         self._index: dict[tuple[str, str], list[NativeMarketMapping]] = {}
         self._clocks: dict[tuple[str, str], dict] = {}
         self._sequences: dict[tuple[str, str, str], int] = {}
@@ -115,6 +118,74 @@ class NativeBookMapper:
             native.add(native_key)
             source_id = item.source_market_id if i.venue == "prophetx" else i.instrument_id
             self._index.setdefault((i.venue, source_id), []).append(item)
+
+    def register_family_mapping(self, item: NativeMarketMapping, *, rule_digest: str,
+                                evidence: dict | None = None) -> bool:
+        """Index a per-fixture mapping without changing the approved file digest.
+
+        The caller must validate the approved family rule against current
+        source/native facts and fee lineage. A rediscovered identical mapping
+        is idempotent; conflicting identity is never silently replaced.
+        """
+        item = NativeMarketMapping.model_validate(item)
+        if len(rule_digest) != 64 or any(ch not in "0123456789abcdef" for ch in rule_digest):
+            raise ValueError("Approved family rule digest is required")
+        i = item.instrument
+        key = (i.venue, i.canonical_market_id, i.outcome)
+        if evidence is not None:
+            required = {"source_event_id", "source_identity", "native_market_id",
+                "native_outcome_id", "native_rule_sha256", "catalog_observed_at",
+                "fee_observed_at"}
+            if not isinstance(evidence, dict) or not required <= evidence.keys() or any(
+                    not isinstance(evidence[name], str) or not evidence[name]
+                    for name in required):
+                raise ValueError("Family mapping requires attributable source, native and fee evidence")
+            if (evidence["source_identity"] != item.market.identity()
+                    or evidence["native_market_id"] != (item.source_market_id or i.instrument_id)
+                    or evidence["native_outcome_id"] != i.native_outcome):
+                raise ValueError("Family mapping evidence does not bind this exact instrument")
+        native_key = (i.venue, i.instrument_id, i.native_outcome)
+        existing = next((row for row in self.mappings if (
+            row.instrument.venue, row.instrument.canonical_market_id, row.instrument.outcome) == key), None)
+        if existing is not None:
+            if (self.dynamic_rule_digests.get(key) != rule_digest
+                    or existing.market != item.market or existing.instrument != item.instrument
+                    or existing.opposing_outcome != item.opposing_outcome
+                    or existing.source_event_id != item.source_event_id
+                    or existing.source_market_id != item.source_market_id
+                    or existing.prop_sub_type != item.prop_sub_type
+                    or existing.source_timestamp_unit != item.source_timestamp_unit
+                    or existing.timestamp_unit_evidence != item.timestamp_unit_evidence):
+                raise ValueError("Family mapping changed after registration")
+            prior_evidence = self.dynamic_evidence.get(key)
+            if evidence is not None and prior_evidence is not None:
+                stable = required - {"catalog_observed_at", "fee_observed_at"}
+                if any(prior_evidence[name] != evidence[name] for name in stable):
+                    raise ValueError("Family mapping evidence lineage changed")
+            if existing.fee_bound != item.fee_bound:
+                if (item.fee_bound.observed_at <= existing.fee_bound.observed_at
+                        or item.fee_bound.source.split(";", 1)[0] !=
+                        existing.fee_bound.source.split(";", 1)[0]):
+                    raise ValueError("Family fee lineage changed or moved backwards")
+                source_id = item.source_market_id if i.venue == "prophetx" else i.instrument_id
+                self.mappings = tuple(item if row is existing else row for row in self.mappings)
+                self._index[(i.venue, source_id)] = [item if row is existing else row
+                    for row in self._index[(i.venue, source_id)]]
+            if evidence is not None:
+                self.dynamic_evidence[key] = evidence
+            return False
+        if any((row.instrument.venue, row.instrument.instrument_id,
+                row.instrument.native_outcome) == native_key or
+               row.market.id == item.market.id and row.market.identity() != item.market.identity()
+               for row in self.mappings):
+            raise ValueError("Ambiguous native or canonical family mapping")
+        self.mappings += (item,)
+        self.dynamic_rule_digests[key] = rule_digest
+        if evidence is not None:
+            self.dynamic_evidence[key] = evidence
+        source_id = item.source_market_id if i.venue == "prophetx" else i.instrument_id
+        self._index.setdefault((i.venue, source_id), []).append(item)
+        return True
 
     @classmethod
     def from_file(cls, path: str | Path) -> "NativeBookMapper":
@@ -413,6 +484,15 @@ class NativeBookMapper:
                     continue  # provider placeholder: no executable price or depth
                 parsed = executable_level(selection)
                 p, q = parsed["american_price"], parsed["executable_stake_usd"]
+                # The reviewed fee cap must cover the documented 2% of
+                # winnings at this *actual* American price. A fixed $0.02 per
+                # dollar of risk would understate longshot commissions.
+                minimum_fee_per_stake = (p / Decimal(100) if p > 0
+                    else Decimal(100) / abs(p)) * Decimal(".02")
+                if (mapping.fee_bound.fee_payment_timing != "winnings_only"
+                        or mapping.fee_bound.per_unit_usd < minimum_fee_per_stake):
+                    levels, times = [], []
+                    break
                 if p in seen_prices:
                     raise ValueError("Duplicate ProphetX price level")
                 seen_prices.add(p)

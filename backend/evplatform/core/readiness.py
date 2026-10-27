@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .models import utcnow
+from .config import TrustedPilotMarketScope
 
 
 Environment = Literal["sandbox", "production"]
@@ -117,6 +118,66 @@ class LaunchEvidence(StrictRecord):
         return self
 
 
+class ApprovedNativeFamilyRule(StrictRecord):
+    """Account-bound reusable question rule; each discovered ID is rechecked."""
+    schema_version: Literal[1] = 1
+    scope: TrustedPilotMarketScope
+    rule_version: str = Field(min_length=8)
+    approved_by: str = Field(min_length=1)
+    approval_evidence: str = Field(min_length=16)
+    approved_at: datetime
+    expires_at: datetime
+    # Kalshi's primary rule is parsed against winner, teams and game date by
+    # the existing crosswalk. Its secondary clause must match exactly. For
+    # ProphetX these are approved exact type|sub_type|period metadata tuples.
+    allowed_native_rule_texts: tuple[str, ...] = Field(min_length=1)
+    max_start_delta_seconds: int = Field(default=0, ge=0, le=30)
+    # Explicit native order-grid evidence is reviewed once per family. Current
+    # catalog, fee, account and liquidity evidence is still required per game.
+    quantity_step: Decimal = Field(gt=0)
+    minimum_quantity: Decimal = Field(gt=0)
+    minimum_order_cost_usd: Decimal = Field(ge=0)
+    cash_quantum_usd: Decimal = Field(gt=0)
+    order_minimum_source: str = Field(min_length=16)
+    kalshi_exchange_index: int | None = Field(default=None, ge=0)
+    # ProphetX's current account fee bound is separate from the advertised
+    # rate; it remains absent until genuine evidence supports a safe bound.
+    prophetx_winnings_fee_upper_per_stake: Decimal | None = Field(default=None, ge=0)
+    prophetx_fee_source: str | None = None
+    prophetx_native_settlement_evidence: str | None = None
+    prophetx_source_timestamp_unit: Literal["unknown", "seconds", "milliseconds", "microseconds", "nanoseconds"] = "unknown"
+    prophetx_timestamp_unit_evidence: str | None = None
+
+    @model_validator(mode="after")
+    def coherent_rule(self):
+        if (self.scope.market_type != "moneyline" or self.scope.league != "NBA"
+                or not self.scope.source_normal_rule_evidence
+                or self.approved_at.tzinfo is None or self.expires_at.tzinfo is None
+                or self.expires_at <= self.approved_at
+                or any(not value.is_finite() for value in (self.quantity_step,
+                    self.minimum_quantity, self.minimum_order_cost_usd, self.cash_quantum_usd))
+                or self.minimum_quantity % self.quantity_step
+                or any(not text.strip() for text in self.allowed_native_rule_texts)
+                or len(set(self.allowed_native_rule_texts)) != len(self.allowed_native_rule_texts)):
+            raise ValueError("Approved NBA family rule needs exact source, native and order-grid evidence")
+        if self.scope.venue == "prophetx" and (self.prophetx_winnings_fee_upper_per_stake is None
+                or not self.prophetx_winnings_fee_upper_per_stake.is_finite()
+                or not self.prophetx_fee_source
+                or not self.prophetx_native_settlement_evidence
+                or self.prophetx_source_timestamp_unit == "unknown"
+                or not self.prophetx_timestamp_unit_evidence):
+            raise ValueError("ProphetX family rule needs an account-applicable winnings fee bound")
+        if self.scope.venue == "kalshi" and self.kalshi_exchange_index is None:
+            raise ValueError("Kalshi family rule needs an exact approved exchange index")
+        return self
+
+    def digest(self) -> str:
+        return digest_json(self.model_dump(mode="json"))
+
+    def matches(self, market) -> bool:
+        return self.scope.matches(market) and market.status == "scheduled"
+
+
 class LaunchProfile(StrictRecord):
     schema_version: Literal[1] = 1
     venue: str = Field(min_length=1)
@@ -124,7 +185,8 @@ class LaunchProfile(StrictRecord):
     account_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_id: str = Field(min_length=1)
     sandbox_account_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    market_ids: tuple[str, ...] = Field(min_length=1)
+    market_ids: tuple[str, ...] = ()
+    family_rule: ApprovedNativeFamilyRule | None = None
     strategy_ids: tuple[str, ...] = Field(min_length=1)
     provider_ids: tuple[str, ...] = Field(min_length=1)
     mapping_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -144,6 +206,15 @@ class LaunchProfile(StrictRecord):
     # remain mandatory at every stage of the order.
     validation_pilot: bool = False
     evidence: tuple[LaunchEvidence, ...] = ()
+
+    @model_validator(mode="after")
+    def exact_or_family_scope(self):
+        if (bool(self.market_ids) == (self.family_rule is not None)
+                or self.family_rule is not None and self.family_rule.scope.venue != self.venue):
+            raise ValueError("Launch profile needs either exact markets or one matching approved family rule")
+        if self.validation_pilot and self.family_rule is not None:
+            raise ValueError("Recurring family scope cannot use the one-attempt validation pilot")
+        return self
 
     @model_validator(mode="after")
     def bounded_validation_pilot(self):
@@ -185,6 +256,8 @@ class LaunchProfile(StrictRecord):
         # pilot must not invalidate unrelated reviewed accounts/evidence.
         if not self.validation_pilot:
             payload.pop("validation_pilot")
+        if self.family_rule is None:
+            payload.pop("family_rule")
         if self.limits.max_native_order_attempts is None:
             payload["limits"].pop("max_native_order_attempts")
         if self.limits.max_native_daily_attempts is None:
@@ -231,6 +304,21 @@ class MarketReadiness(StrictRecord):
     market_active: bool = False
     executable_liquidity: bool = False
     synthetic: bool = True
+
+
+def family_market_ready(market: MarketReadiness, profile: LaunchProfile, *,
+                        runtime_age_seconds: float = 0) -> bool:
+    """One current exact fixture may arm a reusable scope; others cannot veto it."""
+    required = ("identity_verified", "provider_mapping_verified", "venue_mapping_verified",
+        "fee_schedule_verified", "native_units_supported", "order_minimum_verified",
+        "required_books_present", "orderbook_synchronized", "market_active",
+        "executable_liquidity")
+    return bool(all(getattr(market, name) for name in required) and not market.synthetic
+        and market.usable_reference_books >= profile.min_reference_books
+        and market.oldest_reference_age_ms is not None
+        and market.orderbook_age_ms is not None
+        and 0 <= market.oldest_reference_age_ms + max(0, runtime_age_seconds)*1000 <= profile.max_reference_age_ms
+        and 0 <= market.orderbook_age_ms + max(0, runtime_age_seconds)*1000 <= profile.max_orderbook_age_ms)
 
 
 class RuntimeReadiness(StrictRecord):
@@ -398,6 +486,11 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         if profile.limits != runtime.configured_limits:
             block("profile.limit_mismatch", "Current limits differ from explicitly authorized limits",
                   "Apply the reviewed limits and repeat authorization for any change", category="authorization")
+        if profile.family_rule is not None:
+            rule = profile.family_rule
+            if not rule.approved_at <= now < rule.expires_at:
+                block("family.expired", "Approved market-family rule is expired or future-dated",
+                      "Review and reapprove the exact rule version", category="authorization")
         if set(profile.strategy_ids) != set(runtime.enabled_strategy_ids):
             block("profile.strategy_mismatch", "Enabled strategies differ from authorized strategies",
                   "Limit native routing to the exact approved strategy set", category="authorization")
@@ -427,6 +520,11 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         markets = {item.market_id: item for item in runtime.markets}
         if len(markets) != len(runtime.markets):
             block("market.duplicate", "Runtime contains ambiguous duplicate market records", "Resolve duplicate canonical identities")
+        if profile.family_rule is not None and not any(
+                family_market_ready(item, profile, runtime_age_seconds=age)
+                for item in runtime.markets):
+            block("family.no_current_market", "No discovered market satisfies every reviewed family and live-data check",
+                  "Keep monitoring for a current exact match with references, fees and executable depth")
         for market_id in profile.market_ids:
             market = markets.get(market_id)
             if market is None:

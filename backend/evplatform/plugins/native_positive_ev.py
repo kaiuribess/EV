@@ -3,6 +3,7 @@ from ..core.config import PricingConfig
 from ..core.native_pricing import native_opportunity, native_revalidate_intent
 from ..core.plugins import Manifest, StrategyPlugin
 from ..core.pricing import NoSignal, fair_value
+from ..core.multi_book_consensus import native_live_pricing
 
 
 class NativePositiveEV(StrategyPlugin):
@@ -22,11 +23,12 @@ class NativePositiveEV(StrategyPlugin):
     )
 
     async def evaluate(self, event, view):
-        fair = fair_value(view["market"], view["quotes"], view["config"])
+        config = native_live_pricing(view["market"], view["quotes"], view["config"])
+        fair = fair_value(view["market"], view["quotes"], config)
         candidates, errors = [], []
         for book in view["native_books"]:
             try:
-                candidates.append(native_opportunity(view["market"], fair, book, view["config"],
+                candidates.append(native_opportunity(view["market"], fair, book, config,
                     max_stake_usd=view["max_stake_usd"], mode=view["mode"],
                     stake_sizing=view.get("stake_sizing", "capped"), unit_size_usd=view.get("unit_size_usd", "5"),
                     available_cash_usd=view.get("account_cash", {}).get(book.instrument.venue)))
@@ -37,7 +39,8 @@ class NativePositiveEV(StrategyPlugin):
         return candidates
 
     def revalidate(self, candidate, view):
-        fair = fair_value(view["market"], view["quotes"], view["config"])
+        config = native_live_pricing(view["market"], view["quotes"], view["config"])
+        fair = fair_value(view["market"], view["quotes"], config)
         return native_revalidate_intent(candidate.intent, view["market"], fair, view["native_book"],
-            view["config"], remaining_quantity=view.get("remaining_quantity"),
+            config, remaining_quantity=view.get("remaining_quantity"),
             fees_already_paid_usd=view.get("fees_already_paid_usd", 0))

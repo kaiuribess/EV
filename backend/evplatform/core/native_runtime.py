@@ -21,6 +21,7 @@ from .pricing import NoSignal, fair_value, market_config
 from .readiness import (
     FeedReadiness, LaunchProfile, LiveLimits, MarketReadiness,
     ReadinessBlocker, ReadinessReport, RuntimeReadiness, digest_json, evaluate_readiness,
+    family_market_ready,
 )
 from .portfolio import LaunchPortfolio
 from .risk import RiskRejected
@@ -68,6 +69,7 @@ class NativeRuntime:
         self.build_id = ""
         self.mapper = None
         self.books = {}
+        self.invalidated_family_markets: set[tuple[str, str]] = set()
         self.candidates = {}
         self.signals = {}
         self.account_snapshots = {}
@@ -189,6 +191,193 @@ class NativeRuntime:
     def profile_for(self, venue=None):
         profiles = self.profiles_by_venue()
         return profiles.get(venue) if venue is not None else next(iter(profiles.values()), None)
+
+    def profile_permits_market(self, profile, market_id, outcome) -> bool:
+        if profile is None:
+            return False
+        if market_id in profile.market_ids:
+            return True
+        rule = profile.family_rule
+        market = self.engine.markets.get(market_id)
+        if (rule is None or market is None or not rule.matches(market) or self.mapper is None
+                or (profile.venue, market_id) in getattr(self, "invalidated_family_markets", set())):
+            return False
+        key = (profile.venue, market_id, outcome)
+        covered = {item.instrument.outcome for item in self.mapper.mappings
+            if item.instrument.venue == profile.venue and item.market.id == market_id
+            and self.mapper.dynamic_rule_digests.get((profile.venue, market_id,
+                item.instrument.outcome)) == rule.digest()}
+        return (covered == set(market.outcomes)
+            and self.mapper.dynamic_rule_digests.get(key) == rule.digest()
+            and any(item.market.id == market_id and item.instrument.venue == profile.venue
+                    and item.instrument.outcome == outcome
+                    and item.market.identity() == market.identity()
+                    for item in self.mapper.mappings))
+
+    def onboard_family_matches(self, venue, market, matches, monitor, *, now=None) -> int:
+        """Resolve a discovered two-winner fixture under one expiring family rule.
+
+        No source clock, native status, fee, rule text or instrument ID is
+        synthesized. This runs on existing catalog refreshes, before native
+        subscription; it does not arm trading or submit an order.
+        """
+        from .native_accounting import NativeInstrument, NativePriceBand
+        from .native_pricing import NativeFeeBound, instrument_fingerprint
+        from ..venues.book_normalization import NativeBookMapper, NativeMarketMapping
+        from ..venues.kalshi_fees import kalshi_taker_fee_bound
+        from ..integrations.kalshi_event_crosswalk import _listed_winner
+
+        now = now or utcnow()
+        profile = self.profile_for(venue)
+        rule = profile.family_rule if profile else None
+        source_policy = self.engine.settings.pricing.trusted_pilot_policy
+        if (rule is None or rule.scope.venue != venue or not rule.matches(market)
+                or not rule.approved_at <= now < rule.expires_at
+                or source_policy.market_scope != rule.scope
+                or not source_policy.enabled or not source_policy.owner_approved
+                or self.mapper is None or market.start_time <= now
+                or monitor.research_catalog_at is None
+                or not 0 <= (now-monitor.research_catalog_at).total_seconds() <= 60):
+            return 0
+        selected = [item for item in matches if item.venue == venue and
+            (item.side == "yes" if venue == "kalshi" else item.side == "take")]
+        if (len(selected) != 2 or {item.outcome for item in selected} != set(market.outcomes)
+                or any(item.identity_limitations or item.source_market_fingerprint != market.identity()
+                       or item.source_start != market.start_time or item.native_start is None
+                       or abs((item.native_start-market.start_time).total_seconds()) > rule.max_start_delta_seconds
+                       for item in selected)):
+            return 0
+        new_mappings = []
+        rows = getattr(monitor, "research_catalog_rows", ())
+        for match in selected:
+            if venue == "kalshi":
+                row = next((item for item in rows if item.get("ticker") == match.native_market_id), None)
+                metadata = monitor.research_fee_metadata.get(match.native_event_id)
+                if (not isinstance(row, dict) or row.get("status") not in {"active", "open"}
+                        or row.get("exchange_index") != rule.kalshi_exchange_index
+                        or _listed_winner(row) != match.outcome
+                        or row.get("rules_secondary") not in rule.allowed_native_rule_texts
+                        or not isinstance(metadata, dict) or not isinstance(row.get("price_ranges"), list)
+                        or not row["price_ranges"]):
+                    return 0
+                try:
+                    bands = tuple(NativePriceBand(minimum=item["start"], maximum=item["end"],
+                        step=item["step"]) for item in row["price_ranges"])
+                    instrument = NativeInstrument(venue=venue, instrument_id=match.native_market_id,
+                        exchange_index=match.exchange_index, canonical_market_id=market.id,
+                        outcome=match.outcome, native_outcome="yes", quantity_unit="contracts",
+                        price_format="probability", payout_per_unit_usd="1",
+                        quantity_step=rule.quantity_step, minimum_quantity=rule.minimum_quantity,
+                        minimum_order_cost_usd=rule.minimum_order_cost_usd,
+                        order_minimum_verified=True, order_minimum_source=rule.order_minimum_source,
+                        cash_quantum_usd=rule.cash_quantum_usd, price_bands=bands,
+                        settlement_rules_fingerprint=market.identity(), verified=True,
+                        source=f"family:{rule.digest()}:{match.rules_sha256}")
+                    fee = kalshi_taker_fee_bound(instrument, metadata["series"],
+                        metadata["series_changes"], market_response={"market": row},
+                        event_response=metadata["event"],
+                        event_changes_response=metadata["event_changes"],
+                        market_series_ticker=match.native_event_id.split("-", 1)[0],
+                        market_event_ticker=match.native_event_id,
+                        observed_at=metadata["observed_at"], ttl_seconds=300)
+                except (KeyError, ValueError, TypeError):
+                    return 0
+                mapping = NativeMarketMapping(market=market, instrument=instrument, fee_bound=fee,
+                    source_event_id=match.native_event_id,
+                    source_market_id=match.native_market_id)
+            elif venue == "prophetx":
+                native = monitor.client.public_market_data.catalog.get(
+                    (match.native_event_id, match.native_market_id))
+                event = monitor.research_events.get(match.native_event_id)
+                if (not isinstance(native, dict) or not isinstance(event, dict)
+                        or native.get("status") != "active"
+                        or native.get("type") not in {None, "moneyline"}
+                        or native.get("sub_type") != "moneyline"
+                        or native.get("period") not in {"FULL", "full", "full_game"}
+                        or f"{native.get('type')}|{native.get('sub_type')}|{native.get('period')}"
+                            not in rule.allowed_native_rule_texts
+                        or match.native_strike_id is None
+                        or native.get("strikes", {}).get(match.native_strike_id, {}).get("outcome_id")
+                            != match.native_outcome_id):
+                    return 0
+                try:
+                    instrument = NativeInstrument(venue=venue, instrument_id=match.native_strike_id,
+                        canonical_market_id=market.id, outcome=match.outcome,
+                        native_outcome=match.native_outcome_id, quantity_unit="usd_stake",
+                        price_format="american", quantity_step=rule.quantity_step,
+                        minimum_quantity=rule.minimum_quantity,
+                        minimum_order_cost_usd=rule.minimum_order_cost_usd,
+                        order_minimum_verified=True, order_minimum_source=rule.order_minimum_source,
+                        cash_quantum_usd=rule.cash_quantum_usd,
+                        settlement_rules_fingerprint=market.identity(), verified=True,
+                        source=f"family:{rule.digest()}:{match.rules_sha256}")
+                    fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
+                        per_unit_usd=rule.prophetx_winnings_fee_upper_per_stake,
+                        per_fill_usd="0", fixed_order_usd="0",
+                        fee_payment_timing="winnings_only", verified=True,
+                        source=rule.prophetx_fee_source, observed_at=rule.approved_at,
+                        valid_until=rule.expires_at)
+                except (ValueError, TypeError):
+                    return 0
+                mapping = NativeMarketMapping(market=market, instrument=instrument, fee_bound=fee,
+                    source_event_id=match.native_event_id,
+                    source_market_id=match.native_market_id,
+                    prop_sub_type=native.get("sub_type"),
+                    source_timestamp_unit=rule.prophetx_source_timestamp_unit,
+                    timestamp_unit_evidence=rule.prophetx_timestamp_unit_evidence)
+            else:
+                return 0
+            new_mappings.append(mapping)
+        try:
+            # Validate both outcomes and evidence as one transaction before
+            # touching the active index. A partial family is never executable.
+            shadow = NativeBookMapper(self.mapper.mappings)
+            shadow.dynamic_rule_digests = dict(self.mapper.dynamic_rule_digests)
+            shadow.dynamic_evidence = dict(self.mapper.dynamic_evidence)
+            prepared = []
+            for item in new_mappings:
+                match = next(row for row in selected if row.outcome == item.instrument.outcome)
+                evidence = {
+                    "source_event_id": match.source_event_id,
+                    "source_identity": market.identity(),
+                    "approved_family_version": rule.rule_version,
+                    "approved_family_digest": rule.digest(),
+                    "native_event_id": match.native_event_id,
+                    "native_market_id": match.native_market_id,
+                    "native_outcome_id": match.native_outcome_id,
+                    "native_instrument_id": item.instrument.instrument_id,
+                    "native_rule_sha256": match.rules_sha256,
+                    "native_rule_excerpt": match.rules_excerpt,
+                    "native_settlement_provenance": (rule.prophetx_native_settlement_evidence
+                        if venue == "prophetx" else match.rules_excerpt),
+                    "fee_schedule_source": item.fee_bound.source,
+                    "fee_schedule_bound": item.fee_bound.model_dump(mode="json"),
+                    "catalog_observed_at": match.catalog_observed_at.isoformat(),
+                    "fee_observed_at": item.fee_bound.observed_at.isoformat(),
+                }
+                shadow.register_family_mapping(item, rule_digest=rule.digest(), evidence=evidence)
+                prepared.append((item, evidence))
+            for item, evidence in prepared:
+                self.mapper.register_family_mapping(item, rule_digest=rule.digest(), evidence=evidence)
+        except ValueError:
+            return 0
+        return len(new_mappings)
+
+    def reconcile_family_catalog(self, venue, market, matches, monitor) -> int:
+        """A contradictory refreshed catalog revokes this fixture, not its audit trail."""
+        key = (venue, market.id)
+        had_mapping = bool(self.mapper and any(
+            name == venue and market_id == market.id
+            for name, market_id, _ in self.mapper.dynamic_rule_digests))
+        accepted = NativeRuntime.onboard_family_matches(self, venue, market, matches, monitor)
+        invalidated = getattr(self, "invalidated_family_markets", None)
+        if invalidated is None:
+            self.invalidated_family_markets = invalidated = set()
+        if accepted == 2:
+            invalidated.discard(key)
+        elif had_mapping:
+            invalidated.add(key)
+        return accepted
 
     def research_discovery_status(self, market, comparisons):
         """Explain the first observed research-stage stop without asserting unseen depth."""
@@ -660,7 +849,7 @@ class NativeRuntime:
                 if market.extensions.get("research_only") or not market.extensions.get("normal_outcome_reviewed"):
                     blockers.append("Sportsbook normal-outcome identity has no reviewed execution rule")
                 profile = self.profile_for(venue) if hasattr(self, "profile_for") else None
-                if profile is None or market.id not in profile.market_ids:
+                if not NativeRuntime.profile_permits_market(self, profile, market.id, match.outcome):
                     blockers.append("No account-bound recurring launch scope selects this exact market")
                 if margin is None:
                     blockers.append("No approved source-uncertainty allowance is available")
@@ -682,6 +871,24 @@ class NativeRuntime:
     async def _kalshi_account_exchange_index(self, client, profile):
         """Resolve the exact pilot shard from current public native listings."""
         review = self.structural_review
+        if getattr(profile, "family_rule", None) is not None:
+            rule = profile.family_rule
+            mappings = [item for item in self.mapper.mappings if
+                item.instrument.venue == "kalshi" and
+                self.mapper.dynamic_rule_digests.get(("kalshi", item.market.id,
+                    item.instrument.outcome)) == rule.digest()]
+            if not mappings or any(item.instrument.exchange_index != rule.kalshi_exchange_index
+                                   for item in mappings):
+                raise ValueError("No current family mapping on the approved Kalshi shard")
+            from ..venues.reconciliation import _object
+            from urllib.parse import quote as urlquote
+            ticker = mappings[0].instrument.instrument_id
+            response = await client.request("GET", f"/markets/{urlquote(ticker, safe='')}", authenticated=False)
+            listing = _object(_object(response, "Kalshi market listing").get("market"), "Kalshi market")
+            if (listing.get("ticker") != ticker or listing.get("exchange_index") != rule.kalshi_exchange_index
+                    or listing.get("event_ticker") != mappings[0].source_event_id):
+                raise ValueError("Kalshi family market shard or event changed")
+            return rule.kalshi_exchange_index
         if (review is None or review.native_venue != "kalshi"
                 or review.canonical_market_id not in profile.market_ids):
             raise ValueError("No reviewed Kalshi market for account index lookup")
@@ -812,13 +1019,26 @@ class NativeRuntime:
             raise RiskRejected("Native release gate has unresolved checks")
         p = self.profile_for(order.venue)
         if (p is None or order.venue != p.venue or order.mode != p.environment or
-                order.account_fingerprint != p.account_fingerprint or order.market_id not in p.market_ids or
+                order.account_fingerprint != p.account_fingerprint or
+                not NativeRuntime.profile_permits_market(self, p, order.market_id,
+                    getattr(order, "outcome", None)) or
                 order.strategy not in p.strategy_ids):
             raise RiskRejected("Native order is outside the authorized launch scope")
         market = getattr(self.engine, "markets", {}).get(order.market_id)
         if hasattr(self.engine, "markets") and market is None:
             raise RiskRejected("Native canonical market is unavailable")
         if market is not None:
+            if getattr(p, "family_rule", None) is not None:
+                rule = p.family_rule
+                source_policy = self.engine.settings.pricing.trusted_pilot_policy
+                if (not rule.approved_at <= utcnow() < rule.expires_at
+                        or source_policy.market_scope != rule.scope
+                        or not source_policy.enabled or not source_policy.owner_approved):
+                    raise RiskRejected("Recurring family and source approval changed or expired")
+                facts = self.runtime_facts(order.venue)
+                checked = next((item for item in facts.markets if item.market_id == market.id), None)
+                if checked is None or not family_market_ready(checked, p):
+                    raise RiskRejected("This family market has no current exact references, fees or native depth")
             source_config = market_config(self.engine.settings.pricing, market)
             if source_config.reference_quality_mode == "trusted_provider":
                 pilot = source_config.trusted_pilot_policy
@@ -919,10 +1139,13 @@ class NativeRuntime:
         if book is None:
             raise RiskRejected("Native executable book is missing")
         try:
-            fair = fair_value(market, list(self.engine.quotes.get(market.id, {}).values()), self.engine.settings.pricing)
+            from .multi_book_consensus import native_live_pricing
+            quotes = list(self.engine.quotes.get(market.id, {}).values())
+            pricing = native_live_pricing(market, quotes, self.engine.settings.pricing)
+            fair = fair_value(market, quotes, pricing)
             if self.engine.settings.mode == "production" and not fair.live_execution_allowed:
                 raise NoSignal("Reference profile has not been validated for live execution")
-            native_revalidate_intent(order.intent, market, fair, book, self.engine.settings.pricing,
+            native_revalidate_intent(order.intent, market, fair, book, pricing,
                                      remaining_quantity=order.quantity-order.filled_quantity,
                                      fees_already_paid_usd=order.fees)
             risk = self.engine.risk.config
@@ -1048,7 +1271,7 @@ class NativeRuntime:
                 or not 0 <= age_ms <= self.engine.risk.config.max_candidate_age_ms):
             reasons.append("Current canonical market or synchronized executable book changed")
         profile = self.profile_for(candidate.venue)
-        if profile is None or candidate.market_id not in profile.market_ids:
+        if not NativeRuntime.profile_permits_market(self, profile, candidate.market_id, candidate.outcome):
             reasons.append("No account-bound launch scope selects this exact market")
         else:
             try:
@@ -1113,7 +1336,10 @@ class NativeRuntime:
             candidates=tuple(c.model_dump(mode="json") for c in candidates),
             market=self.engine.markets[market_id].model_dump(mode="json"),
             reference_quotes=tuple(q.model_dump(mode="json") for q in self.engine.quotes.get(market_id, {}).values()),
-            pricing_policy=self.engine.settings.pricing.model_dump(mode="json"))
+            pricing_policy=self.engine.settings.pricing.model_dump(mode="json"),
+            mapping_evidence=tuple(self.mapper.dynamic_evidence.get((book.instrument.venue,
+                market_id, book.instrument.outcome), {}) for book in books)
+                if getattr(self, "mapper", None) else ())
         self.signals[market_id] = observation
         await self.engine.bus.publish(Envelope(schema_name="native.signal", source="native_positive_ev", payload=observation))
         for candidate in candidates:
@@ -1151,6 +1377,26 @@ class NativeRuntime:
                     if venue == "polymarket_us":
                         adapter.seed_fills(order.venue_order_id, order.intent, self.manager.recovered_fills(order.id))
             self.manager.register(p.venue, adapter)
+        if adapter is not None and p.family_rule is not None:
+            from ..venues.bridge import VerifiedVenueMapping
+            for mapping in self.mapper.mappings:
+                i = mapping.instrument
+                if i.venue != venue or not self.profile_permits_market(p, mapping.market.id, i.outcome):
+                    continue
+                key = (mapping.market.id, i.outcome)
+                verified = VerifiedVenueMapping(canonical_market_id=mapping.market.id,
+                    canonical_outcome=i.outcome, native_instrument_id=i.instrument_id,
+                    native_outcome=i.native_outcome, native_exchange_index=i.exchange_index,
+                    settlement_fingerprint=mapping.market.identity(),
+                    mapping_evidence=i.source, verified=True,
+                    fee_schedule_verified=mapping.fee_bound.verified,
+                    native_payout_usd=i.payout_per_unit_usd,
+                    native_quantity_unit=i.quantity_unit)
+                prior = adapter.mappings.get(key)
+                if prior is not None and prior != verified:
+                    self.engine.risk.halt("Dynamic native mapping changed after adapter binding")
+                    return None
+                adapter.mappings[key] = verified
         if adapter.client is not client:
             self.engine.risk.halt("Native account connection changed; restart recovery required")
             return None
@@ -1399,13 +1645,20 @@ class NativeRuntime:
                 circuit_open=not connected, transport=transport,
                 synchronization_ready=synchronized))
         markets = []
-        for market_id in p.market_ids if p else ():
+        family_ids = ({market_id for venue_name, market_id, outcome in self.mapper.dynamic_rule_digests
+                       if p and venue_name == p.venue
+                       and self.mapper.dynamic_rule_digests[(venue_name, market_id, outcome)]
+                       == p.family_rule.digest()} if p and p.family_rule and self.mapper else set())
+        for market_id in (*p.market_ids, *sorted(family_ids)) if p else ():
             market = engine.markets.get(market_id)
             books = [b for key, b in self.books.items() if key[0] == market_id and key[1] == venue]
             refs, fair = (), None
             if market:
                 try:
-                    fair = fair_value(market, list(engine.quotes.get(market_id, {}).values()), engine.settings.pricing, now=now)
+                    from .multi_book_consensus import native_live_pricing
+                    quotes = list(engine.quotes.get(market_id, {}).values())
+                    pricing = native_live_pricing(market, quotes, engine.settings.pricing, now)
+                    fair = fair_value(market, quotes, pricing, now=now)
                     refs = fair.references
                 except NoSignal: pass
             ages = [b.age_ms(now) for b in books]
@@ -1420,7 +1673,8 @@ class NativeRuntime:
                 oldest_reference_age = (max(delivery_ages) if delivery_ages and all(
                     isinstance(age, (int, float)) and age >= 0 for age in delivery_ages) else None)
                 age_basis = "provider_delivery"
-            exact_mapping = bool(market and books and all(b.market_fingerprint == market.identity()
+            exact_mapping = bool(market and books and (venue, market_id) not in self.invalidated_family_markets
+                and all(b.market_fingerprint == market.identity()
                 and b.instrument.settlement_rules_fingerprint == market.identity() and b.instrument.verified
                 and b.instrument.canonical_market_id == market_id and b.instrument.venue == venue
                 and b.instrument.outcome in market.outcomes for b in books))
@@ -1801,6 +2055,7 @@ class NativeSignalObservation(Contract):
     market: dict = Field(default_factory=dict)
     reference_quotes: tuple[dict, ...] = ()
     pricing_policy: dict = Field(default_factory=dict)
+    mapping_evidence: tuple[dict, ...] = ()
     # source observations and quantity-specific cash calculations stay nested;
     # no conversion into legacy one-dollar signal/fill records.
     evaluated_at: datetime = Field(default_factory=utcnow)

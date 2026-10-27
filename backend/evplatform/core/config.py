@@ -11,7 +11,7 @@ from .paths import PROJECT_ROOT
 class TrustedPilotMarketScope(BaseModel):
     """A rule-bound normal question, not approval of a discovered native ID."""
     model_config = ConfigDict(extra="forbid")
-    venue: Literal["novig", "prophetx"]
+    venue: Literal["kalshi", "novig", "prophetx"]
     sport: Literal["football", "basketball", "baseball", "hockey"]
     league: Literal["NFL", "NBA", "MLB", "NHL"]
     market_type: Literal["player_prop", "moneyline"]
@@ -20,6 +20,9 @@ class TrustedPilotMarketScope(BaseModel):
                               "pitcher_strikeouts", "hits", "total_bases", "shots_on_goal"], ...] = ()
     period: Literal["FULL"] = "FULL"
     reviewed_normal_rule_id: str = Field(min_length=8)
+    # A family approval needs an attributable source contract for the ordinary
+    # winner and overtime scope. Unknown exceptional settlement stays unknown.
+    source_normal_rule_evidence: str | None = None
 
     @model_validator(mode="after")
     def distinct_statistics(self):
@@ -38,6 +41,9 @@ class TrustedPilotMarketScope(BaseModel):
             if (self.sport != "football" or self.market_type != "player_prop"
                     or not self.statistics or not set(self.statistics) <= {"receptions", "receiving_yards"}):
                 raise ValueError("Novig pilot scope requires reviewed NFL player props")
+        elif self.venue == "kalshi":
+            if self.sport != "basketball" or self.league != "NBA" or self.market_type != "moneyline" or self.statistics:
+                raise ValueError("Kalshi family scope requires reviewed NBA moneylines")
         elif (self.market_type == "moneyline" and self.statistics
                 or self.market_type == "player_prop" and (not self.statistics or not set(self.statistics) <= allowed)):
             raise ValueError("ProphetX pilot scope requires reviewed normal moneylines or supported player props")
@@ -70,6 +76,9 @@ class TrustedPilotPolicy(BaseModel):
     provider_id: str | None = None
     crosscheck_provider_id: str | None = None
     trusted_books: list[str] = Field(default_factory=list)
+    # Required only for the live multi-book route. These are owner-reviewed
+    # statistical weights, independent of transport freshness priority.
+    reference_weights_percent: dict[str, Decimal] | None = None
     min_distinct_books: int = Field(default=2, ge=2)
     accept_unknown_active_status: bool = False
     accept_unknown_quote_observation_age: bool = False
@@ -110,6 +119,12 @@ class TrustedPilotPolicy(BaseModel):
                     or len(set(self.trusted_books)) < self.min_distinct_books
                     or len(set(self.trusted_books)) != len(self.trusted_books)):
                 raise ValueError("Trusted live pilot requires an exact, complete owner-reviewed source policy")
+            if self.reference_weights_percent is not None and (
+                    set(self.reference_weights_percent) != set(self.trusted_books)
+                    or any(not weight.is_finite() or weight <= 0
+                           for weight in self.reference_weights_percent.values())
+                    or sum(self.reference_weights_percent.values()) != Decimal(100)):
+                raise ValueError("Approved live weights must cover exactly the trusted books and total 100 percent")
             if self.market_scope is not None and self.min_distinct_books < 3:
                 raise ValueError("Dynamic pilot requires at least three distinct sportsbook references")
             if (not self.recurring_authorization and
@@ -155,6 +170,9 @@ class PricingConfig(BaseModel):
     # An independent read-only strategy. It never changes the reference
     # profile used by the central execution engine.
     multi_book_consensus_enabled: bool = False
+    # Opt-in execution adapter for the existing consensus calculation. It is
+    # inert without an approved scoped trusted source policy and launch scope.
+    live_multi_book_enabled: bool = False
     multi_book_consensus_books: list[str] = Field(default_factory=lambda: [
         "fanduel", "draftkings", "caesars", "bet365", "betmgm", "betonline",
         "pinnacle", "circa", "bookmaker", "ballys", "betrivers", "espnbet",
@@ -175,6 +193,12 @@ class PricingConfig(BaseModel):
 
     @model_validator(mode="after")
     def positive_weights(self):
+        if self.live_multi_book_enabled and (not self.multi_book_consensus_enabled
+                or not self.trusted_pilot_policy.enabled
+                or not self.trusted_pilot_policy.owner_approved
+                or not self.trusted_pilot_policy.recurring_authorization
+                or self.trusted_pilot_policy.reference_weights_percent is None):
+            raise ValueError("Live consensus needs a separate approved recurring source policy")
         if any(not key.startswith("research:") or len(key) > 160 or not value.is_finite()
                or not 0 <= value < 1 for key, value in self.trusted_research_market_margins.items()):
             raise ValueError("Research allowances require exact research market IDs and finite probabilities")

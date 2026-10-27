@@ -90,6 +90,15 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
            or p.get("strategy_ids") != ["native_positive_ev"]
            or not p.get("markets") for p in profiles):
         return "launch_scope_outside_recurring_authorization"
+    for profile in profiles:
+        family = profile.get("family_rule")
+        if family is not None and (not isinstance(family, dict)
+                or not isinstance(family.get("scope"), dict)
+                or family["scope"].get("venue") != profile["venue"]
+                or shared._time(family.get("approved_at")) is None
+                or (expiry := shared._time(family.get("expires_at"))) is None
+                or expiry <= datetime.now(timezone.utc)):
+            return "reviewed_family_rule_expired_or_changed"
     pricing = setup.get("pricing") or {}
     try:
         policy = TrustedPilotPolicy.model_validate(pricing.get("trusted_pilot_policy") or {})
@@ -99,6 +108,14 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
             or not policy.automatic_followups or policy.maximum_native_attempts is not None
             or shared._money(policy.uncertainty_margin_probability) != UNCERTAINTY):
         return "waiting_for_recurring_source_review"
+    if any(profile.get("family_rule") is not None for profile in profiles):
+        if (pricing.get("live_multi_book_enabled") is not True
+                or policy.reference_weights_percent is None
+                or policy.market_scope is None
+                or any(profile["family_rule"].get("scope") !=
+                       policy.market_scope.model_dump(mode="json")
+                       for profile in profiles)):
+            return "waiting_for_recurring_source_review"
     rows = state.get("markets") or []
     if not isinstance(rows, list):
         return "selected_market_not_in_current_canonical_state"

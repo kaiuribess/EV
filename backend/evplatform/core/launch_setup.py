@@ -165,9 +165,12 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         any(record.plugin.mapper and signature in record.plugin.mapper.mappings
             for record in engine.registry.records.values() if isinstance(record.plugin, ProviderBridge))
         for signature in structural.source_signatures.values()))
+    from .readiness import family_market_ready
     for venue, profile in profiles.items():
         scoped_markets = []
-        for market_id in profile.market_ids:
+        dynamic_ids = (tuple(item.market_id for item in native.runtime_facts(venue).markets
+            if family_market_ready(item, profile)) if profile.family_rule else ())
+        for market_id in (*profile.market_ids, *dynamic_ids):
             market = engine.markets.get(market_id)
             name = market_id if market is None else " · ".join(str(value) for value in (
                 market.event_name, market.market_type, market.player, market.statistic,
@@ -189,30 +192,41 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
             "account_fingerprint": profile.account_fingerprint,
             "markets": scoped_markets, "strategy_ids": list(profile.strategy_ids),
             "provider_ids": list(profile.provider_ids), "settlement_policy": profile.settlement_policy,
-            "validation_pilot": profile.validation_pilot})
+            "validation_pilot": profile.validation_pilot,
+            "family_rule": profile.family_rule.model_dump(mode="json") if profile.family_rule else None})
     requirements = []
 
     def requirement(code, passed, title, detail, *, external=False):
         requirements.append({"code": code, "status": "passed" if passed else "pending",
             "title": title, "detail": detail, "external_evidence_required": external})
 
-    requirement("scope.markets", bool(native_markets & real_reference_markets), "Verify matching real markets",
+    dynamic_markets = {item.market_id for profile in profiles.values() if profile.family_rule
+        for item in native.runtime_facts(profile.venue).markets
+        if family_market_ready(item, profile)}
+    requirement("scope.markets", bool((native_markets | dynamic_markets) & real_reference_markets), "Verify matching real markets",
         "Match event, player, line and settlement rules across real sportsbook references and executable venue books.", external=True)
     requirement("scope.profiles", bool(profiles) and not native.profile_error, "Review the exact accounts and limits",
         "A saved limits draft is not an applied launch profile. Each selected account needs its own verified identity and market scope.")
     pricing = engine.settings.pricing
     reference_profiles_ready = True
-    reference_profiles_ready_by_venue = {venue: bool(profile.market_ids)
+    reference_profiles_ready_by_venue = {venue: bool(profile.market_ids or profile.family_rule)
         for venue, profile in profiles.items()}
     if pricing.reference_profile_mode == "strict":
         from .reference_profiles import profile_for_market
 
         scoped = []
         for launch_profile in profiles.values():
-            for market_id in launch_profile.market_ids:
+            family_ids = (tuple(item.market_id for item in native.runtime_facts(launch_profile.venue).markets
+                if family_market_ready(item, launch_profile)) if launch_profile.family_rule is not None else ())
+            for market_id in (*launch_profile.market_ids, *family_ids):
                 market = engine.markets.get(market_id)
                 try:
-                    selected = profile_for_market(pricing, market, now) if market else None
+                    if market is not None and pricing.live_multi_book_enabled:
+                        from .multi_book_consensus import native_live_pricing
+                        quotes = list(engine.quotes.get(market_id, {}).values())
+                        selected = profile_for_market(native_live_pricing(market, quotes, pricing, now), market, now)
+                    else:
+                        selected = profile_for_market(pricing, market, now) if market else None
                 except ValueError:
                     selected = None
                 scoped.append((launch_profile, market, selected))

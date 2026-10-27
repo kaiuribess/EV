@@ -875,6 +875,11 @@ class NativeMonitor(Plugin):
                     # old snapshot may remain usable only until its real expiry.
                     if age >= 360 or age < 0:
                         self.research_fee_metadata.pop(event_id, None)
+        if self.manifest.name in {"kalshi", "prophetx"}:
+            reconcile = getattr(getattr(self.engine, "native", None), "reconcile_family_catalog", None)
+            for market in markets:
+                if callable(reconcile):
+                    reconcile(self.manifest.name, market, result.get(market.id, ()), self)
         return list(dict.fromkeys(priority))
 
     def _research_match_refresh_due(self, elapsed: int) -> bool:

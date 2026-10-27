@@ -40,9 +40,23 @@ def supports_prophetx_settlement_scope(profile, adapter, mappings, managed_order
                     and now-baseline > timedelta(days=2))):
             return False
         reviewed = NativeBookMapper(tuple(NativeMarketMapping.model_validate(m.model_dump()) for m in mappings))
-        scoped = [m for m in reviewed.mappings if m.instrument.venue == profile.venue and m.market.id in profile.market_ids]
-        if {m.market.id for m in scoped} != set(profile.market_ids):
-            return False
+        family = profile.family_rule
+        scoped = [m for m in reviewed.mappings if m.instrument.venue == profile.venue
+            and (m.market.id in profile.market_ids or family is not None
+                 and family.matches(m.market)
+                 and m.instrument.source.startswith(f"family:{family.digest()}:")
+                 and m.market.start_time > now
+                 and m.fee_bound.observed_at <= now < m.fee_bound.valid_until)]
+        if family is None:
+            if {m.market.id for m in scoped} != set(profile.market_ids):
+                return False
+        else:
+            complete = {market_id for market_id in {m.market.id for m in scoped}
+                if {m.instrument.outcome for m in scoped if m.market.id == market_id}
+                   == set(next(m.market for m in scoped if m.market.id == market_id).outcomes)}
+            scoped = [m for m in scoped if m.market.id in complete]
+            if not scoped or not family.approved_at <= now < family.expires_at:
+                return False
         for m in scoped:
             i = m.instrument
             execution = adapter.mappings.get((m.market.id, i.outcome))

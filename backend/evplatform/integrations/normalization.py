@@ -1040,6 +1040,33 @@ class TrustedSourceProjector:
                 continue
             market, quote = projected
             config = market_config(self.pricing_getter(), market)
+            policy = config.trusted_pilot_policy
+            scope = policy.market_scope
+            if (policy.enabled and policy.owner_approved and scope is not None
+                    and scope.source_normal_rule_evidence
+                    and config.normal_outcome_policy == "winner_only_binary"
+                    and offer.market_key == "h2h" and offer.period in {"FULL", "full_game"}
+                    and offer.provider in {policy.provider_id, policy.crosscheck_provider_id}
+                    and offer.bookmaker in policy.trusted_books
+                    and market.sport == scope.sport and market.league == scope.league
+                    and market.market_type == scope.market_type == "moneyline"
+                    and market.settlement.period == "FULL"
+                    and len(market.participants) == 2
+                    and set(market.outcomes) == set(market.participants)):
+                # Approval establishes only the ordinary full-game question.
+                # It never converts a heartbeat to quote observation or an
+                # unknown market status to affirmative active evidence.
+                settlement = market.settlement.model_copy(update={
+                    "overtime": "included", "push_rule": "not_applicable"})
+                market = market.model_copy(update={"id": market.id.replace("research:", "reviewed:", 1),
+                    "settlement": settlement, "extensions": {**market.extensions,
+                        "research_only": False, "normal_outcome_reviewed": True,
+                        "reviewed_normal_rule_id": scope.reviewed_normal_rule_id,
+                        "source_normal_rule_evidence": scope.source_normal_rule_evidence}})
+                quote = quote.model_copy(update={"market_id": market.id,
+                    "market_fingerprint": market.identity(), "normal_outcome_verified": True,
+                    "normal_outcome_evidence": (scope.reviewed_normal_rule_id + ": "
+                        + scope.source_normal_rule_evidence)})
             if config.reference_profile_mode != "strict" or not (
                     config.reference_quality_mode == "trusted_provider"
                     or config.multi_book_consensus_enabled):

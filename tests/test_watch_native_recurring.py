@@ -9,6 +9,7 @@ import httpx
 from scripts import watch_native_one_shot as one_shot
 from scripts import watch_native_recurring as gate
 from tests.test_watch_native_one_shot import state, setup, DIGEST
+from tests.test_family_onboarding import approved_config, family_rule, source_fixture
 
 
 NOW = datetime(2026, 10, 26, 18, 0, tzinfo=timezone.utc)
@@ -68,7 +69,7 @@ def server(monkeypatch, tmp_path, *, armed=False, ready=True, orders=None):
             if body["auto_trade"]:
                 assert body["expected_launch_digest"] == DIGEST
                 assert body["authorization_expires_at"] == authorization()["expires_at"]
-                assert body["native_venues"] == ["novig"]
+                assert body["native_venues"] == json.loads(gate.AUTH_PATH.read_text())["venues"]
             current.update(auto_trade=body["auto_trade"], kill_switch=body["kill_switch"],
                            native_authorization_expires_at=body.get("authorization_expires_at"),
                            native_enabled_venues=body.get("native_venues", []))
@@ -149,3 +150,29 @@ def test_recurring_watcher_direct_windows_entry_point_imports():
     result = subprocess.run([sys.executable, gate.__file__, "--help"],
         cwd=one_shot.ROOT, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_recurring_family_scope_arms_without_a_static_market_list(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path)
+    config, scope = approved_config()
+    market, _ = source_fixture(config, NOW, "OFFLINE-family-game", NOW+timedelta(hours=5))
+    rule = family_rule(scope, NOW)
+    launch["launch_scope"][0].update(venue="kalshi", family_rule=rule.model_dump(mode="json"),
+        markets=[{"id": market.id}])
+    launch["activation"]["by_venue"] = {"kalshi": {"available": True, "scope_digest": DIGEST}}
+    launch["pricing"] = config.model_dump(mode="json")
+    current["markets"] = [market.model_dump(mode="json")]
+    saved = authorization()
+    saved["venues"] = ["kalshi"]
+    gate.AUTH_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    assert gate.tick(now=NOW, check_only=True) == "ready"
+    assert ("POST", "/api/control") not in calls
+    assert gate.tick(now=NOW) == "armed"
+    assert current["native_enabled_venues"] == ["kalshi"]
+    # A new game under the same exact rule does not alter the authorized
+    # launch digest; execution still requires current facts from the server.
+    later, _ = source_fixture(config, NOW, "OFFLINE-later-game", NOW+timedelta(days=1))
+    launch["launch_scope"][0]["markets"] = [{"id": later.id}]
+    current["markets"] = [later.model_dump(mode="json")]
+    assert gate.tick(now=NOW) == "armed"
+    assert calls.count(("POST", "/api/control")) == 1
