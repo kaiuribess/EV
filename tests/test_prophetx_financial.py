@@ -165,11 +165,30 @@ async def test_empty_order_null_cannot_bypass_reporting_clock(case, clock):
                               observed_at=NOW, require_clock=False)
 
 
-@pytest.mark.parametrize("cursor,nonempty", [(None, True), (False, False), (0, False), (" ", False)])
+@pytest.mark.parametrize("cursor,nonempty", [(False, False), (0, False), (" ", False)])
 async def test_empty_history_compatibility_does_not_weaken_other_cursors(case, cursor, nonempty):
     client = case[1]
     client.overrides["/v4/mm/get_order_history"] = lambda _: {
         "data": {"orders": [deepcopy(client.row)] if nonempty else [], "next_cursor": cursor},
+        "last_synced_at": iso()}
+    with pytest.raises(ReconciliationError):
+        await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
+
+
+async def test_observed_short_nonempty_order_null_cursor_has_fresh_source_clock(case):
+    client = case[1]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [deepcopy(client.row)], "next_cursor": None},
+        "last_synced_at": iso()}
+    result = await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
+    assert len(result.rows) == 1
+    assert result.end_marker == "observed_short_order_null"
+
+
+async def test_full_order_page_with_null_cursor_is_not_complete(case):
+    client = case[1]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [deepcopy(client.row)] * 1000, "next_cursor": None},
         "last_synced_at": iso()}
     with pytest.raises(ReconciliationError):
         await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)

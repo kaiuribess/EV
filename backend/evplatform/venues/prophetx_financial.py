@@ -99,18 +99,21 @@ def reporting_cursor(data: dict, *, endpoint: str, collection: str) -> tuple[str
     """Interpret the cursor, separately from account/history reconciliation.
 
     The wallet guide documents an absent final cursor. The authenticated order
-    history service also returns an empty orders array with an explicit null
-    cursor. Support that observed representation only for this endpoint/shape;
-    never generalize it to nonempty pages or another venue's pagination.
+    history service also returns an explicit null cursor on a terminal page,
+    including a short nonempty page. Support that observed representation only
+    for this endpoint and a page below its documented 1,000-row maximum.
+    The caller must still validate the reporting watermark.
     """
     if "next_cursor" not in data:
         return None, "absent"
     cursor = data["next_cursor"]
     if cursor == "":
         return None, "empty_string"
-    if (cursor is None and endpoint == "/v4/mm/get_order_history" and collection == "orders"
-            and data.get("orders") == []):
-        return None, "observed_empty_order_null"
+    if cursor is None and endpoint == "/v4/mm/get_order_history" and collection == "orders":
+        orders = data.get("orders")
+        if isinstance(orders, list) and len(orders) < 1000:
+            return None, ("observed_empty_order_null" if not orders
+                          else "observed_short_order_null")
     if not isinstance(cursor, str) or not cursor.strip():
         raise ReconciliationError("Invalid ProphetX reporting cursor")
     return cursor, None
