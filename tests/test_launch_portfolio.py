@@ -104,6 +104,22 @@ async def test_pending_external_raw_order_blocks_production_execution(tmp_path):
     assert not runtime.report().safe_to_arm
 
 
+async def test_single_reviewed_profile_binds_account_only_external_exposure_scope(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    profile, _, _ = ready_fixture("production")
+    profile = profile.model_copy(update={"limits": profile.limits.model_copy(update={
+        "external_exposure_scope": "profile_account"})})
+    (data / "launch_profile.json").write_text(profile.model_dump_json(), encoding="utf-8")
+    engine = Engine(Settings(mode="production", data_dir=str(data),
+        database_path=str(tmp_path / "native.db")))
+    runtime = NativeRuntime(engine)
+    runtime.manager.start = AsyncMock()
+    await runtime.start()
+    assert runtime.engine.risk.native_exposure_scope == (
+        profile.venue, profile.account_fingerprint)
+
+
 async def test_portfolio_refresh_visits_each_account_under_one_coordinator(system):
     runtime = runtime_for(system)
     a, b, _, _ = accounts()

@@ -50,6 +50,9 @@ class LiveLimits(StrictRecord):
     max_native_order_attempts: int | None = Field(default=None, ge=1)
     max_native_daily_attempts: int | None = Field(default=None, ge=1)
     max_native_daily_debit_usd: Decimal | None = Field(default=None, gt=0)
+    # Opt-in single-account recurring scope. The default keeps the existing
+    # portfolio-wide fence; the profile digest binds any narrower choice.
+    external_exposure_scope: Literal["global", "profile_account"] = "global"
 
     @field_validator("max_order_stake_usd", "max_event_exposure_usd", "max_player_exposure_usd",
                      "max_venue_exposure_usd", "max_correlated_exposure_usd",
@@ -264,6 +267,8 @@ class LaunchProfile(StrictRecord):
             payload["limits"].pop("max_native_daily_attempts")
         if self.limits.max_native_daily_debit_usd is None:
             payload["limits"].pop("max_native_daily_debit_usd")
+        if self.limits.external_exposure_scope == "global":
+            payload["limits"].pop("external_exposure_scope")
         return digest_json(payload)
 
 

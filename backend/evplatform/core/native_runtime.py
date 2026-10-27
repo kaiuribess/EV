@@ -145,6 +145,12 @@ class NativeRuntime:
         profiles = self.profiles_by_venue()
         primary = next(iter(profiles.values()), None)
         if primary and primary.environment == self.engine.settings.mode:
+            if primary.limits.external_exposure_scope == "profile_account":
+                if len(profiles) != 1:
+                    self.profile_error = "Account-scoped external exposure requires one launch account"
+                else:
+                    self.engine.risk.native_exposure_scope = (
+                        primary.venue, primary.account_fingerprint)
             from .execution_lease import ExecutionLease
             self.execution_lease = ExecutionLease("portfolio" if self.portfolio else primary.venue, primary.environment,
                                                   ledger_path=Path(self.engine.settings.database_path))
@@ -156,7 +162,7 @@ class NativeRuntime:
                 self.profile_error = "Native execution is owned by another local workspace/ledger, or its lock is unavailable"
             # Native money limits have no implicit defaults: only an explicitly
             # written profile selects them. This does not grant write access.
-            values = primary.limits.model_dump()
+            values = primary.limits.model_dump(exclude={"external_exposure_scope"})
             limits = {key if key == "unit_size_usd" else key.removesuffix("_usd"): value for key,value in values.items()}
             limits["live_max_order_stake"] = limits["max_order_stake"]
             limits["live_stake_authorized"] = True
@@ -1719,8 +1725,7 @@ class NativeRuntime:
             configured_limits=limits, enabled_strategy_ids=tuple(name for name,r in engine.registry.records.items()
                 if r.enabled and name == "native_positive_ev"),
             central_risk_enforced=execution_workers and available_queue("risk_queue"), opposing_position_guards=True,
-            external_exposure_bounded=not (getattr(self, "pending_external_orders", ())
-                or getattr(self, "unresolved_external_accounts", ())),
+            external_exposure_bounded=self.engine.risk.external_exposure_bounded(venue),
             durable_intents=storage_healthy and execution_workers,
             persistence_healthy=storage_healthy and worker("audit-enqueue") and available_queue("audit_queue"),
             signal_ledger_healthy=engine.signal_ledger.started and storage_healthy and worker("signal-ledger") and available_queue("signal_queue"),

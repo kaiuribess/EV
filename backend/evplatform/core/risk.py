@@ -54,8 +54,9 @@ class RiskEngine:
         # Authenticated cash already reflects their debit; they contribute only
         # to exposure and conservative position-conflict checks.
         self.external_positions = ()
-        # Other venues can be disabled independently, but their unknown
-        # exposure still vetoes every real-money reservation until bounded.
+        # The default fence is portfolio-wide. A reviewed single-account
+        # launch profile may explicitly narrow its monetary scope.
+        self.native_exposure_scope = None
         self.pending_external_orders = ()
         self.unresolved_external_accounts = ()
         self.duplicates = {}
@@ -104,6 +105,32 @@ class RiskEngine:
         return (sum((self.cost(o) for o in self.all_orders()), Decimal(0))
                 + sum((self.external_cost(o) for o in self.external_positions), Decimal(0)))
 
+    def _native_scope_matches(self, row):
+        scope = self.native_exposure_scope
+        return scope is None or (getattr(row, "venue", None),
+            getattr(row, "account_fingerprint", None)) == scope
+
+    def external_exposure_bounded(self, venue=None):
+        scope = self.native_exposure_scope
+        if scope is None:
+            return not (self.pending_external_orders or self.unresolved_external_accounts)
+        if venue is not None and venue != scope[0]:
+            return False
+        # Pending/reservation records have no account identity. A record on
+        # this venue still blocks; another venue cannot spend this account.
+        return not any(row.venue == scope[0] for row in (
+            *self.pending_external_orders, *self.unresolved_external_accounts))
+
+    def native_exposures(self, order):
+        if self.native_exposure_scope is None:
+            return self.exposures()
+        if not self._native_scope_matches(order):
+            raise RiskRejected("Native order is outside the reviewed account exposure scope")
+        return (sum((self.cost(row) for row in self.all_orders()
+                    if self._native_scope_matches(row)), Decimal(0))
+                + sum((self.external_cost(row) for row in self.external_positions
+                    if self._native_scope_matches(row)), Decimal(0)))
+
     @staticmethod
     def external_cost(position):
         # The wallet has already paid this amount. Reserve the remaining
@@ -125,11 +152,14 @@ class RiskEngine:
 
     def check_native_reservation(self, order, *, reserved=False, preview_only=False):
         """Shared limits for an exact-unit order; caller holds the shared OMS lock."""
+        if not self._native_scope_matches(order):
+            raise RiskRejected("Native order is outside the reviewed account exposure scope")
         if (not preview_only and order.mode in {"production", "sandbox"}
                 and getattr(order, "execution_origin", "automatic") == "automatic"
                 and order.venue not in self.native_enabled_venues):
             raise RiskRejected("Native venue is outside the active execution lease")
-        if order.mode == "production" and (self.pending_external_orders or self.unresolved_external_accounts):
+        if order.mode == "production" and not self.external_exposure_bounded(
+                getattr(order, "venue", None)):
             raise RiskRejected("Unbounded external account exposure blocks native execution")
         if preview_only:
             # Dry-run inspects every monetary/position limit while disarmed.
@@ -161,7 +191,8 @@ class RiskEngine:
             raise RiskRejected("Native durable reservation is missing or changed")
         self.check_order_limits(exclude_order_id=order.id if reserved else None)
         self.check_position_conflicts(order, order.market_snapshot, exclude_order_id=order.id if reserved else None)
-        others = [o for o in self.all_orders() if o.id != order.id]
+        others = [o for o in self.all_orders() if o.id != order.id
+                  and self._native_scope_matches(o)]
         if not reserved and any(o.client_order_id == order.client_order_id for o in self.all_orders()):
             raise RiskRejected("Client order ID already reserved")
         if not reserved and any(
@@ -180,13 +211,13 @@ class RiskEngine:
             limits.append(([o for o in others if o.player_id == order.player_id], self.config.max_player_exposure, "player"))
         for orders, limit, label in limits:
             external = sum((self.external_cost(p) for p in self.external_positions
-                if p.environment == order.mode and (label == "total" or
+                if self._native_scope_matches(p) and p.environment == order.mode and (label == "total" or
                     label == "venue" and p.venue == order.venue)), Decimal(0))
             if limit is not None and sum((self.cost(o) for o in orders), Decimal(0)) + external + cost > limit:
                 raise RiskRejected(f"Native {label} exposure limit reached")
 
     def check_native_daily_budget(self, order):
-        """Count durable native intents across venues on the UTC submission day.
+        """Count durable native intents in the approved scope on the UTC day.
 
         Rejected, unfilled and uncertain intents still consume an attempt. Their
         worst-case reserved debit remains charged to the daily budget; this is
@@ -199,7 +230,8 @@ class RiskEngine:
         today = utcnow().date()
         prior = []
         for existing in self.native_orders.values():
-            if existing.id == order.id or existing.mode != order.mode:
+            if (existing.id == order.id or existing.mode != order.mode
+                    or not self._native_scope_matches(existing)):
                 continue
             stamp = existing.created_at
             # Naive or future clocks cannot grant a fresh budget.
@@ -214,7 +246,8 @@ class RiskEngine:
             # this account's daily debit. Their cost is already reflected in
             # available cash; this addition applies only to the daily budget.
             prior_debit += sum((self.external_cost(item) for item in self.external_positions
-                if item.environment == order.mode and (item.recorded_at.tzinfo is None
+                if self._native_scope_matches(item) and item.environment == order.mode
+                and (item.recorded_at.tzinfo is None
                     or item.recorded_at.astimezone(timezone.utc).date() >= today)), Decimal(0))
             if prior_debit + order.reserved_cost > debit_cap:
                 raise RiskRejected("Daily native upfront debit limit reached")
@@ -268,7 +301,7 @@ class RiskEngine:
         if self.config.max_order_stake is None or max(required, order.reserved_cost) > self.config.max_order_stake:
             raise RiskRejected("Current order stake limit is below its reservation")
         limits = [
-            (self.exposures(), self.config.max_total_exposure, "total"),
+            (self.native_exposures(order), self.config.max_total_exposure, "total"),
             (sum(self.cost(o) for o in self.all_orders() if o.event_id == order.event_id),
              self.config.max_event_exposure, "event"),
             (sum(self.cost(o) for o in self.all_orders() if o.venue == order.venue),
@@ -298,6 +331,8 @@ class RiskEngine:
         family = risk_family(market)
         fingerprint = market.identity()
         for external in self.external_positions:
+            if not self._native_scope_matches(external):
+                continue
             # A raw external receipt has no reviewed canonical event/family ID.
             # Block the entire sport until such identity is established or the
             # actual position settles; never guess that another market is safe.

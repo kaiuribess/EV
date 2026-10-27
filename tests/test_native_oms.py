@@ -70,6 +70,40 @@ def test_other_venue_pending_external_order_blocks_real_reservation_but_not_rese
         risk.check_native_reservation(proposed, preview_only=True)
 
 
+def test_reviewed_account_scope_isolates_other_venue_inventory_but_not_its_own(market):
+    from types import SimpleNamespace
+
+    risk = RiskEngine(RiskConfig(live_max_order_stake=D("25"),
+        live_stake_authorized=True, max_native_daily_debit=D("25")))
+    base = order(market)
+    proposed = base.model_copy(update={"intent": base.intent.model_copy(update={
+        "mode": "production"}), "execution_origin": "manual"})
+    risk.native_exposure_scope = ("novig", "a" * 64)
+    risk.pending_external_orders = (PendingExternalOrder(venue="kalshi",
+        native_order_id="outside", source_artifact="kalshi_smoke.json",
+        source_sha256="a" * 64),)
+    other = SimpleNamespace(venue="prophetx", account_fingerprint="b" * 64,
+        environment="production", sport=market.sport, cost_usd=D("24"),
+        recorded_at=utcnow())
+    risk.external_positions = (other,)
+    assert risk.external_exposure_bounded("novig")
+    assert risk.exposures() == D("24")  # Reporting keeps the whole portfolio.
+    assert risk.native_exposures(proposed) == 0
+    risk.check_native_reservation(proposed, preview_only=True)
+    risk.pending_external_orders = (SimpleNamespace(venue="novig"),)
+    with pytest.raises(RiskRejected, match="Unbounded external account exposure"):
+        risk.check_native_reservation(proposed, preview_only=True)
+    risk.pending_external_orders = ()
+    risk.external_positions = (SimpleNamespace(venue="novig",
+        account_fingerprint="a" * 64, environment="production",
+        sport=market.sport, cost_usd=D(".97"), recorded_at=utcnow()),)
+    with pytest.raises(RiskRejected, match="external native position blocks this sport"):
+        risk.check_native_reservation(proposed, preview_only=True)
+    wrong_account = proposed.model_copy(update={"account_fingerprint": "c" * 64})
+    with pytest.raises(RiskRejected, match="outside the reviewed account exposure scope"):
+        risk.check_native_reservation(wrong_account, preview_only=True)
+
+
 class Adapter:
     def __init__(self, risk):
         self.risk, self.submissions, self.cancellations = risk, [], []
