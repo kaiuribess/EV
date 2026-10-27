@@ -89,6 +89,7 @@ class PolymarketUSClient(NativeTransport):
         super().__init__(settings or PolymarketUSSettings(), client)
         self._key = None
         self.authenticated = False
+        self.private_auth_failure: str | None = None
         self.reason = "Read-only personal US API monitor; native execution is unsupported"
         self.market_slugs: list[str] = []
         self.private_updates = True
@@ -203,6 +204,7 @@ class PolymarketUSClient(NativeTransport):
     async def connect(self):
         self._closed = False
         self.authenticated = False
+        self.private_auth_failure = None
         self.health = "connecting"
         try:
             self.account_snapshot = await self.account_balances()
@@ -540,6 +542,7 @@ class PolymarketUSClient(NativeTransport):
 
     def health_check(self):
         return {**super().health_check(), "authenticated": self.authenticated,
+                "private_auth_failure": self.private_auth_failure,
                 "streaming": bool(self._ready) and all(self._ready.values()), "reason": self.reason,
                 "read_only": True, "execution_supported": False, "reconciled": False,
                 "configured_markets": len(self.market_slugs), "monitored_books": len(self.books),

@@ -254,6 +254,8 @@ class PluginRegistry:
                 return "authenticated"
             if record.health.get("state") == "unauthorized":
                 return "rejected"
+            if record.health.get("private_auth_failure") in {"unauthorized", "access_denied"}:
+                return "rejected"
             names_for_config = getattr(record.plugin, "credential_names", None)
             if callable(names_for_config):
                 try:

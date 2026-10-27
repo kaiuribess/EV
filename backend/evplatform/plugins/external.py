@@ -588,12 +588,19 @@ class NativeMonitor(Plugin):
             try:
                 await self.client.connect()
             except Exception:
-                if self.client.health_check()["state"] in {
+                auth_state = self.client.health_check()["state"]
+                if auth_state in {
                     "credentials_missing", "unauthorized", "access_denied", "geolocation_required",
                     "session_limit", "auth_outcome_unknown", "auth_refresh_failed",
                 }:
                     if not public_polymarket:
                         return
+                    # Public US catalog/books can continue without private
+                    # authentication. Keep the private denial visible and do
+                    # not start an authenticated stream or enable execution.
+                    self.client.private_auth_failure = auth_state
+                    self.client.health = "public_research"
+                    self.client.reason = f"Private account authentication {auth_state}; public REST research only"
                 else:
                     raise
         elif public_polymarket:
