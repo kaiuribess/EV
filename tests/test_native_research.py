@@ -8,6 +8,7 @@ import pytest
 from evplatform.core.models import Market, Settlement, utcnow
 from evplatform.core.config import PricingConfig
 from evplatform.core.native_runtime import NativeRuntime
+from evplatform.core.risk import RiskRejected
 from evplatform.core.native_research import (
     compare_minimum_lot, kalshi_moneyline_matches, kalshi_research_taker_fee,
     novig_moneyline_matches, novig_prop_matches, novig_taker_fee,
@@ -348,6 +349,9 @@ def test_runtime_research_comparison_is_read_only_and_requires_live_stream(monke
     assert yes["fee_evidence"]["observed_at"] == current.isoformat()
     assert yes["positive_after_costs"] is False
     assert yes["execution_eligible"] is False and yes["mapping_reviewed"] is False
+    assert yes["execution_status"] == "RESEARCH_ONLY"
+    assert "Sportsbook normal-outcome identity has no reviewed execution rule" in yes["execution_blockers"]
+    assert "No account-bound recurring launch scope selects this exact market" in yes["execution_blockers"]
     engine.settings.pricing = PricingConfig(trusted_research_margin_probability=D("0.01"),
         trusted_research_market_margins={market().id: D("0.03")})
     scoped = NativeRuntime.research_comparisons(runtime, market(), fair)
@@ -498,3 +502,38 @@ def test_research_review_api_saves_only_unapproved_draft(tmp_path):
         listed = client.get("/api/native/research-review/drafts").json()["items"]
         assert len(listed) == 1 and listed[0]["status"] == "unapproved_research_draft"
         assert client.get("/api/native/orders").json()["orders"] == []
+
+
+def test_native_disposition_requires_current_book_reviewed_scope_and_armed_readiness():
+    now = utcnow()
+    candidate = SimpleNamespace(market_id="current-market", venue="kalshi", outcome="home",
+        ineligibility_reasons=(), calculated_at=now, qualified=True, execution_eligible=True,
+        live_execution_allowed=True, book_revision=4)
+    book = SimpleNamespace(revision=4, synchronized=True, status="active")
+    risk = SimpleNamespace(config=SimpleNamespace(max_candidate_age_ms=5000),
+        auto_trade=False, kill_switch=True, native_enabled_venues=frozenset(),
+        check_native_reservation=lambda order: None)
+    engine = SimpleNamespace(markets={"current-market": object()}, risk=risk)
+    runtime = SimpleNamespace(engine=engine,
+        books={("current-market", "kalshi", "home"): book},
+        profile_for=lambda venue: SimpleNamespace(market_ids=("current-market",)),
+        report=lambda venue: SimpleNamespace(live_trading_ready=True, blockers=()),
+        build_order=lambda candidate: SimpleNamespace())
+    disarmed = NativeRuntime.candidate_disposition(runtime, candidate)
+    assert disarmed["execution_status"] == "RESEARCH_ONLY"
+    assert any("authorization" in reason for reason in disarmed["execution_blockers"])
+    risk.auto_trade, risk.kill_switch, risk.native_enabled_venues = True, False, frozenset({"kalshi"})
+    ready = NativeRuntime.candidate_disposition(runtime, candidate)
+    assert ready == {"execution_status": "EXECUTABLE", "execution_blockers": [],
+                     "final_oms_revalidation_required": True}
+    risk.check_native_reservation = lambda order: (_ for _ in ()).throw(RiskRejected("Daily native upfront debit limit reached"))
+    blocked = NativeRuntime.candidate_disposition(runtime, candidate)
+    assert blocked["execution_status"] == "RESEARCH_ONLY"
+    assert "Daily native upfront debit limit reached" in blocked["execution_blockers"]
+    risk.check_native_reservation = lambda order: None
+    book.revision = 5
+    assert NativeRuntime.candidate_disposition(runtime, candidate)["execution_status"] == "RESEARCH_ONLY"
+    book.revision = 4
+    runtime.profile_for = lambda venue: None
+    assert "No account-bound launch scope selects this exact market" in (
+        NativeRuntime.candidate_disposition(runtime, candidate)["execution_blockers"])

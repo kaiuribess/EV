@@ -623,8 +623,11 @@ class NativeRuntime:
                     p = Decimal(fair.probabilities[match.outcome]) - Decimal(margin)
                     win_profit = (Decimal(result["normal_payout_usd"])-Decimal(1))*Decimal("0.98")
                     fraction = max(Decimal(0), (p*win_profit-(Decimal(1)-p))/win_profit) if win_profit > 0 else Decimal(0)
-                    budget = min(Decimal(1), Decimal(cash)*Decimal("0.25")*fraction,
-                        Decimal(result["available_stake_usd"]))
+                    profile = self.profile_for(venue) if hasattr(self, "profile_for") else None
+                    approved_cap = (profile.limits.max_order_stake_usd if profile else None)
+                    budget = min(Decimal(cash)*Decimal("0.25")*fraction,
+                        Decimal(result["available_stake_usd"]),
+                        approved_cap if approved_cap is not None else Decimal(cash))
                     result["quarter_kelly_budget_usd"] = str(budget)
                     result["quarter_kelly_stake_usd"] = str(budget)
                     result["reasons"].append("Informational USD-stake sizing; no ProphetX execution mapping or approval")
@@ -636,13 +639,33 @@ class NativeRuntime:
                     payout = Decimal(result["normal_payout_usd"])
                     debit = Decimal(result["cash_cost_usd"]) + Decimal(result["taker_fee_usd"])
                     full = max(Decimal(0), (p*payout-debit)/(payout-debit)) if payout > debit else Decimal(0)
-                    budget = min(Decimal("1"), Decimal(cash)*Decimal("0.25")*full)
+                    profile = self.profile_for(venue) if hasattr(self, "profile_for") else None
+                    approved_cap = (profile.limits.max_order_stake_usd if profile else None)
+                    budget = min(Decimal(cash)*Decimal("0.25")*full,
+                        approved_cap if approved_cap is not None else Decimal(cash))
                     minimum = Decimal(result["comparison_quantity"])
                     quantity = (budget/debit).to_integral_value(rounding=ROUND_FLOOR)*minimum
                     result["quarter_kelly_budget_usd"] = str(budget)
                     result["quarter_kelly_quantity"] = str(quantity if quantity >= minimum else Decimal(0))
                     if quantity < minimum:
                         result["reasons"].append("Quarter-Kelly budget is below the comparison lot; no upward rounding")
+                # Research comparisons are never promoted by their own price
+                # arithmetic. The separately reviewed native candidate path
+                # below is the only path that can publish an OMS intent.
+                blockers = list(result.get("reasons") or ())
+                if result.get("rejection"):
+                    blockers.insert(0, result["rejection"])
+                if match.identity_limitations:
+                    blockers.extend(match.identity_limitations)
+                if market.extensions.get("research_only") or not market.extensions.get("normal_outcome_reviewed"):
+                    blockers.append("Sportsbook normal-outcome identity has no reviewed execution rule")
+                profile = self.profile_for(venue) if hasattr(self, "profile_for") else None
+                if profile is None or market.id not in profile.market_ids:
+                    blockers.append("No account-bound recurring launch scope selects this exact market")
+                if margin is None:
+                    blockers.append("No approved source-uncertainty allowance is available")
+                result["execution_status"] = "RESEARCH_ONLY"
+                result["execution_blockers"] = list(dict.fromkeys(blockers))
                 output.append(result)
         return sorted(output, key=lambda item: Decimal(item["net_estimated_roi"])
                       if item.get("net_estimated_roi") is not None else Decimal("-Infinity"), reverse=True)
@@ -1006,6 +1029,50 @@ class NativeRuntime:
                 # Block new orders until the durable ledger and account agree.
                 self.dirty_venues.add(order.venue)
                 self.invalidate_account(order.venue)
+
+    def candidate_disposition(self, candidate):
+        """Report current OMS routing eligibility without submitting an order.
+
+        This advisory check can expire stale authorization through the risk
+        engine. The OMS repeats every dynamic check under its durable lock.
+        """
+        reasons = list(candidate.ineligibility_reasons)
+        now = utcnow()
+        market = self.engine.markets.get(candidate.market_id)
+        book = self.books.get((candidate.market_id, candidate.venue, candidate.outcome))
+        age_ms = (now-candidate.calculated_at).total_seconds()*1000
+        if not candidate.qualified or not candidate.execution_eligible or not candidate.live_execution_allowed:
+            reasons.append("Candidate does not meet the approved source, EV, sizing or fee policy")
+        if (market is None or book is None or book.revision != candidate.book_revision
+                or not book.synchronized or book.status != "active"
+                or not 0 <= age_ms <= self.engine.risk.config.max_candidate_age_ms):
+            reasons.append("Current canonical market or synchronized executable book changed")
+        profile = self.profile_for(candidate.venue)
+        if profile is None or candidate.market_id not in profile.market_ids:
+            reasons.append("No account-bound launch scope selects this exact market")
+        else:
+            try:
+                report = self.report(candidate.venue)
+            except (ValueError, RuntimeError, AttributeError):
+                reasons.append("Current venue readiness could not be verified")
+            else:
+                if not report.live_trading_ready:
+                    reasons.extend(blocker.message for blocker in report.blockers)
+        if (not self.engine.risk.auto_trade or self.engine.risk.kill_switch
+                or candidate.venue not in self.engine.risk.native_enabled_venues):
+            reasons.append("Recurring native authorization is not armed for this venue")
+        if not reasons and market is not None:
+            try:
+                order = self.build_order(candidate)
+                # Use the same complete reservation check as the OMS. This
+                # read is advisory; the OMS repeats it under its durable lock.
+                self.engine.risk.check_native_reservation(order)
+            except (RiskRejected, ValueError, KeyError, TypeError) as exc:
+                reasons.append(str(exc))
+        reasons = list(dict.fromkeys(reasons))
+        return {"execution_status": "RESEARCH_ONLY" if reasons else "EXECUTABLE",
+                "execution_blockers": reasons,
+                "final_oms_revalidation_required": True}
 
     async def recalculate(self, market_id, event=None):
         record = self.engine.registry.records.get("native_positive_ev")
