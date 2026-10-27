@@ -292,6 +292,41 @@ def test_full_game_periods_coalesce_but_quarter_market_does_not():
     assert projector.apply(envelope, [replace(base, provider="parlay_game_ws", period="Q1")]) == []
 
 
+def test_approved_game_websocket_unsuffixed_h2h_uses_documented_full_game_scope():
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="basketball", league="NBA",
+        market_type="moneyline", reviewed_normal_rule_id="nba-full-winner-2026",
+        source_normal_rule_evidence="Parlay game WebSocket h2h full-game market key review")
+    policy = TrustedPilotPolicy(enabled=True, owner_approved=True, market_scope=scope,
+        provider_id="parlay_game_ws", trusted_books=["fanduel", "draftkings", "caesars"],
+        min_distinct_books=3, reference_weights_percent={"fanduel": Decimal(34),
+            "draftkings": Decimal(33), "caesars": Decimal(33)},
+        accept_unknown_active_status=True, accept_unknown_quote_observation_age=True,
+        max_indicator_age_ms=30000, independent_crosscheck="two_distinct_books",
+        uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal(25),
+        max_loss_usd=Decimal(25), recurring_authorization=True,
+        maximum_native_attempts=None, automatic_followups=True,
+        approval_evidence="OFFLINE approved-scope test fixture")
+    pricing = PricingConfig.model_validate({**config().model_dump(),
+        "trusted_pilot_policy": policy.model_dump()})
+    projector = TrustedSourceProjector(lambda: pricing)
+    envelope = ProviderEnvelope("parlay_game_ws", "initial_state", [], NOW, 1,
+        published_at=NOW, metadata={"sport": "basketball_nba"})
+    offer = SourceOffer(provider="parlay_game_ws", bookmaker="fanduel", event_id="event-1",
+        market_key="h2h", player_key=None, line=None, period=None, outcome_points={},
+        prices={"Home": Decimal("1.85"), "Away": Decimal("2.05")}, observed_at=None,
+        provider_time=NOW, context={"event_sport": "basketball_nba",
+            "participants": ["Home", "Away"],
+            "scheduled_start": (NOW + timedelta(hours=1)).isoformat()})
+    market = projector.apply(envelope, [offer])[0][0]
+    assert market.id.startswith("reviewed:")
+    assert market.extensions["normal_outcome_reviewed"] is True
+    assert market.settlement.period == "FULL"
+    assert TrustedSourceProjector(lambda: pricing).apply(envelope,
+        [replace(offer, provider="parlay_rest")])[0][0].id.startswith("research:")
+    assert TrustedSourceProjector(lambda: pricing).apply(envelope,
+        [replace(offer, period="Q1")]) == []
+
+
 def test_opposite_spread_orientation_has_a_distinct_research_identity():
     from dataclasses import replace
 

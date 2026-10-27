@@ -1045,7 +1045,12 @@ class TrustedSourceProjector:
             if (policy.enabled and policy.owner_approved and scope is not None
                     and scope.source_normal_rule_evidence
                     and config.normal_outcome_policy == "winner_only_binary"
-                    and offer.market_key == "h2h" and offer.period in {"FULL", "full_game"}
+                    # Parlay's game WebSocket documents unsuffixed h2h as the
+                    # full-game moneyline; period markets use distinct keys.
+                    # https://parlay-api.com/docs/websocket
+                    # This is a market-identity rule, never a freshness claim.
+                    and offer.market_key == "h2h" and (offer.period in {"FULL", "full_game"}
+                        or offer.provider == "parlay_game_ws" and offer.period is None)
                     and offer.provider in {policy.provider_id, policy.crosscheck_provider_id}
                     and offer.bookmaker in policy.trusted_books
                     and market.sport == scope.sport and market.league == scope.league
