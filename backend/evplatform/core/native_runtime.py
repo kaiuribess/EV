@@ -957,6 +957,7 @@ class NativeRuntime:
         """Read an authenticated monitor account without binding an executor."""
         from ..plugins.external import NativeMonitor
         from ..venues.account_probe import probe_native_account
+        from ..venues.common import VenueHTTPError
         from ..venues.reconciliation import ReconciliationError
 
         record = self.engine.registry.records.get(venue)
@@ -989,6 +990,8 @@ class NativeRuntime:
                        if venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
             except asyncio.CancelledError:
                 raise
+            except VenueHTTPError as exc:
+                raise ValueError(f"Authenticated account read failed (HTTP {exc.status_code})") from None
             except ReconciliationError as exc:
                 raise ValueError(f"Authenticated account reconciliation failed: {exc}") from None
             except Exception as exc:
