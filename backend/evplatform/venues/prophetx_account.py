@@ -123,6 +123,10 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
             except (ValueError, TypeError, AttributeError):
                 blockers.append("ProphetX active-order report is invalid")
                 current = None
+        # The unchanged second wallet read, reporting watermark and private
+        # fence establish the completed snapshot. Do not age it from the
+        # beginning of a potentially long paginated inventory probe.
+        base["observed_at"] = observed_at or utcnow()
         return NativeAccountSnapshot(**base, balance_usd=before[0], cash_available_verified=cash_verified,
             open_order_count=0 if current is not None else None,
             position_count=0 if current is not None else None,

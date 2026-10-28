@@ -2018,7 +2018,8 @@ class NativeRuntime:
                 **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
                 **({"adapter": adapter} if p.venue == "polymarket_us" else {}),
                 **({"management_client": record.plugin.management_client}
-                   if p.venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
+                   if p.venue == "novig" and getattr(record.plugin, "management_client", None) else {})),
+                timeout=35 if p.venue == "prophetx" else 20)
             return snapshot, token, exchange_index
 
         def unchanged(token):
@@ -2064,6 +2065,11 @@ class NativeRuntime:
                     self._last_account_probes.pop(p.venue, None)
                     return
                 self.account_snapshots[p.venue] = snapshot
+                # Start the next paced account read after this one finishes.
+                # ProphetX's two-sided REST inventory check can take longer
+                # than the former start-to-start interval.
+                self.last_account_probe = time.monotonic()
+                self._last_account_probes[p.venue] = self.last_account_probe
                 if exchange_index is not None:
                     self._account_exchange_indexes[p.venue] = exchange_index
                 self._account_snapshot_fences[p.venue] = token[1]

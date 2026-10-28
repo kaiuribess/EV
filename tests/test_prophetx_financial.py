@@ -399,6 +399,26 @@ async def test_current_empty_inventory_uses_wallet_active_history_and_private_fe
     assert [params["status"] for _, params in client.calls] == ["open", "inactive"]
 
 
+async def test_current_empty_inventory_timestamp_is_completion_time(case, monkeypatch):
+    from evplatform.venues import prophetx_account, prophetx_financial
+
+    _, client, _ = case
+    clock = {"now": NOW}
+    monkeypatch.setattr(prophetx_account, "utcnow", lambda: clock["now"])
+    monkeypatch.setattr(prophetx_financial, "utcnow", lambda: clock["now"])
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+
+    def active_status(params):
+        clock["now"] = NOW + timedelta(seconds=24)
+        client.balance["unmatched_order_last_synced_at"] = iso(24)
+        return {"data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(24)}
+
+    client.overrides["/v4/mm/get_order_history"] = active_status
+    result = await probe_prophetx_account(client)
+    assert result.reconciled and result.cash_available_verified
+    assert result.observed_at == NOW + timedelta(seconds=24)
+
+
 async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case):
     _, client, _ = case
     client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
