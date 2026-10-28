@@ -73,11 +73,15 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 and before[1:] == (Decimal(0), Decimal(0)) and private is not None
                 and captured_fence is not None):
             try:
-                # Query active statuses without a creation-date filter: a
-                # long-running position must not disappear from this check.
-                # Inactive covers the documented pre-match submission state.
+                # The Trading API enforces a 60-day created-at window. This
+                # current-active check is paired with zero matched/unmatched
+                # wallet exposure and the live private-stream fence; it does
+                # not assert that the account has no older settled history.
+                query_to = math.ceil(now.timestamp())
+                query_from = query_to - 60 * 86400 + 1
                 histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
-                    params={"status": status}, observed_at=observed_at)
+                    params={"status": status, "from": query_from, "to": query_to},
+                    observed_at=observed_at)
                     for status in ("open", "inactive")]
                 after = balance_facts(await client.fetch_balance(),
                     observed_at=observed_at or utcnow(), funded_cash_only=True)

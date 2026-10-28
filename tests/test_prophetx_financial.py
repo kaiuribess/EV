@@ -384,7 +384,7 @@ async def test_current_empty_inventory_uses_wallet_active_history_and_private_fe
     client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
     def active_status(params):
         assert params["status"] in {"open", "inactive"}
-        assert "from" not in params and "to" not in params
+        assert 0 < params["to"] - params["from"] < 60 * 86400
         return {"data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
     client.overrides["/v4/mm/get_order_history"] = active_status
     other = SimpleNamespace(venue="kalshi", environment="sandbox",
