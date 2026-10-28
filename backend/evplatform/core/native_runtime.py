@@ -1639,7 +1639,11 @@ class NativeRuntime:
                     max_native_order_attempts=(risk.max_native_order_attempts
                         if p and p.limits.max_native_order_attempts is not None else None),
                     max_native_daily_attempts=risk.max_native_daily_attempts,
-                    max_native_daily_debit_usd=risk.max_native_daily_debit)
+                    max_native_daily_debit_usd=risk.max_native_daily_debit,
+                    external_exposure_scope=("profile_account" if p and
+                        p.limits.external_exposure_scope == "profile_account" and
+                        self.engine.risk.native_exposure_scope == (p.venue, p.account_fingerprint)
+                        else "global"))
         except (ValueError, TypeError):
             # Contradictory runtime limits are a missing authorization, not a
             # dashboard exception and never a reason to weaken the limits.

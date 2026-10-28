@@ -435,7 +435,7 @@ def test_live_consensus_requires_reviewed_weights_and_source_approval():
 
 
 @pytest.mark.asyncio
-async def test_qualified_new_game_reaches_existing_oms_handoff_without_per_game_file(tmp_path):
+async def test_qualified_new_game_reaches_existing_oms_handoff_without_per_game_file(tmp_path, monkeypatch):
     now = utcnow().replace(microsecond=0)
     config, _ = approved_config()
     market, quotes = source_fixture(config, now, "fixture-oms", now+timedelta(days=1))
@@ -472,6 +472,7 @@ async def test_qualified_new_game_reaches_existing_oms_handoff_without_per_game_
     native.profile = SimpleNamespace(venue="kalshi", account_fingerprint="a"*64)
     native.books[(market.id, "kalshi", TEAMS[0])] = book
     native.manager.execute = AsyncMock(return_value="OFFLINE OMS handoff")
+    monkeypatch.setattr("evplatform.core.native_runtime.utcnow", lambda: now)
     assert await native.execute(candidate) == "OFFLINE OMS handoff"
     submitted = native.manager.execute.await_args.args[0]
     assert submitted.market_id == market.id

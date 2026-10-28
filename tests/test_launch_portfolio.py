@@ -118,6 +118,7 @@ async def test_single_reviewed_profile_binds_account_only_external_exposure_scop
     await runtime.start()
     assert runtime.engine.risk.native_exposure_scope == (
         profile.venue, profile.account_fingerprint)
+    assert runtime.runtime_facts(profile.venue).configured_limits == profile.limits
 
 
 async def test_portfolio_refresh_visits_each_account_under_one_coordinator(system):
