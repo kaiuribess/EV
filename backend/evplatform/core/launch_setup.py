@@ -7,6 +7,7 @@ the optional limits file is explicitly an unapplied operator draft.
 from __future__ import annotations
 
 import os
+import tempfile
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,6 +31,23 @@ def operator_limits_draft(path=None):
         return LiveLimits.model_validate_json(target.read_text(encoding="utf-8")), None
     except (OSError, ValueError):
         return None, "The saved operator limits need review."
+
+
+def save_operator_limits_draft(limits: LiveLimits, path=None):
+    """Save owner-editable limits without applying or authorizing live risk."""
+    target = Path(path) if path is not None else runtime_data_file("operator_launch_limits.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="operator-limits-", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(limits.model_dump_json())
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def launch_setup(engine, *, limits_draft=None, limits_error=None):

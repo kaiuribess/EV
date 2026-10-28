@@ -16,7 +16,9 @@ from .core.models import Envelope, Market, SettlementResult
 from .core.market_review import ContractReview, compare_contracts, pending_market_reviews
 from .core.native_accounting import ExactDecimal
 from .core.settlement_bridge import ExceptionalSettlementBound, estimate_bridge
-from .core.launch_setup import launch_setup, operator_limits_draft
+from .core.launch_setup import launch_setup, operator_limits_draft, save_operator_limits_draft
+from .core.readiness import LiveLimits
+from .core.paths import runtime_data_file
 from .core.manual_native import ManualNativeService
 from .core.paths import runtime_data_dir
 from .core.research_review import read_reviews, review_payload, save_review
@@ -245,8 +247,21 @@ def create_app(settings=None):
 
     @app.get("/api/launch/setup")
     async def launch_preparation():
-        limits, error = await asyncio.to_thread(operator_limits_draft)
+        limits, error = await asyncio.to_thread(operator_limits_draft,
+            runtime_data_file("operator_launch_limits.json", engine.settings.data_dir))
         return launch_setup(engine, limits_draft=limits, limits_error=error)
+
+    @app.post("/api/launch/limits-draft")
+    async def save_launch_limits(body: LiveLimits):
+        if engine.settings.mode != "production" or engine.risk.auto_trade or not engine.risk.kill_switch:
+            raise HTTPException(409, "Pause automation and engage the emergency stop before editing launch limits")
+        try:
+            await asyncio.to_thread(save_operator_limits_draft, body,
+                runtime_data_file("operator_launch_limits.json", engine.settings.data_dir))
+        except OSError:
+            raise HTTPException(503, "Operator limits draft could not be saved") from None
+        return {"limits": body.model_dump(mode="json"), "applied": False,
+                "note": "Draft only. Current launch profile and trading authorization are unchanged."}
 
     @app.post("/api/launch/probe")
     async def launch_account_probe(body: LaunchProbeBody):

@@ -404,6 +404,40 @@ def test_setup_endpoint_is_read_only_with_unapplied_limits(tmp_path, monkeypatch
         assert client.get("/api/native/orders").json()["orders"] == []
 
 
+def test_operator_can_edit_limits_draft_without_arming_or_changing_runtime_risk(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        limits = ready_fixture("production")[0].limits.model_dump(mode="json")
+        limits["max_order_stake_usd"] = "1"
+        before = engine.risk.config.model_dump(mode="json")
+        assert client.post("/api/launch/limits-draft", json=limits).status_code == 403
+        response = client.post("/api/launch/limits-draft", headers=HEADERS, json=limits)
+        assert response.status_code == 200
+        assert response.json()["applied"] is False
+        report = client.get("/api/launch/setup").json()
+        assert report["risk_policy"]["source"] == "saved_operator_draft"
+        assert report["risk_policy"]["values"]["max_order_stake_usd"] == "1"
+        assert not report["risk_policy"]["applied"]
+        assert engine.risk.config.model_dump(mode="json") == before
+        assert not engine.risk.auto_trade and engine.risk.kill_switch
+        assert client.get("/api/native/orders").json()["orders"] == []
+        engine.risk.kill_switch = False
+        assert client.post("/api/launch/limits-draft", headers=HEADERS, json=limits).status_code == 409
+
+
+def test_limits_draft_rejects_incoherent_or_extra_fields(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        limits = ready_fixture("production")[0].limits.model_dump(mode="json")
+        limits["max_order_stake_usd"] = "9999"
+        assert client.post("/api/launch/limits-draft", headers=HEADERS, json=limits).status_code == 422
+        limits.pop("max_order_stake_usd")
+        limits["secret"] = "do-not-save"
+        assert client.post("/api/launch/limits-draft", headers=HEADERS, json=limits).status_code == 422
+        assert not (tmp_path / "data" / "operator_launch_limits.json").exists()
+
+
 def test_manual_native_api_fails_closed_without_launch_profile(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with TestClient(native_app(tmp_path)) as client:

@@ -30,6 +30,39 @@ function Limits({ report, complete = false }: { report: SetupReport; complete?: 
   </div>
 }
 
+function LimitsDraftEditor({ report, mutate, notify, refresh, disabled }: {
+  report: SetupReport; mutate: Props['mutate']; notify: Props['notify']; refresh: () => Promise<unknown>; disabled: boolean
+}) {
+  const saved = report.risk_policy.values
+  const [draft, setDraft] = useState(() => saved ? JSON.stringify(saved, null, 2) : '')
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { if (!dirty) setDraft(saved ? JSON.stringify(saved, null, 2) : '') }, [saved, dirty])
+  const save = async () => {
+    setSaving(true)
+    try {
+      const values = JSON.parse(draft)
+      if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('Enter a complete limits object.')
+      await mutate('/api/launch/limits-draft', values)
+      setDirty(false)
+      await refresh()
+      notify('Limits draft saved. Live limits and trading authorization are unchanged.')
+    } catch (failure) {
+      notify(failure instanceof Error ? failure.message : 'Limits draft could not be saved.', true)
+    } finally { setSaving(false) }
+  }
+  return <details className="setup-limits-editor"><summary>Edit launch limits draft <ChevronRight size={12} /></summary>
+    <p className="setup-note">You can change the spending and frequency caps here. This saves a draft only; it does not claim a balance is spendable or enable orders. A changed live scope requires a new reviewed launch profile.</p>
+    <textarea aria-label="Launch limits JSON" value={draft} rows={16} spellCheck={false}
+      disabled={disabled || saving || report.switches.auto_trade || !report.switches.kill_switch}
+      onChange={event => { setDraft(event.target.value); setDirty(true) }} />
+    <div className="setup-limits-editor-actions"><button type="button" className="button quiet" disabled={!dirty || saving}
+      onClick={() => { setDraft(saved ? JSON.stringify(saved, null, 2) : ''); setDirty(false) }}>Discard edits</button>
+      <button type="button" className="button primary" disabled={!dirty || saving || disabled || report.switches.auto_trade || !report.switches.kill_switch}
+        onClick={() => void save()}>{saving ? 'Saving…' : 'Save limits draft'}</button></div>
+  </details>
+}
+
 function PricingModel({ pricing }: { pricing: SetupReport['pricing'] }) {
   const strict = pricing.reference_profile_mode === 'strict'
   const profiles = Object.entries(pricing.reference_profiles ?? {})
@@ -197,7 +230,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
         {!report.accounts.length && <p className="setup-placeholder">No exchange monitor plugins are registered.</p>}
         {report.external_inventory && <p className="setup-note">External positions: {report.external_inventory.loaded_count} tracked ({report.external_inventory.owner_tracked_count ?? 0} owner attested), {report.external_inventory.pending_order_count} awaiting inventory review. Reserved external exposure: {money(report.external_inventory.unsettled_cost_usd)}. {report.external_inventory.note}</p>}
         <AccountCash />
-        <div className="setup-two-columns"><section className="setup-subpanel"><div className="setup-section-title"><h3>Trading limits</h3><span className={`setup-pill ${current && report.risk_policy.applied ? 'good' : ''}`}>{!current ? 'Unconfirmed' : report.risk_policy.applied ? 'Applied to live scope' : report.risk_policy.values ? 'Saved draft · not applied' : 'Not configured'}</span></div><Limits report={report} /><details className="setup-all-limits"><summary>Review all exposure and order limits <ChevronRight size={12} /></summary><Limits report={report} complete /></details><p className="setup-note">{report.risk_policy.applied ? 'These limits bind the reviewed scope.' : 'Saved limits do not authorize real orders.'} Wallet balances are never pooled. Pending orders and unsettled fills retain their game and player reservations.</p>{report.risk_policy.error && <p className="setup-inline-error">{report.risk_policy.error}</p>}</section>
+        <div className="setup-two-columns"><section className="setup-subpanel"><div className="setup-section-title"><h3>Trading limits</h3><span className={`setup-pill ${current && report.risk_policy.applied ? 'good' : ''}`}>{!current ? 'Unconfirmed' : report.risk_policy.applied ? 'Applied to live scope' : report.risk_policy.values ? 'Saved draft · not applied' : 'Not configured'}</span></div><Limits report={report} /><details className="setup-all-limits"><summary>Review all exposure and order limits <ChevronRight size={12} /></summary><Limits report={report} complete /></details><LimitsDraftEditor report={report} mutate={mutate} notify={notify} refresh={fetchReport} disabled={disabled || !current || working} /><p className="setup-note">{report.risk_policy.applied ? 'These limits bind the reviewed scope.' : 'Saved limits do not authorize real orders.'} Wallet balances are never pooled. Pending orders and unsettled fills retain their game and player reservations.</p>{report.risk_policy.error && <p className="setup-inline-error">{report.risk_policy.error}</p>}</section>
           <PricingModel pricing={report.pricing} /></div>
         <details className="setup-inputs"><summary><Radio size={16} />Sportsbook mapping coverage <ChevronRight size={13} /></summary><div className="table-scroll"><table><thead><tr><th>PROVIDER</th><th>ACCESS</th><th>MAPPED UPDATES</th><th>AWAITING REVIEW</th><th>QUOTE CLOCK VERIFIED</th><th>MARKET STATUS VERIFIED</th><th>BOTH ON SAME QUOTE</th></tr></thead><tbody>{report.inputs.map(input => <tr key={input.provider}><td>{human(input.provider)}</td><td>{current && input.authenticated ? 'Authenticated' : 'Unconfirmed'}</td><td>{input.mapped_quotes.toLocaleString()}</td><td>{input.quarantined.toLocaleString()}{input.review_window_capped ? '+' : ''}</td><td>{input.quote_clock_verified_in_review_window?.toLocaleString() ?? '—'}</td><td>{input.market_status_verified_in_review_window?.toLocaleString() ?? '—'}</td><td>{input.both_evidence_verified_in_review_window?.toLocaleString() ?? '—'}</td></tr>)}</tbody></table></div><p className="setup-note">The clock, status and same-quote counts cover only the bounded review window. The last count requires complete observation evidence and active status on one quote; it still does not approve a freshness limit, settlement match or trade. A + means the window reached its cap. Mapped updates are cumulative observations, not unique tradable markets. Quarantined observations cannot produce approved native orders.</p></details>
         <div className="setup-section-title"><h3>What still needs to pass</h3><span>{current ? `${pending.filter(item => !deferredPilotRequirement(report, item.code)).length} blocking · ${pending.filter(item => deferredPilotRequirement(report, item.code)).length} pilot-deferred` : 'Current status unconfirmed'}</span></div><div className="setup-checklist">{report.requirements.map(item => <details key={item.code}><summary>{current && item.status === 'passed' ? <CheckCircle2 size={17} className="good" /> : <LockKeyhole size={16} />}<strong>{item.title}</strong><span>{!current ? 'Unconfirmed' : item.status === 'passed' ? 'Passed' : deferredPilotRequirement(report, item.code) ? 'After pilot' : 'Pending'}</span></summary><p>{item.detail}</p></details>)}</div>
