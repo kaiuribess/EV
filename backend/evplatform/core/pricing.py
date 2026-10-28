@@ -215,6 +215,8 @@ def fair_value(market: Market, quotes: list[Quote], config: PricingConfig,
             rule = freshness_rule(config, market, quote.provider, quote.bookmaker)
             eligible = diagnostics[book][0] and book not in conflicts
             evidence.update({"source_observed_at": quote.source_observed_at.isoformat() if quote.source_observed_at else None,
+                "source_retained_row_at": (quote.source_time.isoformat() if quote.source_time
+                                          and quote.provider in {"parlay_ws", "parlay_game_ws"} else None),
                 "source_price_changed_at": quote.source_price_changed_at.isoformat() if quote.source_price_changed_at else None,
                 "provider_reported_price_age_s": (str(quote.provider_reported_price_age_s)
                                                   if quote.provider_reported_price_age_s is not None else None),

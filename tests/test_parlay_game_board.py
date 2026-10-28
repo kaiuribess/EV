@@ -1,6 +1,7 @@
 """The dedicated Parlay baseline cannot turn a bounded sample into a full board."""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -44,6 +45,61 @@ def test_baseline_is_independent_provider_with_exact_documented_filters():
     # snapshot=complete is a separately restricted native-prop scope. The
     # complete game board is selected by these explicit book/market filters.
     assert "snapshot" not in query
+    assert urlsplit(provider.stream_url("basketball_nba")).path == "/v1/ws/odds/basketball_nba"
+
+
+@pytest.mark.asyncio
+async def test_complete_game_board_reconnect_refreshes_baseline_without_rest():
+    connections = []
+
+    class Socket:
+        def __init__(self, number):
+            self.frames = [
+                {"type": "connected", "tier": "business"},
+                {"type": "initial_state", "snapshot_scope": "current_game_board",
+                 "snapshot_complete": True, "truncated": False,
+                 "data": [{"bookmaker": "draftkings", "last_update": f"fixture-{number}"}]},
+            ]
+
+        async def recv(self):
+            if self.frames:
+                return json.dumps(self.frames.pop(0))
+            await asyncio.Event().wait()
+
+        async def close(self):
+            pass
+
+    class Connection:
+        def __init__(self, number):
+            self.socket = Socket(number)
+
+        async def __aenter__(self):
+            return self.socket
+
+        async def __aexit__(self, *ignored):
+            return False
+
+    def factory(*args, **kwargs):
+        connections.append((args, kwargs))
+        return Connection(len(connections))
+
+    provider = ParlayGameBoardWebSocket({"sports": ["basketball_nba"]},
+        credential="fixture-secret", ws_factory=factory)
+    provider.config = provider.config.model_copy(update={"baseline_refresh_seconds": .05})
+    provider._subscriptions.add("basketball_nba")
+    queue = asyncio.Queue()
+    task = asyncio.create_task(provider._run_sport("basketball_nba", queue))
+    try:
+        frames = [await asyncio.wait_for(queue.get(), 2) for _ in range(5)]
+        assert [frame.kind for frame in frames] == [
+            "connected", "initial_state", "feed_invalidated", "connected", "initial_state"]
+        assert frames[1].snapshot_complete and frames[4].snapshot_complete
+        assert frames[1].payload["data"][0]["last_update"] != frames[4].payload["data"][0]["last_update"]
+        assert len(connections) == 2 and provider.reconnects == 1
+        assert all("fixture-secret" not in args[0] for args, _ in connections)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_betonline_is_requested_only_for_supported_pregame_game_sports():

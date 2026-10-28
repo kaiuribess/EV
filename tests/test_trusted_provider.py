@@ -327,6 +327,57 @@ def test_approved_game_websocket_unsuffixed_h2h_uses_documented_full_game_scope(
         [replace(offer, period="Q1")]) == []
 
 
+def test_refreshed_game_baseline_cannot_make_old_retained_row_live_eligible():
+    from evplatform.core.trusted_pilot import trusted_pilot_reference_check
+    from tests.test_family_onboarding import approved_config, source_fixture
+    pricing, scope = approved_config("prophetx")
+    policy = pricing.trusted_pilot_policy.model_copy(update={"provider_id": "parlay_game_ws"})
+    pricing = pricing.model_copy(update={"trusted_pilot_policy": policy})
+    market, _ = source_fixture(pricing, NOW, "old-baseline-row", NOW+timedelta(hours=2))
+    market = market.model_copy(update={"extensions": {**market.extensions,
+        "research_only": False, "normal_outcome_reviewed": True,
+        "reviewed_normal_rule_id": scope.reviewed_normal_rule_id},
+        "settlement": market.settlement.model_copy(update={"overtime": "included"})})
+    refs = [{"bookmaker": name, "provider": "parlay_game_ws",
+        "market_fingerprint": market.identity(), "normal_outcome_verified": True,
+        "normal_outcome_evidence": scope.reviewed_normal_rule_id,
+        "status": "unknown", "market_status_verified": False,
+        "source_scope_is_current": None, "verification_reason": "unverified_observation_clock",
+        "local_receipt_at": NOW.isoformat(),
+        "source_retained_row_at": (NOW-timedelta(minutes=2)).isoformat()}
+        for name in ("fanduel", "draftkings", "caesars")]
+    allowed, reasons = trusted_pilot_reference_check(pricing, market, refs, NOW)
+    assert not allowed and any("retained price row" in reason for reason in reasons)
+    for ref in refs:
+        ref["source_retained_row_at"] = None
+    current_allowed, current_reasons = trusted_pilot_reference_check(pricing, market, refs, NOW)
+    assert current_allowed, current_reasons
+
+
+def test_fair_value_carries_retained_websocket_row_clock_into_pilot_gate():
+    from tests.test_family_onboarding import approved_config, source_fixture
+    pricing, _ = approved_config("prophetx")
+    policy = pricing.trusted_pilot_policy.model_copy(update={"provider_id": "parlay_game_ws"})
+    profile = ReferenceProfile(selectors=(ProfileSelector(
+        sport="basketball", league="NBA", market_type="moneyline"),),
+        weights_percent={"fanduel": Decimal(40), "draftkings": Decimal(35),
+                         "caesars": Decimal(25)},
+        required_any_anchor=("fanduel",), min_distinct_books=3,
+        status="research_prior", live_execution_allowed=False)
+    pricing = pricing.model_copy(update={"trusted_pilot_policy": policy,
+        "reference_profiles": {"nba": profile}, "enabled_reference_profiles": ["nba"]})
+    market, quotes = source_fixture(pricing, NOW, "retained-row", NOW+timedelta(hours=2))
+    quotes = [quote.model_copy(update={"provider": "parlay_game_ws",
+        "source_time": NOW-timedelta(minutes=2), "source_stored_at": None,
+        "source_scope_poll_at": NOW-timedelta(seconds=1), "received_at": NOW})
+        for quote in quotes]
+    fair = fair_value(market, quotes, pricing, NOW)
+    assert all(ref["source_retained_row_at"] == (NOW-timedelta(minutes=2)).isoformat()
+               for ref in fair.references)
+    assert not fair.execution_eligible
+    assert any("retained price row" in reason for reason in fair.ineligibility_reasons)
+
+
 def test_opposite_spread_orientation_has_a_distinct_research_identity():
     from dataclasses import replace
 

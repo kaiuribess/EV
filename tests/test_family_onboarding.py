@@ -270,6 +270,108 @@ def test_prophetx_certified_default_full_game_rule_needs_exact_unqualified_money
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[0])
 
 
+def test_conditional_prophetx_first_trade_profile_uses_family_without_future_game_ids():
+    now = utcnow().replace(microsecond=0)
+    _, scope = approved_config("prophetx")
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-px-pilot-v1",
+        approved_by="fixture", approval_evidence="OFFLINE reviewed full-game winner rule",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(hours=12),
+        allowed_native_rule_texts=("moneyline|moneyline|default_full_game",),
+        quantity_step=Decimal(".01"), minimum_quantity=Decimal(1),
+        minimum_order_cost_usd=Decimal(1), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE order-grid fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OWNER ASSUMPTION: 2% of winning profit",
+        prophetx_native_settlement_evidence="OFFLINE full-game rule fixture",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE v2 clock fixture")
+    caps = {key: Decimal(5) for key in ("max_order_stake_usd", "max_event_exposure_usd",
+        "max_player_exposure_usd", "max_venue_exposure_usd",
+        "max_correlated_exposure_usd", "max_total_exposure_usd",
+        "daily_loss_limit_usd", "max_native_daily_debit_usd")}
+    limits = LiveLimits(**caps, available_cash_only=True,
+        block_overlapping_events=True, block_overlapping_players=True,
+        stake_sizing="quarter_kelly", max_open_orders=1, max_orders_per_minute=1,
+        max_native_order_attempts=1)
+    profile = LaunchProfile(venue="prophetx", environment="production",
+        account_fingerprint="a"*64, build_id="OFFLINE-build", family_rule=rule,
+        strategy_ids=("native_positive_ev",), provider_ids=("parlay_game_ws",),
+        mapping_digest="b"*64, pricing_digest="c"*64, limits=limits,
+        min_reference_books=3, max_reference_age_ms=30000,
+        max_orderbook_age_ms=2500,
+        settlement_policy="prophetx_funded_cash_win_loss_halt_on_exception",
+        validation_pilot=True)
+    assert profile.market_ids == () and profile.limits.max_native_order_attempts == 1
+    assert profile.digest() == profile.model_copy(update={"evidence": ()}).digest()
+    for changed in ({"max_native_order_attempts": None}, {"max_order_stake_usd": Decimal(6)},
+                    {"daily_loss_limit_usd": Decimal(6)}):
+        with pytest.raises(ValueError):
+            LaunchProfile.model_validate({**profile.model_dump(),
+                "limits": {**limits.model_dump(), **changed}})
+    from scripts.prepare_prophetx_conditional_pilot import prepare
+    recurring_limits = LiveLimits.model_validate({**limits.model_dump(),
+        **{name: Decimal(25) for name in caps}, "max_native_order_attempts": None})
+    recurring = LaunchProfile.model_validate({**profile.model_dump(),
+        "validation_pilot": False, "limits": recurring_limits.model_dump()})
+    draft = prepare(recurring)
+    assert draft["approved"] is False
+    assert draft["authorization_template"]["authorization_id"] is None
+    assert draft["launch_profile"]["market_ids"] == []
+    assert draft["launch_profile"]["limits"]["max_order_stake_usd"] == "5"
+    assert draft["launch_profile"]["limits"]["max_native_order_attempts"] == 1
+
+
+def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatch):
+    from evplatform.core.risk import RiskConfig, RiskEngine, RiskRejected
+    now = utcnow().replace(microsecond=0)
+    pricing, scope = approved_config("prophetx")
+    market, _ = source_fixture(pricing, now, "conditional-preflight", now+timedelta(hours=3))
+    risk = RiskEngine(RiskConfig(available_cash_only=True, stake_sizing="quarter_kelly",
+        max_order_stake=Decimal(5), live_stake_authorized=True))
+    risk.auto_trade, risk.kill_switch = True, False
+    account = "a"*64
+    rule = SimpleNamespace(scope=scope, approved_at=now-timedelta(minutes=1),
+        expires_at=now+timedelta(hours=2))
+    profile = SimpleNamespace(venue="prophetx", environment="production",
+        account_fingerprint=account, market_ids=(), family_rule=rule,
+        strategy_ids=("native_positive_ev",), validation_pilot=True,
+        settlement_policy="prophetx_funded_cash_win_loss_halt_on_exception",
+        min_reference_books=3, max_reference_age_ms=30000, max_orderbook_age_ms=2500,
+        limits=SimpleNamespace(max_native_order_attempts=1,
+            max_order_stake_usd=Decimal(5), max_total_exposure_usd=Decimal(5)),
+        evidence=(SimpleNamespace(expires_at=now+timedelta(minutes=1)),),
+        digest=lambda: "OFFLINE-conditional-profile")
+    account_view = SimpleNamespace(cash_available_verified=True, balance_usd=Decimal(49),
+        identity_verified=True, account_fingerprint=account, environment="production")
+    adapter = SimpleNamespace(client=object(), preflight=None)
+    runtime = SimpleNamespace(report=lambda *_: SimpleNamespace(live_trading_ready=True,
+        sandbox_trading_ready=False, safe_to_arm=True), profile_for=lambda *_: profile,
+        runtime_facts=lambda *_: SimpleNamespace(markets=(MarketReadiness(
+            market_id=market.id, identity_verified=True, provider_mapping_verified=True,
+            venue_mapping_verified=True, fee_assumption_approved=True,
+            native_units_supported=True, order_minimum_verified=True,
+            usable_reference_books=3, required_books_present=True,
+            oldest_reference_age_ms=100, orderbook_age_ms=100,
+            orderbook_synchronized=True, market_active=True,
+            executable_liquidity=True, synthetic=False),)),
+        account_snapshots={"prophetx": account_view},
+        manager=SimpleNamespace(adapters={"prophetx": adapter}),
+        _prophetx_location_valid=lambda *_: True,
+        engine=SimpleNamespace(settings=SimpleNamespace(live_enabled=True, pricing=pricing),
+            markets={market.id: market}, risk=risk))
+    monkeypatch.setattr(NativeRuntime, "profile_permits_market", lambda *_: True)
+    order = SimpleNamespace(id="OFFLINE-intent", venue="prophetx", mode="production",
+        account_fingerprint=account, market_id=market.id, outcome=TEAMS[0],
+        strategy="native_positive_ev", reserved_cost=Decimal(5),
+        execution_origin="automatic")
+    NativeRuntime.require_preflight(runtime, order)
+    assert adapter.preflight.native_trading_enabled
+    with pytest.raises(RiskRejected):
+        NativeRuntime.require_preflight(runtime, SimpleNamespace(**{**vars(order),
+            "reserved_cost": Decimal(6)}))
+
+
 def test_prophetx_owner_approved_two_percent_winnings_assumption_is_not_exchange_verified():
     now = utcnow().replace(microsecond=0)
     config, scope = approved_config("prophetx")

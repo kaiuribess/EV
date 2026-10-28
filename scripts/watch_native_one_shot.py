@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from evplatform.core.config import TrustedPilotPolicy
+from evplatform.core.config import TrustedPilotMarketScope, TrustedPilotPolicy
 from evplatform.core.models import Market
 
 
@@ -89,6 +89,14 @@ def _authorization(data: dict, now: datetime) -> tuple[datetime, str]:
     issued, expires = _time(data.get("issued_at")), _time(data.get("expires_at"))
     identity = data.get("authorization_id")
     venues = data.get("venues")
+    conditional = data.get("conditional_family_pilot") is True
+    conditional_scope = (isinstance(data.get("launch_scope_digest"), str)
+        and len(data["launch_scope_digest"]) == 64
+        and isinstance(data.get("account_fingerprint"), str)
+        and len(data["account_fingerprint"]) == 64)
+    venues_valid = (venues == ["prophetx"] and conditional_scope if conditional
+                    else isinstance(venues, list) and len(venues) == len(VENUES)
+                    and set(venues) == VENUES)
     if (data.get("schema_version") != 1 or not isinstance(identity, str) or len(identity) < 16
             or issued is None or expires is None or issued > now
             or not issued < expires <= issued + timedelta(hours=24)
@@ -97,8 +105,7 @@ def _authorization(data: dict, now: datetime) -> tuple[datetime, str]:
             or _money(data.get("minimum_ev")) != MIN_EV
             or _money(data.get("uncertainty_probability")) != MARGIN
             or data.get("maximum_native_attempts") != 1
-            or not isinstance(venues, list) or len(venues) != len(VENUES)
-            or set(venues) != VENUES):
+            or not venues_valid):
         raise ValueError("one_shot_authorization_invalid")
     return expires, identity
 
@@ -119,7 +126,10 @@ def _risk_fits(state: dict) -> bool:
             and _money(risk.get("unit_size_usd")) == CAP)
 
 
-def _scope(setup: dict, state: dict) -> tuple[str, str | None]:
+def _scope(setup: dict, state: dict, authorization: dict | None = None,
+           now: datetime | None = None) -> tuple[str, str | None]:
+    now = now or datetime.now(timezone.utc)
+    conditional = bool(authorization and authorization.get("conditional_family_pilot") is True)
     if (state.get("mode") != "production" or state.get("sample_feed_enabled") is not False
             or state.get("live_enabled") is not True):
         return "production_workspace_unavailable", None
@@ -140,6 +150,17 @@ def _scope(setup: dict, state: dict) -> tuple[str, str | None]:
            or p.get("settlement_policy") != SETTLEMENT.get(p.get("venue"))
            or not p.get("markets") for p in profiles):
         return "launch_scope_outside_one_shot_authorization", None
+    if conditional:
+        if (len(profiles) != 1 or profiles[0].get("venue") != "prophetx"
+                or profiles[0].get("account_fingerprint") != authorization.get("account_fingerprint")
+                or not isinstance((family := profiles[0].get("family_rule")), dict)
+                or (family.get("scope") or {}).get("venue") != "prophetx"
+                or (family.get("scope") or {}).get("league") != "NBA"
+                or (family.get("scope") or {}).get("market_type") != "moneyline"
+                or (family.get("scope") or {}).get("period") != "FULL"
+                or (expiry := _time(family.get("expires_at"))) is None
+                or expiry <= now):
+            return "conditional_family_scope_changed", None
     # A dynamic policy may cover more than one newly discovered *reviewed*
     # market. Every selected launch market must still have a current canonical
     # identity and pass the same scoped rule used by the pricing engine.
@@ -180,17 +201,24 @@ def _scope(setup: dict, state: dict) -> tuple[str, str | None]:
                 or (configured_ev := _money(resolved.get("min_ev"))) is None or configured_ev < MIN_EV
                 or resolved.get("trusted_pilot_policy") != pilot
                 or not policy.enabled or not policy.owner_approved
-                or policy.recurring_authorization or policy.maximum_native_attempts != 1
-                or policy.automatic_followups
+                or (not conditional and (policy.recurring_authorization
+                    or policy.maximum_native_attempts != 1 or policy.automatic_followups))
+                or (conditional and (not policy.recurring_authorization
+                    or policy.maximum_native_attempts is not None or not policy.automatic_followups
+                    or pricing.get("live_multi_book_enabled") is not True
+                    or policy.market_scope is None
+                    or policy.market_scope != TrustedPilotMarketScope.model_validate(family.get("scope"))))
                 or _money(policy.uncertainty_margin_probability) != MARGIN
-                or (debit := _money(policy.max_debit_usd)) is None or debit > CAP
-                or (loss := _money(policy.max_loss_usd)) is None or loss > CAP):
+                or (debit := _money(policy.max_debit_usd)) is None or (not conditional and debit > CAP)
+                or (loss := _money(policy.max_loss_usd)) is None or (not conditional and loss > CAP)):
             return "waiting_for_approved_source_and_market_policy", None
     if setup.get("safe_to_arm") is not True or (setup.get("activation") or {}).get("available") is not True:
         return "waiting_for_live_checks", None
     digest = (setup.get("activation") or {}).get("scope_digest")
     if not isinstance(digest, str) or len(digest) != 64:
         return "launch_digest_unavailable", None
+    if conditional and digest != authorization.get("launch_scope_digest"):
+        return "conditional_pilot_profile_changed", None
     return "ready", digest
 
 
@@ -257,7 +285,8 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
             _status("disabled", "No bounded one-shot authorization is saved")
             return "disabled"
         try:
-            expires, identity = _authorization(json.loads(AUTH_PATH.read_text(encoding="utf-8")), now)
+            authorization = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
+            expires, identity = _authorization(authorization, now)
         except (OSError, json.JSONDecodeError, ValueError):
             if (state.get("auto_trade") is True or state.get("kill_switch") is not True) and not check_only:
                 _control(client, arm=False)
@@ -287,7 +316,7 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
             if (state.get("auto_trade") is True or state.get("kill_switch") is not True) and not check_only:
                 _control(client, arm=False)
             raise
-        phase, digest = _scope(setup, state)
+        phase, digest = _scope(setup, state, authorization, now)
         if phase != "ready" and not (phase == "waiting_for_live_checks"
                                      and state.get("auto_trade") is True
                                      and state.get("kill_switch") is False

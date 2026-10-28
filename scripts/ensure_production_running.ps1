@@ -63,7 +63,10 @@ function Invoke-OneShotGate {
     if ($Port -ne 8002) { return }
     $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
     $recurring = Join-Path $dataDir 'native_recurring_authorization.json'
-    $gate = if (Test-Path -LiteralPath $recurring) {
+    $oneShot = Join-Path $dataDir 'native_one_shot_authorization.json'
+    $gate = if (Test-Path -LiteralPath $oneShot) {
+        Join-Path $PSScriptRoot 'watch_native_one_shot.py'
+    } elseif (Test-Path -LiteralPath $recurring) {
         Join-Path $PSScriptRoot 'watch_native_recurring.py'
     } else {
         Join-Path $PSScriptRoot 'watch_native_one_shot.py'

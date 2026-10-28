@@ -59,6 +59,10 @@ class ParlayGameBoardConfig(ParlayConfig):
     markets: list[str] = Field(default_factory=lambda: ["h2h", "spreads", "totals"])
     stream_kinds: list[Literal["game", "prop"]] = Field(default_factory=lambda: ["game"])
     include_props: bool = False
+    # A fresh current-board baseline is available only when this socket
+    # connects. Reconnect occasionally so unchanged rows can be assessed
+    # against a new provider snapshot without spending REST credits.
+    baseline_refresh_seconds: int = Field(default=300, ge=60, le=3600)
 
     @model_validator(mode="after")
     def complete_board_filters(self):
@@ -401,6 +405,7 @@ class ParlayWebSocket(ParlayRest):
         while not self._closed and sport in self._subscriptions:
             retry = True
             has_snapshot = False
+            planned_refresh = False
             try:
                 async with self._ws_factory(
                     self.stream_url(sport),
@@ -409,8 +414,23 @@ class ParlayWebSocket(ParlayRest):
                     max_size=8 * 1024 * 1024, max_queue=32,
                 ) as socket:
                     self._sockets[sport] = socket
+                    refresh_interval = getattr(self.config, "baseline_refresh_seconds", None)
+                    refresh_at = time.monotonic() + refresh_interval if refresh_interval else None
                     while not self._closed:
-                        frame = await asyncio.wait_for(socket.recv(), timeout=self.config.watchdog_seconds)
+                        if refresh_at is not None and time.monotonic() >= refresh_at:
+                            planned_refresh = True
+                            self.state, self.reason = ProviderState.BACKOFF, "Refreshing complete game board baseline"
+                            break
+                        timeout = min(self.config.watchdog_seconds,
+                                      max(0.001, refresh_at-time.monotonic())) if refresh_at else self.config.watchdog_seconds
+                        try:
+                            frame = await asyncio.wait_for(socket.recv(), timeout=timeout)
+                        except TimeoutError:
+                            if refresh_at is None or time.monotonic() < refresh_at:
+                                raise
+                            planned_refresh = True
+                            self.state, self.reason = ProviderState.BACKOFF, "Refreshing complete game board baseline"
+                            break
                         envelope = self.parse_frame(frame, has_snapshot=has_snapshot)
                         self.last_received_at = envelope.received_at
                         if envelope.kind == "connected":
@@ -456,7 +476,8 @@ class ParlayWebSocket(ParlayRest):
             if not retry or self._closed:
                 return
             self.reconnects += 1
-            await asyncio.sleep(backoff.next_delay())
+            if not planned_refresh:
+                await asyncio.sleep(backoff.next_delay())
 
     async def stream_updates(self) -> AsyncIterator[ProviderEnvelope]:
         if not await self.connect():

@@ -80,6 +80,12 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
             reasons.append(f"{book}: provider row is cached, degraded or assembled across frames")
         if ref.get("provider") == "parlay_rest":
             age(ref.get("source_stored_at"), f"{book} stored price row", policy.max_indicator_age_ms)
+        elif ref.get("provider") in {"parlay_ws", "parlay_game_ws"} and ref.get("source_retained_row_at") is not None:
+            # The stream's last_update is a retained row/source timestamp,
+            # not a fresh observation merely because a new baseline arrived.
+            # Unknown remains explicitly owner-accepted; a known old row does
+            # not become current when the socket reconnects.
+            age(ref["source_retained_row_at"], f"{book} retained price row", policy.max_indicator_age_ms)
         age(ref.get("local_receipt_at"), f"{book} delivery",
             min(config.trusted_max_delivery_age_ms, policy.max_indicator_age_ms))
         if ref.get("source_scope_poll_at") is not None:

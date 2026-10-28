@@ -225,8 +225,13 @@ class LaunchProfile(StrictRecord):
         if (bool(self.market_ids) == (self.family_rule is not None)
                 or self.family_rule is not None and self.family_rule.scope.venue != self.venue):
             raise ValueError("Launch profile needs either exact markets or one matching approved family rule")
-        if self.validation_pilot and self.family_rule is not None:
-            raise ValueError("Recurring family scope cannot use the one-attempt validation pilot")
+        if self.validation_pilot and self.family_rule is not None and (
+                self.venue != "prophetx" or self.family_rule.scope.sport != "basketball"
+                or self.family_rule.scope.league != "NBA"
+                or self.family_rule.scope.market_type != "moneyline"
+                or self.family_rule.scope.period != "FULL"
+                or self.min_reference_books < 3):
+            raise ValueError("Conditional validation pilot requires a reviewed ProphetX NBA full-game moneyline family")
         return self
 
     @model_validator(mode="after")
@@ -245,6 +250,10 @@ class LaunchProfile(StrictRecord):
         if (self.environment != "production"
                 or self.settlement_policy != pilot_settlement.get(self.venue)
                 or any(cap is None or cap > Decimal("5") for cap in caps)
+                or (self.family_rule is not None and (
+                    limits.daily_loss_limit_usd is None or limits.daily_loss_limit_usd > Decimal("5")
+                    or limits.max_native_daily_debit_usd is None
+                    or limits.max_native_daily_debit_usd > Decimal("5")))
                 or limits.max_native_order_attempts != 1
                 or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1
                 or not limits.available_cash_only or not limits.block_overlapping_events

@@ -178,6 +178,52 @@ def test_reviewed_dynamic_nfl_prop_scope_can_reach_existing_launch_gate():
     assert gate._scope(launch, current)[0] == "waiting_for_approved_source_and_market_policy"
 
 
+def test_conditional_prophetx_family_pilot_waits_for_real_market_and_binds_approval():
+    current, launch = state(), setup()
+    market = current["markets"][0]
+    market.update(sport="basketball", league="NBA", market_type="moneyline",
+        player=None, player_id=None, statistic=None, line=None,
+        participants=["Atlanta Hawks", "Charlotte Hornets"],
+        outcomes=["Atlanta Hawks", "Charlotte Hornets"],
+        settlement={"period": "FULL", "overtime": "included"},
+        extensions={"reviewed_normal_rule_id": "reviewed-nba-rule",
+                    "normal_outcome_reviewed": True})
+    scope = {"venue": "prophetx", "sport": "basketball", "league": "NBA",
+        "market_type": "moneyline", "statistics": [], "period": "FULL",
+        "reviewed_normal_rule_id": "reviewed-nba-rule"}
+    profile = launch["launch_scope"][0]
+    profile.update(venue="prophetx", account_fingerprint="a" * 64,
+        settlement_policy=gate.SETTLEMENT["prophetx"], family_rule={
+            "scope": scope, "expires_at": (NOW+timedelta(hours=2)).isoformat()})
+    policy = launch["pricing"]["trusted_pilot_policy"]
+    policy.update(exact_market_id=None, market_scope=scope, provider_id="parlay_game_ws",
+        trusted_books=["fanduel", "draftkings", "caesars", "bet365"],
+        reference_weights_percent={name: "25" for name in
+            ("fanduel", "draftkings", "caesars", "bet365")},
+        recurring_authorization=True, maximum_native_attempts=None,
+        automatic_followups=True, max_debit_usd="25", max_loss_usd="25")
+    launch["pricing"]["live_multi_book_enabled"] = True
+    auth = {**authorization(), "venues": ["prophetx"],
+        "conditional_family_pilot": True, "launch_scope_digest": DIGEST,
+        "account_fingerprint": "a" * 64}
+    assert gate._authorization(auth, NOW)[1] == auth["authorization_id"]
+    assert gate._scope(launch, current, auth, NOW) == ("ready", DIGEST)
+    launch["safe_to_arm"] = False
+    launch["activation"]["available"] = False
+    launch["launch_scope"][0]["markets"] = []
+    assert gate._scope(launch, current, auth, NOW)[0] == "launch_scope_outside_one_shot_authorization"
+    launch["launch_scope"][0]["markets"] = [{"id": MARKET}]
+    launch["safe_to_arm"] = True
+    launch["activation"]["available"] = True
+    market["extensions"]["research_only"] = True
+    assert gate._scope(launch, current, auth, NOW)[0] == "waiting_for_approved_source_and_market_policy"
+    del market["extensions"]["research_only"]
+    assert gate._scope(launch, current, {**auth, "launch_scope_digest": "x"*64}, NOW)[0] == \
+        "conditional_pilot_profile_changed"
+    with pytest.raises(ValueError):
+        gate._authorization({**auth, "venues": ["kalshi"]}, NOW)
+
+
 def test_check_only_and_invalid_limits_make_zero_control_calls(monkeypatch, tmp_path):
     _, calls, _ = mock_server(monkeypatch, tmp_path)
     assert gate.tick(now=NOW, check_only=True) == "ready"

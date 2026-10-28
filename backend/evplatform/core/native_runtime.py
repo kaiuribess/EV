@@ -1077,12 +1077,20 @@ class NativeRuntime:
                 one_shot_scope = (p.validation_pilot and p.limits.max_native_order_attempts == 1
                     and pilot.maximum_native_attempts == 1 and not pilot.recurring_authorization
                     and not pilot.automatic_followups)
+                conditional_family_pilot = (p.validation_pilot and getattr(p, "family_rule", None) is not None
+                    and p.venue == "prophetx" and p.limits.max_native_order_attempts == 1
+                    and pilot.recurring_authorization and pilot.automatic_followups
+                    and pilot.maximum_native_attempts is None
+                    and pilot.market_scope == p.family_rule.scope
+                    and p.limits.max_order_stake_usd <= Decimal("5")
+                    and p.limits.max_total_exposure_usd <= Decimal("5")
+                    and order.reserved_cost <= p.limits.max_order_stake_usd)
                 recurring_scope = (not p.validation_pilot and pilot.recurring_authorization
                     and pilot.automatic_followups and pilot.maximum_native_attempts is None
                     and p.limits.max_native_order_attempts is None
                     and p.limits.available_cash_only and p.limits.stake_sizing == "quarter_kelly")
                 if (not (manual or automatic or (preview_only and order.execution_origin == "manual"))
-                        or not (one_shot_scope or recurring_scope)
+                        or not (one_shot_scope or conditional_family_pilot or recurring_scope)
                         or not pilot.enabled or not pilot.owner_approved
                         or not pilot.permits_market(market)
                         or (pilot.market_scope is not None and pilot.market_scope.venue != order.venue)

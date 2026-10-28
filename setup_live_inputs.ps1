@@ -67,7 +67,7 @@ Configure-Input 'parlay_ws' @{
 Configure-Input 'parlay_game_ws' @{
     sports = $sports; bookmakers = $books; stream_kinds = @('game');
     markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000; max_age_seconds = 600;
-    include_props = $false; account_tier = 'unknown'
+    baseline_refresh_seconds = 300; include_props = $false; account_tier = 'unknown'
 }
 if ($isPaper) {
     Configure-Input 'parlay_paper_input' @{
