@@ -407,15 +407,18 @@ async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case):
                  "next_cursor": None}, "last_synced_at": iso()}
     active = await probe_prophetx_account(client, observed_at=NOW)
     assert not active.reconciled and active.open_order_count is None
+    assert "active-order history is not empty" in active.reason
     client.overrides["/v4/mm/get_order_history"] = lambda _: {
         "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-1)}
     lagging = await probe_prophetx_account(client, observed_at=NOW)
     assert not lagging.reconciled
+    assert "reporting has not caught up" in lagging.reason
     client.overrides["/v4/mm/get_order_history"] = lambda _: {
         "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
     client.private.orders[OID] = ({"status": "open"}, 1)
     private_active = await probe_prophetx_account(client, observed_at=NOW)
     assert not private_active.reconciled
+    assert "private stream still has active" in private_active.reason
 
 
 async def test_external_fill_allows_cash_diagnostic_without_certifying_inventory(case):

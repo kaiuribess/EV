@@ -61,6 +61,7 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
         if len(venue_external) != len(scoped_external):
             cash_verified = False
         current = None
+        blockers = []
         # A complete, current *empty* inventory can be established without
         # reconstructing lifetime history. This never converts a nonempty or
         # lagging account into a zero-exposure account.
@@ -69,6 +70,16 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
         relevant_managed = [row for row in managed_orders if row.venue == "prophetx"
             and row.mode == client.settings.environment and row.id not in settled_order_ids
             and row.status != OrderStatus.REJECTED]
+        if relevant_managed:
+            blockers.append("Managed ProphetX orders still require reconciliation")
+        if scoped_external:
+            blockers.append("Tracked ProphetX external positions still require release evidence")
+        if not no_credit:
+            blockers.append("ProphetX exposure credit is present outside funded-cash scope")
+        if before[1:] != (Decimal(0), Decimal(0)):
+            blockers.append("ProphetX wallet reports matched or unmatched exposure")
+        if private is None or captured_fence is None:
+            blockers.append("Current ProphetX private order heartbeat is unavailable")
         if (cash_verified and not relevant_managed and not scoped_external and no_credit
                 and before[1:] == (Decimal(0), Decimal(0)) and private is not None
                 and captured_fence is not None):
@@ -85,12 +96,20 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                     for status in ("open", "inactive")]
                 after = balance_facts(await client.fetch_balance(),
                     observed_at=observed_at or utcnow(), funded_cash_only=True)
-                if before == after and all(not history.rows for history in histories):
+                if before != after:
+                    blockers.append("ProphetX wallet changed during active-order reads")
+                elif any(history.rows for history in histories):
+                    blockers.append("ProphetX active-order history is not empty")
+                else:
                     watermark = min(history.last_synced_at for history in histories)
                     current = private.reconcile_current_empty(started_at=now,
                         reporting_watermark=watermark, captured_fence=captured_fence,
                         client=client, observed_at=observed_at or utcnow())
-            except (ReconciliationError, ValueError, TypeError, AttributeError):
+            except ReconciliationError as exc:
+                blockers.append(str(exc))
+                current = None
+            except (ValueError, TypeError, AttributeError):
+                blockers.append("ProphetX active-order report is invalid")
                 current = None
         return NativeAccountSnapshot(**base, balance_usd=before[0], cash_available_verified=cash_verified,
             open_order_count=0 if current is not None else None,
@@ -101,8 +120,8 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
             private_as_of=current,
             external_position_count=len(scoped_external), external_cost_usd=external_cost,
             reason="" if current is not None else
-                ("Current cash is verified; active orders, wallet exposure or reporting lag prevent zero-inventory verification"
-                 if cash_verified else "ProphetX account identity changed during wallet read"))
+                ("; ".join(dict.fromkeys(blockers)) if cash_verified else
+                 "ProphetX account identity changed during wallet read"))
     if review.current_inventory_reviewed_at is not None:
         baseline = review.current_inventory_reviewed_at
         if (review.account_fingerprint != fingerprint or review.valid_until <= now
