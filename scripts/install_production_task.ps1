@@ -3,17 +3,20 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$supervisor = Join-Path $PSScriptRoot 'ensure_production_running.ps1'
+$hiddenLauncher = Join-Path $PSScriptRoot 'run_production_supervisor_hidden.vbs'
 $taskName = 'EV Production Scanner 8002'
 $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existing) {
-    $owned = @($existing.Actions | Where-Object { $_.Arguments -like "*ensure_production_running.ps1*" })
+    $owned = @($existing.Actions | Where-Object {
+        $_.Arguments -like "*ensure_production_running.ps1*" -or
+        $_.Arguments -like "*run_production_supervisor_hidden.vbs*"
+    })
     if ($owned.Count -ne 1) { throw "A different task already uses $taskName." }
 }
 
-$powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
-$action = New-ScheduledTaskAction -Execute $powershell -WorkingDirectory $projectRoot `
-    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $supervisor + '" -Port 8002')
+$wscript = (Get-Command wscript.exe -ErrorAction Stop).Source
+$action = New-ScheduledTaskAction -Execute $wscript -WorkingDirectory $projectRoot `
+    -Argument ('//B //Nologo "' + $hiddenLauncher + '"')
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $logon = New-ScheduledTaskTrigger -AtLogOn -User $user
 $periodic = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
