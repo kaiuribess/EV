@@ -92,10 +92,21 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 query_to = math.ceil(now.timestamp())
                 query_from = query_to - 60 * 86400 + 1
                 for attempt in range(2):
-                    histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
-                        params={"status": status, "from": query_from, "to": query_to},
-                        observed_at=observed_at)
-                        for status in ("open", "inactive")]
+                    try:
+                        histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+                            params={"status": status, "from": query_from, "to": query_to},
+                            observed_at=observed_at)
+                            for status in ("open", "inactive")]
+                    except ReconciliationError as exc:
+                        if attempt == 0 and str(exc) == "Reporting watermark is stale or in the future":
+                            # A lagging report may catch up during the existing
+                            # bounded retry. Never accept the stale page or
+                            # extend its ten-second source-age requirement.
+                            await asyncio.sleep(5)
+                            query_to = math.ceil(utcnow().timestamp())
+                            query_from = query_to - 60 * 86400 + 1
+                            continue
+                        raise
                     after = balance_facts(await client.fetch_balance(),
                         observed_at=observed_at or utcnow(), funded_cash_only=True)
                     if before != after:

@@ -13,7 +13,7 @@ class TrustedPilotMarketScope(BaseModel):
     model_config = ConfigDict(extra="forbid")
     venue: Literal["kalshi", "novig", "prophetx"]
     sport: Literal["football", "basketball", "baseball", "hockey"]
-    league: Literal["NFL", "NBA", "MLB", "NHL"]
+    league: Literal["NFL", "NBA", "MLB", "NHL", "NCAAF", "NCAABM"]
     market_type: Literal["player_prop", "moneyline"]
     statistics: tuple[Literal["receptions", "receiving_yards", "passing_yards", "rushing_yards",
                               "points", "rebounds", "assists", "threes", "pra",
@@ -33,6 +33,8 @@ class TrustedPilotMarketScope(BaseModel):
             ("basketball", "NBA"): {"points", "rebounds", "assists", "threes", "pra"},
             ("baseball", "MLB"): {"pitcher_strikeouts", "hits", "total_bases"},
             ("hockey", "NHL"): {"shots_on_goal", "points"},
+            ("football", "NCAAF"): set(),
+            ("basketball", "NCAABM"): set(),
         }
         allowed = supported.get((self.sport, self.league))
         if allowed is None:

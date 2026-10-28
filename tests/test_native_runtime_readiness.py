@@ -62,7 +62,8 @@ def runtime(market, quotes):
     strategy = SimpleNamespace(enabled=True)
     records = {"parlay_rest": provider, "novig": venue, "native_positive_ev": strategy}
     risk = SimpleNamespace(config=RiskConfig(live_max_order_stake=Decimal("1")), native_orders={},
-                           auto_trade=False, kill_switch=True, settled=set())
+                           auto_trade=False, kill_switch=True, settled=set(),
+                           external_exposure_bounded=lambda venue: True)
     engine = SimpleNamespace(registry=SimpleNamespace(records=records), risk=risk,
         settings=Settings(mode="sandbox"), markets={market.id: market},
         quotes={market.id: {str(index): q.model_copy(update={"provider": "parlay_rest", "source_time": utcnow()})
@@ -73,6 +74,7 @@ def runtime(market, quotes):
         signal_ledger=SimpleNamespace(started=True))
     native = NativeRuntime.__new__(NativeRuntime)
     native.engine, native.profile, native.profile_error, native.build_id = engine, profile, "", "OFFLINE fixture"
+    native.invalidated_family_markets = set()
     native.execution_lease = SimpleNamespace(held=True, scope=(profile.venue, profile.environment))
     native.books = {(market.id, "novig", "home"): book}
     native.mapper = SimpleNamespace(mapping_digest=profile.mapping_digest, mappings=())

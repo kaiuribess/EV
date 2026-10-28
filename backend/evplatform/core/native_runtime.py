@@ -247,7 +247,8 @@ class NativeRuntime:
             return 0
         selected = [item for item in matches if item.venue == venue and
             (item.side == "yes" if venue == "kalshi" else item.side == "take")]
-        default_full_game = (venue == "prophetx" and
+        default_full_game = (venue == "prophetx" and market.league == "NBA"
+            and market.market_type == "moneyline" and
             "moneyline|moneyline|default_full_game" in rule.allowed_native_rule_texts)
         if (len(selected) != 2 or {item.outcome for item in selected} != set(market.outcomes)
                 or any((item.identity_limitations and not (default_full_game and
@@ -307,12 +308,24 @@ class NativeRuntime:
                     and native.get("type") == "moneyline" and native.get("sub_type") == "moneyline"
                     and market.league == "NBA" else
                     f"{native.get('type')}|{native.get('sub_type')}|{native.get('period')}") if isinstance(native, dict) else None
+                try:
+                    native_line = Decimal(str(native.get("line"))) if isinstance(native, dict) else None
+                except (ValueError, TypeError, ArithmeticError):
+                    native_line = None
+                exact_prop = (isinstance(native, dict) and market.market_type == "player_prop"
+                    and native.get("player_id") == market.player_id
+                    and native.get("statistic") == market.statistic
+                    and native.get("period") in {"FULL", "full", "full_game"}
+                    and native_line is not None and native_line.is_finite()
+                    and native_line == market.line)
+                exact_moneyline = (isinstance(native, dict) and market.market_type == "moneyline"
+                    and native.get("type") in {None, "moneyline"}
+                    and native.get("sub_type") == "moneyline"
+                    and (native.get("period") in {"FULL", "full", "full_game"}
+                         or native_period_rule == "moneyline|moneyline|default_full_game"))
                 if (not isinstance(native, dict) or not isinstance(event, dict)
                         or native.get("status") != "active"
-                        or native.get("type") not in {None, "moneyline"}
-                        or native.get("sub_type") != "moneyline"
-                         or (native.get("period") not in {"FULL", "full", "full_game"}
-                             and native_period_rule != "moneyline|moneyline|default_full_game")
+                        or not (exact_moneyline or exact_prop)
                          or native_period_rule not in rule.allowed_native_rule_texts
                         or match.native_strike_id is None
                         or native.get("strikes", {}).get(match.native_strike_id, {}).get("outcome_id")

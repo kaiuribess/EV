@@ -227,6 +227,104 @@ def test_prophetx_family_requires_exact_period_strikes_and_fee_bound():
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[1])
 
 
+def test_non_nba_prophetx_family_requires_explicit_full_period_and_league():
+    now = utcnow().replace(microsecond=0)
+    config, _ = approved_config("prophetx")
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
+        market_type="moneyline", reviewed_normal_rule_id=RULE_ID,
+        source_normal_rule_evidence="OFFLINE reviewed NFL full-game winner source rule")
+    config = config.model_copy(update={"trusted_pilot_policy":
+        config.trusted_pilot_policy.model_copy(update={"market_scope": scope})})
+    base, _ = source_fixture(config, now, "fixture-nfl-family", now+timedelta(days=1))
+    market = base.model_copy(update={"id": "reviewed:nfl-family-fixture", "sport": "football", "league": "NFL",
+        "settlement": base.settlement.model_copy(update={"overtime": "included"}),
+        "extensions": {**base.extensions, "research_only": False,
+            "reviewed_normal_rule_id": RULE_ID, "normal_outcome_reviewed": True}})
+    native = {"name": "Moneyline", "type": "moneyline", "sub_type": "moneyline",
+        "period": "full_game", "status": "active", "strikes": {
+            "atl": {"name": TEAMS[1], "outcome_id": "4", "status": "active"},
+            "cha": {"name": TEAMS[0], "outcome_id": "5", "status": "active"}}}
+    catalog = {("123", "219"): native}
+    events = {"123": {"event_id": 123, "name": market.event_name,
+        "scheduled": market.start_time.isoformat(), "status": "not_started", "league": "NFL"}}
+    matches = prophetx_matches(market, catalog, events, observed_at=now)
+    assert len(matches) == 2
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-nfl-v1",
+        approved_by="fixture", approval_evidence="OFFLINE exact NFL family rule fixture",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=1),
+        allowed_native_rule_texts=("moneyline|moneyline|full_game",),
+        quantity_step=Decimal(".01"), minimum_quantity=Decimal(1),
+        minimum_order_cost_usd=Decimal(1), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE ProphetX minimum fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE fee assumption fixture",
+        prophetx_native_settlement_evidence="OFFLINE reviewed NFL settlement fixture",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE catalog timestamp fixture")
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    assert rule.matches(market)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market}))
+    monitor = SimpleNamespace(research_catalog_at=now, research_events=events,
+        client=SimpleNamespace(public_market_data=SimpleNamespace(catalog=catalog)))
+    assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market, matches, monitor, now=now) == 2
+    native["period"] = None
+    assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 0
+    assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[0])
+
+
+def test_prophetx_prop_family_needs_exact_player_stat_line_and_period():
+    now = utcnow().replace(microsecond=0)
+    config, _ = approved_config("prophetx")
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
+        market_type="player_prop", statistics=("receptions",), reviewed_normal_rule_id=RULE_ID,
+        source_normal_rule_evidence="OFFLINE reviewed NFL receptions source rule")
+    config = config.model_copy(update={"trusted_pilot_policy":
+        config.trusted_pilot_policy.model_copy(update={"market_scope": scope})})
+    base, _ = source_fixture(config, now, "fixture-prop-family", now+timedelta(days=1))
+    market = base.model_copy(update={"id": "reviewed:prop-family-fixture", "sport": "football",
+        "league": "NFL", "market_type": "player_prop", "player": "Example Player",
+        "player_id": "player-7", "statistic": "receptions", "line": Decimal("3.5"),
+        "outcomes": ("over", "under"),
+        "settlement": base.settlement.model_copy(update={"overtime": "included"}),
+        "extensions": {**base.extensions, "research_only": False,
+            "reviewed_normal_rule_id": RULE_ID, "normal_outcome_reviewed": True}})
+    native = {"name": "Player Receptions", "type": "player_prop", "sub_type": "receptions",
+        "period": "full_game", "player_id": "player-7", "statistic": "receptions",
+        "line": "3.5", "status": "active", "strikes": {
+            "over-strike": {"name": "Over", "outcome_id": "4", "status": "active"},
+            "under-strike": {"name": "Under", "outcome_id": "5", "status": "active"}}}
+    catalog = {("123", "219"): native}
+    events = {"123": {"event_id": 123, "name": market.event_name,
+        "scheduled": market.start_time.isoformat(), "status": "not_started", "league": "NFL"}}
+    matches = prophetx_matches(market, catalog, events, observed_at=now)
+    assert len(matches) == 2
+    assert all("Example Player" in item.normal_win_condition for item in matches)
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-prop-v1",
+        approved_by="fixture", approval_evidence="OFFLINE exact prop rule fixture",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=1),
+        allowed_native_rule_texts=("player_prop|receptions|full_game",),
+        quantity_step=Decimal(".01"), minimum_quantity=Decimal(1),
+        minimum_order_cost_usd=Decimal(1), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE ProphetX minimum fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE fee assumption fixture",
+        prophetx_native_settlement_evidence="OFFLINE reviewed NFL prop settlement fixture",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE catalog timestamp fixture")
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market}))
+    monitor = SimpleNamespace(research_catalog_at=now, research_events=events,
+        client=SimpleNamespace(public_market_data=SimpleNamespace(catalog=catalog)))
+    assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market, matches, monitor, now=now) == 2
+    native["line"] = "4.5"
+    assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 0
+    assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, "over")
+
+
 def test_prophetx_certified_default_full_game_rule_needs_exact_unqualified_moneyline():
     now = utcnow().replace(microsecond=0)
     config, scope = approved_config("prophetx")

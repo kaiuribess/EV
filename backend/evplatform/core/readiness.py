@@ -157,7 +157,9 @@ class ApprovedNativeFamilyRule(StrictRecord):
 
     @model_validator(mode="after")
     def coherent_rule(self):
-        if (self.scope.market_type != "moneyline" or self.scope.league != "NBA"
+        if (self.scope.market_type not in {"moneyline", "player_prop"}
+                or self.scope.venue == "kalshi" and (
+                    self.scope.league != "NBA" or self.scope.market_type != "moneyline")
                 or not self.scope.source_normal_rule_evidence
                 or self.approved_at.tzinfo is None or self.expires_at.tzinfo is None
                 or self.expires_at <= self.approved_at
@@ -166,7 +168,7 @@ class ApprovedNativeFamilyRule(StrictRecord):
                 or self.minimum_quantity % self.quantity_step
                 or any(not text.strip() for text in self.allowed_native_rule_texts)
                 or len(set(self.allowed_native_rule_texts)) != len(self.allowed_native_rule_texts)):
-            raise ValueError("Approved NBA family rule needs exact source, native and order-grid evidence")
+            raise ValueError("Approved family rule needs exact source, native and order-grid evidence")
         if self.scope.venue == "prophetx" and (
                 (self.prophetx_fee_evidence_kind == "exchange_verified" and
                  (self.prophetx_winnings_fee_upper_per_stake is None or

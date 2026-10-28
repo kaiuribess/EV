@@ -453,6 +453,38 @@ async def test_current_empty_inventory_retries_one_lagging_reporting_watermark(c
         "open", "inactive", "open", "inactive"]
 
 
+async def test_current_empty_inventory_retries_stale_page_without_accepting_it(case, monkeypatch):
+    from evplatform.venues import prophetx_account
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    calls = iter((iso(-11), iso(), iso()))
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": next(calls)}
+    slept = []
+    async def pace(seconds):
+        slept.append(seconds)
+    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
+    result = await probe_prophetx_account(client, observed_at=NOW)
+    assert result.reconciled and result.balance_usd == D("49.10")
+    assert slept == [5]
+    assert [params["status"] for _, params in client.calls] == ["open", "open", "inactive"]
+
+
+async def test_current_empty_inventory_still_rejects_persistently_stale_report(case, monkeypatch):
+    from evplatform.venues import prophetx_account
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-11)}
+    async def pace(_seconds):
+        pass
+    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
+    result = await probe_prophetx_account(client, observed_at=NOW)
+    assert not result.reconciled and result.open_order_count is None
+    assert "Reporting watermark is stale or in the future" in result.reason
+    assert [params["status"] for _, params in client.calls] == ["open", "open"]
+
+
 async def test_external_fill_allows_cash_diagnostic_without_certifying_inventory(case):
     _, client, review = case
     external = SimpleNamespace(venue="prophetx", environment="sandbox",

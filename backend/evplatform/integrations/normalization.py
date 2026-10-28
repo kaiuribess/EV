@@ -924,7 +924,8 @@ class TrustedSourceProjector:
             return None
         if len(odds) != 2 or any(not price.is_finite() or price <= 1 for price in odds.values()):
             return None
-        period = "FULL" if offer.market_key in {"h2h", "spreads", "totals"} else offer.period
+        period = ("FULL" if offer.market_key in {"h2h", "spreads", "totals"}
+                  or offer.period in {"FULL", "full_game"} else offer.period)
         identity = {"source": "parlay", "sport": sport_key, "event": offer.event_id,
                     "start": start.isoformat(), "participants": names, "market": offer.market_key,
                     "player": player, "line": str(line) if line is not None else None,
@@ -1042,22 +1043,31 @@ class TrustedSourceProjector:
             config = market_config(self.pricing_getter(), market)
             policy = config.trusted_pilot_policy
             scope = policy.market_scope
+            full_game_winner = (offer.market_key == "h2h"
+                and (offer.period in {"FULL", "full_game"}
+                    or offer.provider == "parlay_game_ws" and offer.period is None)
+                and market.market_type == scope.market_type == "moneyline"
+                and len(market.participants) == 2
+                and set(market.outcomes) == set(market.participants)) if scope is not None else False
+            full_game_prop = (offer.period in {"FULL", "full_game"}
+                and market.market_type == scope.market_type == "player_prop"
+                and market.player and market.player_id
+                and market.statistic in scope.statistics
+                and market.line is not None
+                and market.line != market.line.to_integral_value()
+                and set(market.outcomes) == {"over", "under"}) if scope is not None else False
             if (policy.enabled and policy.owner_approved and scope is not None
                     and scope.source_normal_rule_evidence
                     and config.normal_outcome_policy == "winner_only_binary"
-                    # Parlay's game WebSocket documents unsuffixed h2h as the
-                    # full-game moneyline; period markets use distinct keys.
-                    # https://parlay-api.com/docs/websocket
-                    # This is a market-identity rule, never a freshness claim.
-                    and offer.market_key == "h2h" and (offer.period in {"FULL", "full_game"}
-                        or offer.provider == "parlay_game_ws" and offer.period is None)
+                    # Unsuffixed game h2h is documented as full-game. Props
+                    # require an explicit full-game period and exact half line.
+                    # The reviewed rule attests ordinary overtime/participation
+                    # scope; it never supplies quote freshness or active status.
+                    and (full_game_winner or full_game_prop)
                     and offer.provider in {policy.provider_id, policy.crosscheck_provider_id}
                     and offer.bookmaker in policy.trusted_books
                     and market.sport == scope.sport and market.league == scope.league
-                    and market.market_type == scope.market_type == "moneyline"
-                    and market.settlement.period == "FULL"
-                    and len(market.participants) == 2
-                    and set(market.outcomes) == set(market.participants)):
+                    and market.settlement.period == "FULL"):
                 # Approval establishes only the ordinary full-game question.
                 # It never converts a heartbeat to quote observation or an
                 # unknown market status to affirmative active evidence.

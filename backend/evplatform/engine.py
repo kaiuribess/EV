@@ -86,6 +86,7 @@ class Engine:
         self._signal_audit_state = OrderedDict()
         self._signal_audit_estimate_fingerprints = {}
         self._signal_publish_lock = asyncio.Lock()
+        self._last_signal_publication_at = None
         self.history = {}
         self.latest_typed = {}
         self.expirations = []
@@ -389,7 +390,18 @@ class Engine:
         # Stamp under one publish lock so queue order and the durable signal
         # cursor agree; source quote clocks in the payload remain unchanged.
         async with self._signal_publish_lock:
-            ordered = observation.model_copy(update={"evaluated_at": utcnow()})
+            now = utcnow()
+            previous = getattr(self, "_last_signal_publication_at", None)
+            if previous is not None and now <= previous:
+                # evaluated_at is the local processing order, not a sportsbook
+                # observation clock. Windows wall-clock adjustments can move it
+                # backwards while the event queue remains correctly ordered.
+                # A material clock regression still halts execution.
+                if previous - now > timedelta(seconds=1):
+                    self.risk.halt("Local signal processing clock regressed; review system time")
+                now = previous + timedelta(microseconds=1)
+            self._last_signal_publication_at = now
+            ordered = observation.model_copy(update={"evaluated_at": now})
             await self.bus.publish(Envelope(schema_name="signal.observation",
                                             source="strategy-engine", payload=ordered))
 

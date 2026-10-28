@@ -57,6 +57,37 @@ async def test_signal_publication_stamps_queue_order_after_concurrent_evaluation
     assert published[0] > item.evaluated_at-timedelta(seconds=10)
 
 
+async def test_signal_publication_preserves_queue_order_on_small_wall_clock_regression(market, monkeypatch):
+    engine = Engine.__new__(Engine)
+    engine._signal_publish_lock = asyncio.Lock()
+    engine.risk = SimpleNamespace(halt=Mock())
+    published = []
+    engine.bus = SimpleNamespace(publish=AsyncMock(side_effect=lambda event: published.append(event.payload)))
+    first = utcnow()
+    clocks = iter((first, first-timedelta(milliseconds=1)))
+    monkeypatch.setattr("evplatform.engine.utcnow", lambda: next(clocks))
+    item = SignalObservation(market=market, status="NO SIGNAL", reason="fixture")
+    await engine._publish_signal_observation(item)
+    await engine._publish_signal_observation(item)
+    assert published[1].evaluated_at > published[0].evaluated_at
+    assert published[1].reference_quotes == item.reference_quotes
+    engine.risk.halt.assert_not_called()
+
+
+async def test_material_signal_clock_regression_still_halts_execution(market, monkeypatch):
+    engine = Engine.__new__(Engine)
+    engine._signal_publish_lock = asyncio.Lock()
+    engine.risk = SimpleNamespace(halt=Mock())
+    engine.bus = SimpleNamespace(publish=AsyncMock())
+    first = utcnow()
+    clocks = iter((first, first-timedelta(seconds=2)))
+    monkeypatch.setattr("evplatform.engine.utcnow", lambda: next(clocks))
+    item = SignalObservation(market=market, status="NO SIGNAL", reason="fixture")
+    await engine._publish_signal_observation(item)
+    await engine._publish_signal_observation(item)
+    engine.risk.halt.assert_called_once()
+
+
 @pytest.fixture
 async def ledger(tmp_path):
     storage = Storage(str(tmp_path / "signals.db"))

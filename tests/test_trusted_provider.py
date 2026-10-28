@@ -327,6 +327,45 @@ def test_approved_game_websocket_unsuffixed_h2h_uses_documented_full_game_scope(
         [replace(offer, period="Q1")]) == []
 
 
+def test_approved_prop_scope_requires_explicit_full_period_and_exact_half_line():
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
+        market_type="player_prop", statistics=("receptions",),
+        reviewed_normal_rule_id="reviewed-nfl-receptions-v1",
+        source_normal_rule_evidence="OFFLINE full-game player participation and overtime rule review")
+    policy = TrustedPilotPolicy(enabled=True, owner_approved=True, market_scope=scope,
+        provider_id="parlay_rest", trusted_books=["fanduel", "draftkings", "caesars"],
+        min_distinct_books=3, accept_unknown_active_status=True,
+        accept_unknown_quote_observation_age=True, max_indicator_age_ms=30000,
+        independent_crosscheck="two_distinct_books",
+        uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal(25),
+        max_loss_usd=Decimal(25), recurring_authorization=True,
+        maximum_native_attempts=None, automatic_followups=True,
+        approval_evidence="OFFLINE approved prop scope fixture")
+    pricing = PricingConfig.model_validate({**config().model_dump(),
+        "multi_book_consensus_enabled": True,
+        "trusted_pilot_policy": policy.model_dump()})
+    envelope = ProviderEnvelope("parlay_rest", "props_snapshot", [], NOW, 1,
+        published_at=NOW, metadata={"sport": "americanfootball_nfl",
+            "focused_event": {"id": "event-prop", "home_team": "Home",
+                "away_team": "Away", "commence_time": (NOW+timedelta(hours=1)).isoformat()}})
+    offer = SourceOffer(provider="parlay_rest", bookmaker="fanduel", event_id="event-prop",
+        market_key="player_receptions", player_key="Example Player", line="3.5",
+        period="FULL", outcome_points={"Example Player Over": "3.5",
+            "Example Player Under": "3.5"},
+        prices={"Example Player Over": Decimal("1.85"),
+            "Example Player Under": Decimal("2.05")}, observed_at=None,
+        provider_time=NOW, context={"event_sport": "americanfootball_nfl",
+            "participants": ["Home", "Away"],
+            "scheduled_start": (NOW+timedelta(hours=1)).isoformat()})
+    market = TrustedSourceProjector(lambda: pricing).apply(envelope, [offer])[0][0]
+    assert market.id.startswith("reviewed:") and scope.matches(market)
+    assert market.settlement.period == "FULL"
+    assert TrustedSourceProjector(lambda: pricing).apply(envelope,
+        [replace(offer, period=None)]) == []
+    assert TrustedSourceProjector(lambda: pricing).apply(envelope,
+        [replace(offer, line="4", outcome_points={key: "4" for key in offer.outcome_points})]) == []
+
+
 def test_refreshed_game_baseline_cannot_make_old_retained_row_live_eligible():
     from evplatform.core.trusted_pilot import trusted_pilot_reference_check
     from tests.test_family_onboarding import approved_config, source_fixture

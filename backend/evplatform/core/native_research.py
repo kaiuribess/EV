@@ -484,7 +484,9 @@ def prophetx_matches(market: Market, catalog: dict[tuple[str, str], dict],
         exchange_index=None, source_start=market.start_time, native_start=native_start,
         rules_sha256=hashlib.sha256(rule.encode()).hexdigest(),
         rules_excerpt=f"ProphetX {native.get('sub_type')} / {native.get('name')}",
-        normal_win_condition=f"{outcome} wins the full-game {market.league} market",
+        normal_win_condition=(f"{market.player} {outcome} {market.line} {market.statistic} "
+            f"in the full-game {market.league} market" if market.market_type == "player_prop"
+            else f"{outcome} wins the full-game {market.league} market"),
         price_denomination_usd="stake_usd", catalog_observed_at=observed_at,
         identity_limitations=limitations) for outcome in market.outcomes]
 
