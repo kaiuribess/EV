@@ -470,6 +470,10 @@ def prophetx_matches(market: Market, catalog: dict[tuple[str, str], dict],
         return []
     event_id, market_id, native_start, native, mapped = candidates[0]
     rule = f"{event_id}|{market_id}|{native.get('type')}|{native.get('sub_type')}|{native.get('period')}|{sorted(mapped.items())}"
+    # The certified NBA contract defaults to the full event (including
+    # overtime) unless its specifications name a shorter period. The API's
+    # unqualified main Moneyline has no period field; retain that limitation
+    # for research until an owner-approved family rule binds this exact shape.
     limitations = ("Native period is not explicit in the catalog",) if native.get("period") is None else ()
     return [ResearchNativeMatch(
         venue="prophetx", source_market_id=market.id, source_event_id=market.event_id,

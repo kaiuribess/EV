@@ -247,8 +247,12 @@ class NativeRuntime:
             return 0
         selected = [item for item in matches if item.venue == venue and
             (item.side == "yes" if venue == "kalshi" else item.side == "take")]
+        default_full_game = (venue == "prophetx" and
+            "moneyline|moneyline|default_full_game" in rule.allowed_native_rule_texts)
         if (len(selected) != 2 or {item.outcome for item in selected} != set(market.outcomes)
-                or any(item.identity_limitations or item.source_market_fingerprint != market.identity()
+                or any((item.identity_limitations and not (default_full_game and
+                            item.identity_limitations == ("Native period is not explicit in the catalog",)))
+                        or item.source_market_fingerprint != market.identity()
                        or item.source_start != market.start_time or item.native_start is None
                        or abs((item.native_start-market.start_time).total_seconds()) > rule.max_start_delta_seconds
                        for item in selected)):
@@ -295,13 +299,21 @@ class NativeRuntime:
                 native = monitor.client.public_market_data.catalog.get(
                     (match.native_event_id, match.native_market_id))
                 event = monitor.research_events.get(match.native_event_id)
+                # CFTC filing 61599, Appendix A: NBA contracts include overtime
+                # unless a shorter period is specified. Only the unqualified
+                # main Moneyline shape can use this separately approved token.
+                native_period_rule = ("moneyline|moneyline|default_full_game"
+                    if native.get("period") is None and native.get("name") == "Moneyline"
+                    and native.get("type") == "moneyline" and native.get("sub_type") == "moneyline"
+                    and market.league == "NBA" else
+                    f"{native.get('type')}|{native.get('sub_type')}|{native.get('period')}") if isinstance(native, dict) else None
                 if (not isinstance(native, dict) or not isinstance(event, dict)
                         or native.get("status") != "active"
                         or native.get("type") not in {None, "moneyline"}
                         or native.get("sub_type") != "moneyline"
-                        or native.get("period") not in {"FULL", "full", "full_game"}
-                        or f"{native.get('type')}|{native.get('sub_type')}|{native.get('period')}"
-                            not in rule.allowed_native_rule_texts
+                         or (native.get("period") not in {"FULL", "full", "full_game"}
+                             and native_period_rule != "moneyline|moneyline|default_full_game")
+                         or native_period_rule not in rule.allowed_native_rule_texts
                         or match.native_strike_id is None
                         or native.get("strikes", {}).get(match.native_strike_id, {}).get("outcome_id")
                             != match.native_outcome_id):

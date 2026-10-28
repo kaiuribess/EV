@@ -227,6 +227,49 @@ def test_prophetx_family_requires_exact_period_strikes_and_fee_bound():
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[1])
 
 
+def test_prophetx_certified_default_full_game_rule_needs_exact_unqualified_moneyline():
+    now = utcnow().replace(microsecond=0)
+    config, scope = approved_config("prophetx")
+    market, _ = source_fixture(config, now, "default-period-fixture", now+timedelta(days=1))
+    catalog = ProphetXMarketData()
+    catalog.replace_catalog([{"data": {"123": [{"id": 219, "name": "Moneyline",
+        "type": "moneyline", "sub_type": "moneyline", "period": None,
+        "status": "active", "selections": [[{"strike_id": "atl-strike", "outcome_id": 4,
+        "name": "Atlanta Hawks", "status": "active"}],
+        [{"strike_id": "cha-strike", "outcome_id": 5,
+        "name": "Charlotte Hornets", "status": "active"}]]}]}}], ["123"], observed_at=now)
+    events = {"123": {"event_id": 123, "name": market.event_name,
+        "scheduled": market.start_time.isoformat(), "status": "not_started", "tournament_id": 132}}
+    matches = prophetx_matches(market, catalog.catalog, events, observed_at=now)
+    assert len(matches) == 2
+    assert all(item.identity_limitations == ("Native period is not explicit in the catalog",)
+               for item in matches)
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-px-default-v1",
+        approved_by="fixture", approval_evidence="OFFLINE approved exact default-full-game rule",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=2),
+        allowed_native_rule_texts=("moneyline|moneyline|default_full_game",),
+        max_start_delta_seconds=0, quantity_step=Decimal(".01"),
+        minimum_quantity=Decimal(1), minimum_order_cost_usd=Decimal(1),
+        cash_quantum_usd=Decimal(".01"), order_minimum_source="OFFLINE order-grid fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OWNER ASSUMPTION: 2% of winning profit",
+        prophetx_native_settlement_evidence="CFTC NBA filing 61599: default full event including overtime",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE v2 clock fixture")
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market}))
+    monitor = SimpleNamespace(research_catalog_at=now,
+        client=SimpleNamespace(public_market_data=catalog), research_events=events)
+    assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market, matches, monitor, now=now) == 2
+    assert all(item.fee_bound.evidence_kind == "owner_approved_assumption"
+               for item in runtime.mapper.mappings)
+    catalog.catalog[("123", "219")]["name"] = "First Half Moneyline"
+    assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 0
+    assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[0])
+
+
 def test_prophetx_owner_approved_two_percent_winnings_assumption_is_not_exchange_verified():
     now = utcnow().replace(microsecond=0)
     config, scope = approved_config("prophetx")
