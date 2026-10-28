@@ -211,7 +211,7 @@ def test_conditional_prophetx_family_pilot_waits_for_real_market_and_binds_appro
     launch["safe_to_arm"] = False
     launch["activation"]["available"] = False
     launch["launch_scope"][0]["markets"] = []
-    assert gate._scope(launch, current, auth, NOW)[0] == "launch_scope_outside_one_shot_authorization"
+    assert gate._scope(launch, current, auth, NOW)[0] == "waiting_for_qualifying_family_market"
     launch["launch_scope"][0]["markets"] = [{"id": MARKET}]
     launch["safe_to_arm"] = True
     launch["activation"]["available"] = True

@@ -148,7 +148,7 @@ def _scope(setup: dict, state: dict, authorization: dict | None = None,
            or p.get("validation_pilot") is not True
            or p.get("strategy_ids") != ["native_positive_ev"]
            or p.get("settlement_policy") != SETTLEMENT.get(p.get("venue"))
-           or not p.get("markets") for p in profiles):
+           for p in profiles):
         return "launch_scope_outside_one_shot_authorization", None
     if conditional:
         if (len(profiles) != 1 or profiles[0].get("venue") != "prophetx"
@@ -161,6 +161,9 @@ def _scope(setup: dict, state: dict, authorization: dict | None = None,
                 or (expiry := _time(family.get("expires_at"))) is None
                 or expiry <= now):
             return "conditional_family_scope_changed", None
+    if any(not p.get("markets") for p in profiles):
+        return ("waiting_for_qualifying_family_market" if conditional else
+                "launch_scope_outside_one_shot_authorization"), None
     # A dynamic policy may cover more than one newly discovered *reviewed*
     # market. Every selected launch market must still have a current canonical
     # identity and pass the same scoped rule used by the pricing engine.
