@@ -168,6 +168,7 @@ class NativeCandidate(NativeContract):
     model: str
     normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
     estimate_label: str = "Settlement-aware estimated EV"
+    fee_estimate_mode: Literal["after_fees", "exclude_fees"] = "after_fees"
     settlement_probability_source: str
     reference_profile_id: str | None = None
     reference_policy_digest: str | None = None
@@ -321,17 +322,26 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
     if not payout or not cost:
         raise NoSignal("Native order size is below representable cash bounds")
     non_decisive = bounds.non_decisive_probability()
+    pilot = config.trusted_pilot_policy
+    exclude_fees = bool(intent.instrument.venue == "prophetx"
+        and config.normal_outcome_policy == "winner_only_binary"
+        and config.reference_quality_mode == "trusted_provider"
+        and pilot.enabled and pilot.owner_approved
+        and pilot.fee_estimate_mode == "exclude_fees")
     # Refunded cost earns no edge. For a verified winnings-only fee, the
     # conservative fee bound is incurred on a win, not on a loss; all other
     # fee timing remains the old full-cap assumption.
     def profit_at(p):
         binary_profit = p * payout - cost
-        fee = p * intent.max_fee_usd if intent.fee_payment_timing == "winnings_only" else intent.max_fee_usd
+        fee = (D(0) if exclude_fees else
+               (p * intent.max_fee_usd if intent.fee_payment_timing == "winnings_only"
+                else intent.max_fee_usd))
         return min(binary_profit, (1 - non_decisive) * binary_profit) - fee
     expected_profit = profit_at(probability)
     ev = expected_profit / payout
-    expected_cost = cost + (probability * intent.max_fee_usd
-                            if intent.fee_payment_timing == "winnings_only" else intent.max_fee_usd)
+    expected_cost = cost + (D(0) if exclude_fees else
+                            (probability * intent.max_fee_usd if intent.fee_payment_timing == "winnings_only"
+                             else intent.max_fee_usd))
     roi = expected_profit / expected_cost
     sensitivity_p = (fair.sensitivity_probabilities[intent.instrument.outcome] - margin
                      if fair.sensitivity_probabilities else None)
@@ -341,8 +351,9 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
     sensitivity_ev = sensitivity_profit / payout if sensitivity_profit is not None else None
     sensitivity_cost = None
     if sensitivity_p is not None:
-        sensitivity_fee = (sensitivity_p * intent.max_fee_usd
-                           if intent.fee_payment_timing == "winnings_only" else intent.max_fee_usd)
+        sensitivity_fee = (D(0) if exclude_fees else
+                           (sensitivity_p * intent.max_fee_usd if intent.fee_payment_timing == "winnings_only"
+                            else intent.max_fee_usd))
         sensitivity_cost = cost + sensitivity_fee
     sensitivity_roi = sensitivity_profit / sensitivity_cost if sensitivity_profit is not None else None
     qualified = ev >= config.min_ev and roi >= config.min_roi and (
@@ -360,9 +371,11 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
         source_quality_mode=config.reference_quality_mode,
         uncertainty_margin_probability=margin if margin else None,
         qualified=qualified, model=fair.model, normal_outcome_policy=fair.normal_outcome_policy,
-        estimate_label=("Winner-only estimated EV — exceptional settlements excluded"
+        estimate_label=("Winner-only estimated edge before fees — actual fees excluded; exceptional settlements excluded"
+                        if exclude_fees else "Winner-only estimated EV — exceptional settlements excluded"
                         if fair.normal_outcome_policy == "winner_only_binary"
                         else "Settlement-aware estimated EV"),
+        fee_estimate_mode="exclude_fees" if exclude_fees else "after_fees",
         settlement_probability_source=bounds.source,
         reference_profile_id=fair.reference_profile_id, reference_policy_digest=fair.reference_policy_digest,
         reference_profile_status=fair.reference_profile_status, live_execution_allowed=fair.live_execution_allowed,
@@ -401,7 +414,12 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
         if min(probabilities) <= 0:
             raise NoSignal("Pilot uncertainty allowance eliminates the modeled winning chance")
         sizing = quarter_kelly_budget(book, min(probabilities), bounds, available_cash_usd=available_cash_usd,
-            unit_size_usd=unit_size_usd, now=now, max_stake_usd=max_stake_usd)
+            unit_size_usd=unit_size_usd, now=now, max_stake_usd=max_stake_usd,
+            include_fees_in_estimate=not (book.instrument.venue == "prophetx"
+                and scoped.normal_outcome_policy == "winner_only_binary"
+                and scoped.reference_quality_mode == "trusted_provider"
+                and scoped.trusted_pilot_policy.enabled and scoped.trusted_pilot_policy.owner_approved
+                and scoped.trusted_pilot_policy.fee_estimate_mode == "exclude_fees"))
         if sizing.budget_usd < sizing.minimum_upfront_debit_usd:
             raise NoSignal("Quarter-Kelly budget is below the verified native minimum upfront debit; skipped")
         max_stake_usd = sizing.budget_usd

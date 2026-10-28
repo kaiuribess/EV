@@ -45,7 +45,7 @@ def minimum_order(book, price, now):
 
 
 def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_size_usd, now,
-                        max_stake_usd=None, price=None):
+                        max_stake_usd=None, price=None, include_fees_in_estimate=True):
     if isinstance(available_cash_usd, (float, bool)) or available_cash_usd is None:
         raise NoSignal("Quarter Kelly requires verified account cash")
     cash = D(available_cash_usd)
@@ -59,7 +59,9 @@ def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_
         # Match size may be much smaller than the NEW order minimum. Reserve
         # for a cash rounding loss on every smallest legal partial match.
         gross = ins.minimum_split_payout(quantity, price) / quantity
-        if book.fee_bound.fee_payment_timing == "winnings_only":
+        if not include_fees_in_estimate:
+            unit_cost = cost / quantity
+        elif book.fee_bound.fee_payment_timing == "winnings_only":
             # The maximum fee is paid only when the outcome wins. Keep the
             # full bound on that branch, with no fictitious fee on a loss.
             gross -= (economic_cost - cost) / quantity

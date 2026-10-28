@@ -227,6 +227,70 @@ def test_prophetx_family_requires_exact_period_strikes_and_fee_bound():
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[1])
 
 
+def test_prophetx_fee_excluded_edge_is_explicit_and_keeps_fee_reservation():
+    now = utcnow().replace(microsecond=0)
+    config, _ = approved_config("prophetx")
+    market, quotes = source_fixture(config, now, "fee-choice-fixture", now+timedelta(days=1))
+    live_config = native_live_pricing(market, quotes, config, now)
+    fair = fair_value(market, quotes, live_config, now)
+    probabilities = {TEAMS[0]: Decimal(".53"), TEAMS[1]: Decimal(".47")}
+    fair = fair.model_copy(update={"probabilities": probabilities,
+        "sensitivity_probabilities": probabilities})
+    instrument = NativeInstrument(venue="prophetx", instrument_id="OFFLINE-strike",
+        canonical_market_id=market.id, outcome=TEAMS[0], native_outcome="4",
+        quantity_unit="usd_stake", price_format="american", quantity_step=Decimal(".01"),
+        minimum_quantity=Decimal(1), minimum_order_cost_usd=Decimal(1),
+        order_minimum_verified=True, order_minimum_source="OFFLINE verified minimum fixture",
+        cash_quantum_usd=Decimal(".01"), settlement_rules_fingerprint=market.identity(),
+        verified=True, source="OFFLINE reviewed strike fixture")
+    fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
+        per_unit_usd=Decimal(".02"), per_fill_usd=Decimal(0), fixed_order_usd=Decimal(0),
+        fee_payment_timing="winnings_only", verified=True, source="OFFLINE fee bound fixture",
+        observed_at=now-timedelta(seconds=1), valid_until=now+timedelta(minutes=1))
+    book = NativeBook(instrument=instrument, market_fingerprint=market.identity(),
+        asks=(NativeLevel(price=Decimal(100), quantity=Decimal(10)),), fee_bound=fee,
+        source_time=now-timedelta(seconds=1), received_at=now, revision=1,
+        synchronized=True, synthetic=False)
+    after_fees = native_opportunity(market, fair, book, live_config, max_stake_usd=Decimal(1),
+        mode="sandbox", now=now)
+    assert not after_fees.qualified and after_fees.fee_estimate_mode == "after_fees"
+    policy = config.trusted_pilot_policy.model_copy(update={"fee_estimate_mode": "exclude_fees"})
+    pre_fee_config = config.model_copy(update={"trusted_pilot_policy": policy})
+    pre_fee_live = native_live_pricing(market, quotes, pre_fee_config, now)
+    pre_fee_fair = fair_value(market, quotes, pre_fee_live, now).model_copy(update={
+        "probabilities": probabilities, "sensitivity_probabilities": probabilities})
+    before_fees = native_opportunity(market, pre_fee_fair, book, pre_fee_live,
+        max_stake_usd=Decimal(1), mode="sandbox", now=now)
+    assert before_fees.qualified
+    assert before_fees.expected_profit_usd == Decimal(".04")
+    assert before_fees.fee_estimate_mode == "exclude_fees"
+    assert "before fees" in before_fees.estimate_label
+    assert before_fees.intent.max_fee_usd == Decimal(".02")
+    assert before_fees.intent.reserved_cost_usd == Decimal(1)
+    sized = native_opportunity(market, pre_fee_fair, book, pre_fee_live, max_stake_usd=Decimal(25),
+        stake_sizing="quarter_kelly", available_cash_usd=Decimal(500), mode="sandbox", now=now)
+    assert sized.sizing.full_kelly_fraction == Decimal(".04")
+    assert sized.intent.quantity <= sized.sizing.budget_usd
+    assert sized.intent.max_fee_usd > 0
+    with pytest.raises(NoSignal, match="Unverified or incompatible native fee bound"):
+        native_opportunity(market, pre_fee_fair, book.model_copy(update={"fee_bound": fee.model_copy(
+            update={"verified": False})}), pre_fee_live, max_stake_usd=Decimal(1),
+            mode="sandbox", now=now)
+
+
+def test_fee_exclusion_cannot_be_enabled_without_approved_prophetx_scope():
+    config, _ = approved_config("prophetx")
+    raw = config.model_dump(mode="json")
+    raw["trusted_pilot_policy"]["fee_estimate_mode"] = "exclude_fees"
+    raw["trusted_pilot_policy"]["owner_approved"] = False
+    with pytest.raises(ValueError, match="approved ProphetX family scope"):
+        PricingConfig.model_validate(raw)
+    raw["trusted_pilot_policy"]["owner_approved"] = True
+    raw["trusted_pilot_policy"]["market_scope"]["venue"] = "kalshi"
+    with pytest.raises(ValueError, match="approved ProphetX family scope"):
+        PricingConfig.model_validate(raw)
+
+
 def test_live_consensus_requires_reviewed_weights_and_source_approval():
     config, _ = approved_config()
     payload = config.model_dump()

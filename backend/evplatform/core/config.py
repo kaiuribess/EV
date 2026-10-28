@@ -85,6 +85,9 @@ class TrustedPilotPolicy(BaseModel):
     max_indicator_age_ms: int | None = Field(default=None, ge=1000, le=600000)
     independent_crosscheck: Literal["two_distinct_books", "separate_provider"] | None = None
     uncertainty_margin_probability: Decimal | None = Field(default=None, gt=0, lt=1)
+    # An explicitly approved ProphetX modeling choice. Actual fee bounds are
+    # still required for cash/risk reservation and fill reconciliation.
+    fee_estimate_mode: Literal["after_fees", "exclude_fees"] = "after_fees"
     max_debit_usd: Decimal | None = Field(default=None, gt=0)
     max_loss_usd: Decimal | None = Field(default=None, gt=0)
     pregame_only: Literal[True] = True
@@ -108,6 +111,10 @@ class TrustedPilotPolicy(BaseModel):
 
     @model_validator(mode="after")
     def complete_if_enabled(self):
+        if self.fee_estimate_mode == "exclude_fees" and (
+                not self.enabled or not self.owner_approved or
+                self.market_scope is None or self.market_scope.venue != "prophetx"):
+            raise ValueError("Fee-excluded live estimates need an approved ProphetX family scope")
         if self.owner_approved and not self.enabled:
             raise ValueError("An approved pilot must be explicitly enabled")
         if self.enabled:
@@ -199,6 +206,9 @@ class PricingConfig(BaseModel):
                 or not self.trusted_pilot_policy.recurring_authorization
                 or self.trusted_pilot_policy.reference_weights_percent is None):
             raise ValueError("Live consensus needs a separate approved recurring source policy")
+        if (self.trusted_pilot_policy.fee_estimate_mode == "exclude_fees"
+                and self.normal_outcome_policy != "winner_only_binary"):
+            raise ValueError("Fee-excluded ProphetX estimates require winner-only pricing")
         if any(not key.startswith("research:") or len(key) > 160 or not value.is_finite()
                or not 0 <= value < 1 for key, value in self.trusted_research_market_margins.items()):
             raise ValueError("Research allowances require exact research market IDs and finite probabilities")
