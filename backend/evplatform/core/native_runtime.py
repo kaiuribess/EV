@@ -947,6 +947,7 @@ class NativeRuntime:
             "open_order_count": snapshot.open_order_count,
             "position_count": snapshot.position_count,
             "inventory_reconciled": snapshot.reconciled,
+            "reason": snapshot.reason,
             "trading_permission_verified": snapshot.trading_permission_verified,
             "geographic_attestation_expires_at": snapshot.geographic_attestation_expires_at.isoformat()
                 if snapshot.geographic_attestation_expires_at else None,
