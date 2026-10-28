@@ -1,6 +1,6 @@
 # ProphetX NBA recurring scope for owner review
 
-Status: **proposed; not saved as an approved launch profile or trading authorization.**
+Status: **owner approved and saved on 2026-10-28; execution pending live gates.** The account-bound profile and recurring authorization expire on 2026-10-29 at 20:14:49 UTC. Production remains disarmed until the existing release gate passes.
 
 ## Contract rule
 
@@ -16,4 +16,4 @@ Price with the owner-assumed ProphetX fee of **2% of winning profit**, explicitl
 
 ## Current production state
 
-The current account read reported $49.10 available cash, but the private order heartbeat was unavailable, so open-order and position inventory were **not** reconciled. Trading permission and order-specific location eligibility were not established by that read. At the deployment check, there were no current NBA moneyline fair-price estimates. The owner approval and account checks are required before saving an active profile and releasing the kill switch. No price, historical smoke trade, or contract filing alone establishes those live facts.
+An authenticated read reported $49.10 available cash and subsequently reconciled zero open orders and positions when the private heartbeat was current. This result is transient and is rechecked by the running service. Trading permission and order-specific location eligibility were not established by that read. At the deployment check, there were no current NBA moneyline fair-price estimates. The saved authorization does not release the kill switch until current account, market, liquidity, lifecycle, settlement, and risk checks pass. No price, historical smoke trade, or contract filing alone establishes those live facts.
