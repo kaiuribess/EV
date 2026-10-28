@@ -62,7 +62,8 @@ def supports_prophetx_settlement_scope(profile, adapter, mappings, managed_order
             execution = adapter.mappings.get((m.market.id, i.outcome))
             if (i.quantity_unit != "usd_stake" or i.price_format != "american"
                     or not m.fee_bound.observed_at <= now < m.fee_bound.valid_until
-                    or execution is None or not execution.verified or not execution.fee_schedule_verified
+                    or execution is None or not execution.verified
+                    or not (execution.fee_schedule_verified or execution.fee_assumption_approved)
                     or execution.native_instrument_id != i.instrument_id or execution.native_outcome != i.native_outcome
                     or execution.settlement_fingerprint != m.market.identity()
                     or execution.native_quantity_unit != i.quantity_unit or execution.native_payout_usd is not None):

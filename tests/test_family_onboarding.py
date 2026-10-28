@@ -227,6 +227,90 @@ def test_prophetx_family_requires_exact_period_strikes_and_fee_bound():
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[1])
 
 
+def test_prophetx_owner_approved_two_percent_winnings_assumption_is_not_exchange_verified():
+    now = utcnow().replace(microsecond=0)
+    config, scope = approved_config("prophetx")
+    market, _ = source_fixture(config, now, "assumed-fee-fixture", now+timedelta(days=1))
+    catalog = ProphetXMarketData()
+    catalog.replace_catalog([{"data": {"123": [{"id": 219, "name": "Moneyline",
+        "type": "moneyline", "sub_type": "moneyline", "period": "full_game",
+        "status": "active", "selections": [[{"strike_id": "atl-strike", "outcome_id": 4,
+        "name": "Atlanta Hawks", "status": "active"}],
+        [{"strike_id": "cha-strike", "outcome_id": 5,
+        "name": "Charlotte Hornets", "status": "active"}]]}]}}], ["123"], observed_at=now)
+    events = {"123": {"event_id": 123, "name": market.event_name,
+        "scheduled": market.start_time.isoformat(), "status": "not_started", "tournament_id": 132}}
+    matches = prophetx_matches(market, catalog.catalog, events, observed_at=now)
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-px-assumed-v1",
+        approved_by="fixture", approval_evidence="OFFLINE explicit owner fee assumption only",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=2),
+        allowed_native_rule_texts=("moneyline|moneyline|full_game",),
+        max_start_delta_seconds=0, quantity_step=Decimal(".01"),
+        minimum_quantity=Decimal(1), minimum_order_cost_usd=Decimal(1),
+        cash_quantum_usd=Decimal(".01"), order_minimum_source="OFFLINE native order-grid fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OWNER ASSUMPTION: 2% of net winning profit; not exchange verified",
+        prophetx_native_settlement_evidence="OFFLINE reviewed game-winner settlement fixture",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE confirmed v2 clock unit")
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market}))
+    monitor = SimpleNamespace(research_catalog_at=now,
+        client=SimpleNamespace(public_market_data=catalog), research_events=events)
+    assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 2
+    fee = runtime.mapper.mappings[0].fee_bound
+    instrument = runtime.mapper.mappings[0].instrument
+    assert not fee.verified and fee.usable_for_execution
+    assert fee.evidence_kind == "owner_approved_assumption"
+    assert fee.maximum_fee(instrument, Decimal(1), now, Decimal(150)) == Decimal(".03")
+    assert fee.maximum_fee(instrument, Decimal(1), now, Decimal(-200)) == Decimal(".01")
+    assert fee.maximum_upfront_fee(instrument, Decimal(1), now, Decimal(150)) == 0
+    market, quotes = source_fixture(config, now, "assumed-pricing", now+timedelta(days=1))
+    live_config = native_live_pricing(market, quotes, config, now)
+    fair = fair_value(market, quotes, live_config, now).model_copy(update={
+        "probabilities": {TEAMS[0]: Decimal(".55"), TEAMS[1]: Decimal(".45")},
+        "sensitivity_probabilities": {TEAMS[0]: Decimal(".55"), TEAMS[1]: Decimal(".45")}})
+    priced_instrument = instrument.model_copy(update={"canonical_market_id": market.id,
+        "outcome": TEAMS[0], "settlement_rules_fingerprint": market.identity()})
+    priced_fee = fee.model_copy(update={"instrument_fingerprint": instrument_fingerprint(priced_instrument)})
+    book = NativeBook(instrument=priced_instrument, market_fingerprint=market.identity(),
+        asks=(NativeLevel(price=Decimal(150), quantity=Decimal(10)),), fee_bound=priced_fee,
+        source_time=now-timedelta(seconds=1), received_at=now, revision=1,
+        synchronized=True, synthetic=False)
+    candidate = native_opportunity(market, fair, book, live_config,
+        max_stake_usd=Decimal(1), mode="sandbox", now=now)
+    assert candidate.fair_probability == Decimal(".54")  # 1% payout uncertainty
+    assert candidate.intent.max_fee_usd == Decimal(".03")
+    assert candidate.fee_evidence_kind == "owner_approved_assumption"
+    assert candidate.expected_profit_usd == (Decimal(".54") *
+        (candidate.intent.minimum_gross_payout_usd - candidate.intent.max_fee_usd) - 1)
+    sized = native_opportunity(market, fair, book, live_config,
+        max_stake_usd=Decimal(25), stake_sizing="quarter_kelly",
+        available_cash_usd=Decimal(100), mode="sandbox", now=now)
+    assert sized.sizing.full_kelly_fraction > 0
+    assert sized.intent.quantity <= sized.sizing.budget_usd
+    ready_facts = MarketReadiness(market_id=market.id, identity_verified=True,
+        provider_mapping_verified=True, venue_mapping_verified=True,
+        fee_schedule_verified=False, fee_assumption_approved=True,
+        native_units_supported=True, order_minimum_verified=True,
+        usable_reference_books=3, required_books_present=True,
+        oldest_reference_age_ms=1000, orderbook_age_ms=1000,
+        orderbook_synchronized=True, market_active=True,
+        executable_liquidity=True, synthetic=False)
+    ready_scope = SimpleNamespace(min_reference_books=3, max_reference_age_ms=30000,
+        max_orderbook_age_ms=2500)
+    assert family_market_ready(ready_facts, ready_scope)
+    assert not family_market_ready(ready_facts.model_copy(update={
+        "fee_assumption_approved": False}), ready_scope)
+    with pytest.raises(NoSignal, match="executable American price"):
+        fee.maximum_fee(instrument, Decimal(1), now)
+    with pytest.raises(ValueError):
+        ApprovedNativeFamilyRule.model_validate({**rule.model_dump(),
+            "prophetx_assumed_winnings_profit_rate": Decimal(".01")})
+
+
 def test_prophetx_fee_excluded_edge_is_explicit_and_keeps_fee_reservation():
     now = utcnow().replace(microsecond=0)
     config, _ = approved_config("prophetx")

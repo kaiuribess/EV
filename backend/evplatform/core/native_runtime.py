@@ -317,10 +317,14 @@ class NativeRuntime:
                         cash_quantum_usd=rule.cash_quantum_usd,
                         settlement_rules_fingerprint=market.identity(), verified=True,
                         source=f"family:{rule.digest()}:{match.rules_sha256}")
+                    assumed = rule.prophetx_fee_evidence_kind == "owner_approved_assumption"
                     fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
-                        per_unit_usd=rule.prophetx_winnings_fee_upper_per_stake,
+                        per_unit_usd="0" if assumed else rule.prophetx_winnings_fee_upper_per_stake,
                         per_fill_usd="0", fixed_order_usd="0",
-                        fee_payment_timing="winnings_only", verified=True,
+                        fee_payment_timing="winnings_only", verified=not assumed,
+                        evidence_kind=rule.prophetx_fee_evidence_kind,
+                        assumed_winnings_profit_rate=rule.prophetx_assumed_winnings_profit_rate if assumed else None,
+                        assumption_approval_evidence=rule.approval_evidence if assumed else None,
                         source=rule.prophetx_fee_source, observed_at=rule.approved_at,
                         valid_until=rule.expires_at)
                 except (ValueError, TypeError):
@@ -1376,6 +1380,7 @@ class NativeRuntime:
                 native_exchange_index=m.instrument.exchange_index,
                 settlement_fingerprint=m.market.identity(), mapping_evidence=m.instrument.source,
                 verified=True, fee_schedule_verified=m.fee_bound.verified,
+                fee_assumption_approved=m.fee_bound.evidence_kind == "owner_approved_assumption",
                 native_payout_usd=m.instrument.payout_per_unit_usd, native_quantity_unit=m.instrument.quantity_unit)
                 for m in self.mapper.mappings if m.instrument.venue == p.venue]
             if not mappings: return None
@@ -1404,6 +1409,7 @@ class NativeRuntime:
                     settlement_fingerprint=mapping.market.identity(),
                     mapping_evidence=i.source, verified=True,
                     fee_schedule_verified=mapping.fee_bound.verified,
+                    fee_assumption_approved=mapping.fee_bound.evidence_kind == "owner_approved_assumption",
                     native_payout_usd=i.payout_per_unit_usd,
                     native_quantity_unit=i.quantity_unit)
                 prior = adapter.mappings.get(key)
@@ -1697,6 +1703,10 @@ class NativeRuntime:
                 provider_mapping_verified=bool(refs) and all(r.get("provider") in p.provider_ids for r in refs),
                 venue_mapping_verified=exact_mapping,
                 fee_schedule_verified=bool(books) and all(b.fee_bound.verified
+                    and b.fee_bound.instrument_fingerprint == instrument_fingerprint(b.instrument)
+                    and b.fee_bound.observed_at <= now < b.fee_bound.valid_until for b in books),
+                fee_assumption_approved=bool(books) and all(
+                    b.fee_bound.evidence_kind == "owner_approved_assumption"
                     and b.fee_bound.instrument_fingerprint == instrument_fingerprint(b.instrument)
                     and b.fee_bound.observed_at <= now < b.fee_bound.valid_until for b in books),
                 native_units_supported=bool(books), order_minimum_verified=bool(books) and all(

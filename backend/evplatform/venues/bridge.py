@@ -39,6 +39,7 @@ class VerifiedVenueMapping(BaseModel):
     mapping_evidence: str = Field(min_length=1)
     verified: bool = False
     fee_schedule_verified: bool = False
+    fee_assumption_approved: bool = False
     canonical_payout_usd: Decimal = Decimal("1")
     native_payout_usd: Decimal | None = None
     native_quantity_unit: str = "unknown"
@@ -98,7 +99,7 @@ class NativeExecutionVenue(ExecutionVenue):
 
     def _mapping(self, order: Order) -> VerifiedVenueMapping:
         mapping = self.mappings.get((order.market_id, order.outcome))
-        if not mapping or not mapping.verified or not mapping.fee_schedule_verified:
+        if not mapping or not mapping.verified or not (mapping.fee_schedule_verified or mapping.fee_assumption_approved):
             raise PreflightRequired("Verified event/outcome/settlement mapping and fee schedule required")
         if order.venue != self.client.venue_id:
             raise PreflightRequired("Order venue does not match the execution adapter")
@@ -207,7 +208,7 @@ class NativeExecutionVenue(ExecutionVenue):
     def _native_mapping(self, intent: NativeOrderIntent) -> VerifiedVenueMapping:
         instrument = intent.instrument
         mapping = self.mappings.get((instrument.canonical_market_id, instrument.outcome))
-        if not mapping or not mapping.verified or not mapping.fee_schedule_verified:
+        if not mapping or not mapping.verified or not (mapping.fee_schedule_verified or mapping.fee_assumption_approved):
             raise PreflightRequired("Reviewed native mapping and fee evidence required")
         if (instrument.venue != self.client.venue_id
                 or mapping.native_instrument_id != instrument.instrument_id

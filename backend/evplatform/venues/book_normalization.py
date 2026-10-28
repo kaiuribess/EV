@@ -57,8 +57,11 @@ class NativeMarketMapping(NativeContract):
             raise ValueError("ProphetX mappings require native event and market scope")
         if self.source_timestamp_unit != "unknown" and not self.timestamp_unit_evidence.strip():
             raise ValueError("Numeric ProphetX clock units require verification evidence")
-        if not self.fee_bound.verified or self.fee_bound.instrument_fingerprint != instrument_fingerprint(i):
+        if not self.fee_bound.usable_for_execution or self.fee_bound.instrument_fingerprint != instrument_fingerprint(i):
             raise ValueError("Fee bound must be verified for this exact instrument")
+        if (self.fee_bound.evidence_kind == "owner_approved_assumption"
+                and (i.venue != "prophetx" or not i.source.startswith("family:"))):
+            raise ValueError("Owner fee assumptions require an approved ProphetX family rule")
         return self
 
 
@@ -489,8 +492,11 @@ class NativeBookMapper:
                 # dollar of risk would understate longshot commissions.
                 minimum_fee_per_stake = (p / Decimal(100) if p > 0
                     else Decimal(100) / abs(p)) * Decimal(".02")
-                if (mapping.fee_bound.fee_payment_timing != "winnings_only"
-                        or mapping.fee_bound.per_unit_usd < minimum_fee_per_stake):
+                fee = mapping.fee_bound
+                covers_public_rate = (fee.assumed_winnings_profit_rate == Decimal(".02")
+                    if fee.evidence_kind == "owner_approved_assumption"
+                    else fee.per_unit_usd >= minimum_fee_per_stake)
+                if fee.fee_payment_timing != "winnings_only" or not covers_public_rate:
                     levels, times = [], []
                     break
                 if p in seen_prices:

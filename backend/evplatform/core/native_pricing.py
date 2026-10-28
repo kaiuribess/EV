@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
-from decimal import Decimal, ROUND_FLOOR, localcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
@@ -41,7 +41,7 @@ class NativeLevel(NativeContract):
 
 
 class NativeFeeBound(NativeContract):
-    """Verified maximum USD charges, including every possible minimum-lot fill.
+    """Exchange-verified charge bound or explicit owner-approved fee estimate.
 
     A commission paid only on a win must still be bounded as if it is paid.
     These are caller-supplied bounds, not a hardcoded venue fee schedule.
@@ -52,6 +52,11 @@ class NativeFeeBound(NativeContract):
     fixed_order_usd: Nonnegative
     fee_payment_timing: Literal["upfront_or_unknown", "winnings_only"] = "upfront_or_unknown"
     verified: bool = False
+    # An owner-approved estimate is usable for the scoped ProphetX strategy,
+    # but is never represented as an exchange-verified fee schedule.
+    evidence_kind: Literal["exchange_verified", "owner_approved_assumption"] = "exchange_verified"
+    assumed_winnings_profit_rate: Annotated[ExactDecimal, Field(ge=0, lt=1)] | None = None
+    assumption_approval_evidence: str | None = None
     source: str = Field(min_length=1)
     observed_at: datetime
     valid_until: datetime
@@ -60,23 +65,46 @@ class NativeFeeBound(NativeContract):
     def valid_window(self):
         if self.valid_until <= self.observed_at:
             raise ValueError("Fee bounds must have a positive validity window")
+        if self.evidence_kind == "owner_approved_assumption":
+            if (self.verified or self.assumed_winnings_profit_rate is None
+                    or self.fee_payment_timing != "winnings_only"
+                    or self.per_unit_usd or self.per_fill_usd or self.fixed_order_usd
+                    or not self.assumption_approval_evidence
+                    or len(self.assumption_approval_evidence) < 16):
+                raise ValueError("Owner fee assumption needs an explicit winnings rate and approval evidence")
+        elif self.assumed_winnings_profit_rate is not None or self.assumption_approval_evidence:
+            raise ValueError("Exchange fee evidence cannot carry an owner assumption")
         return self
 
-    def maximum_fee(self, instrument: NativeInstrument, quantity: Decimal, now: datetime) -> Decimal:
-        if not self.verified or self.instrument_fingerprint != instrument_fingerprint(instrument):
+    @property
+    def usable_for_execution(self) -> bool:
+        return self.verified or self.evidence_kind == "owner_approved_assumption"
+
+    def maximum_fee(self, instrument: NativeInstrument, quantity: Decimal, now: datetime,
+                    price: Decimal | None = None) -> Decimal:
+        if not self.usable_for_execution or self.instrument_fingerprint != instrument_fingerprint(instrument):
             raise NoSignal("Unverified or incompatible native fee bound")
         if not self.observed_at <= now < self.valid_until:
             raise NoSignal("Native fee bound is stale or future-dated")
         if self.fee_payment_timing == "winnings_only" and instrument.venue != "prophetx":
             raise NoSignal("Winnings-only fee timing is not verified for this venue")
         instrument.validate_quantity(quantity)
+        if self.evidence_kind == "owner_approved_assumption":
+            if instrument.venue != "prophetx" or price is None:
+                raise NoSignal("ProphetX assumed fee needs the executable American price")
+            profit = max(Decimal(0), instrument.payout_bound(quantity, price, upper=True)
+                         - instrument.cost_for(quantity, price))
+            estimate = profit * self.assumed_winnings_profit_rate
+            return ((estimate / instrument.cash_quantum_usd).to_integral_value(
+                rounding=ROUND_CEILING) * instrument.cash_quantum_usd)
         with localcontext() as context:
             context.prec = 100
             maximum_fills = quantity / instrument.quantity_step
             return quantity * self.per_unit_usd + maximum_fills * self.per_fill_usd + self.fixed_order_usd
 
-    def maximum_upfront_fee(self, instrument: NativeInstrument, quantity: Decimal, now: datetime) -> Decimal:
-        fee = self.maximum_fee(instrument, quantity, now)
+    def maximum_upfront_fee(self, instrument: NativeInstrument, quantity: Decimal, now: datetime,
+                            price: Decimal | None = None) -> Decimal:
+        fee = self.maximum_fee(instrument, quantity, now, price)
         return Decimal(0) if self.fee_payment_timing == "winnings_only" else fee
 
 
@@ -169,6 +197,7 @@ class NativeCandidate(NativeContract):
     normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
     estimate_label: str = "Settlement-aware estimated EV"
     fee_estimate_mode: Literal["after_fees", "exclude_fees"] = "after_fees"
+    fee_evidence_kind: Literal["exchange_verified", "owner_approved_assumption"] = "exchange_verified"
     settlement_probability_source: str
     reference_profile_id: str | None = None
     reference_policy_digest: str | None = None
@@ -276,8 +305,8 @@ def research_native_estimate(market: Market, fair: FairValue, book: NativeBook,
     if level.quantity < quantity:
         raise NoSignal("Insufficient depth at the best executable price for one minimum lot")
     cost = instrument.cost_for(quantity, level.price)
-    fee_cap = book.fee_bound.maximum_fee(instrument, quantity, now)
-    debit = cost + book.fee_bound.maximum_upfront_fee(instrument, quantity, now)
+    fee_cap = book.fee_bound.maximum_fee(instrument, quantity, now, level.price)
+    debit = cost + book.fee_bound.maximum_upfront_fee(instrument, quantity, now, level.price)
     if cost < instrument.minimum_order_cost_usd:
         raise NoSignal("Minimum lot is below the venue's verified minimum cash order")
     payout = instrument.minimum_split_payout(quantity, level.price)
@@ -299,6 +328,7 @@ def research_native_estimate(market: Market, fair: FairValue, book: NativeBook,
             "cash_cost_usd": str(cost), "conservative_fee_usd": str(fee_cap),
             "expected_fee_usd": str(expected_fee),
             "fee_payment_timing": book.fee_bound.fee_payment_timing,
+            "fee_evidence_kind": book.fee_bound.evidence_kind,
             "maximum_debit_usd": str(debit), "normal_winning_payout_usd": str(payout),
             "maximum_loss_usd": str(debit),
             "expected_profit_usd": str(expected_profit), "roi": str(expected_profit / (cost + expected_fee)),
@@ -376,6 +406,7 @@ def _make_candidate(market: Market, fair: FairValue, book: NativeBook, config: P
                         if fair.normal_outcome_policy == "winner_only_binary"
                         else "Settlement-aware estimated EV"),
         fee_estimate_mode="exclude_fees" if exclude_fees else "after_fees",
+        fee_evidence_kind=book.fee_bound.evidence_kind,
         settlement_probability_source=bounds.source,
         reference_profile_id=fair.reference_profile_id, reference_policy_digest=fair.reference_policy_digest,
         reference_profile_status=fair.reference_profile_status, live_execution_allowed=fair.live_execution_allowed,
@@ -434,7 +465,7 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     available = sum((level.quantity for level in book.asks if level.price == price), D(0))
     step = instrument.quantity_step
     fee = book.fee_bound
-    fee.maximum_fee(instrument, step, now)  # Validate binding and expiry before sizing.
+    fee.maximum_fee(instrument, step, now, price)  # Validate binding and expiry before sizing.
     with localcontext() as context:
         context.prec = 100
         unit_cost = instrument.cost_for(step, price) / step
@@ -451,7 +482,7 @@ def native_opportunity(market: Market, fair: FairValue, book: NativeBook, config
     minimum = sizing.minimum_quantity if sizing else instrument.minimum_quantity
     if quantity < minimum:
         raise NoSignal("No executable native quantity within stake and liquidity limits")
-    maximum_fee = fee.maximum_fee(instrument, quantity, now)
+    maximum_fee = fee.maximum_fee(instrument, quantity, now, price)
     identity = str(uuid4())
     intent = NativeOrderIntent(id=identity, client_order_id=str(uuid4()), instrument=instrument,
         quantity=quantity, limit_price=price, max_fee_usd=maximum_fee, fee_source=fee.source,
@@ -489,7 +520,7 @@ def native_revalidate_intent(intent: NativeOrderIntent, market: Market, fair: Fa
                      if intent.instrument.price_satisfies_limit(level.price, intent.limit_price)), D(0))
     if available < quantity:
         raise NoSignal("Insufficient native liquidity at the original limit")
-    fees = book.fee_bound.maximum_fee(intent.instrument, quantity, now)
+    fees = book.fee_bound.maximum_fee(intent.instrument, quantity, now, intent.limit_price)
     if intent.fee_payment_timing != book.fee_bound.fee_payment_timing:
         raise NoSignal("Native fee payment timing changed after intent creation")
     if fees + paid > intent.max_fee_usd:

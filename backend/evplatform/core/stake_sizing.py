@@ -41,7 +41,7 @@ def minimum_order(book, price, now):
         ins.validate_quantity(quantity, order=True)
         cost = ins.cost_for(quantity, price)
         fee = book.fee_bound
-        return quantity, cost, cost + fee.maximum_fee(ins, quantity, now), cost + fee.maximum_upfront_fee(ins, quantity, now)
+        return quantity, cost, cost + fee.maximum_fee(ins, quantity, now, price), cost + fee.maximum_upfront_fee(ins, quantity, now, price)
 
 
 def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_size_usd, now,

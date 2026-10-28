@@ -12,7 +12,9 @@ from tests.test_watch_native_one_shot import state, setup, DIGEST
 from tests.test_family_onboarding import approved_config, family_rule, source_fixture
 
 
-NOW = datetime(2026, 10, 26, 18, 0, tzinfo=timezone.utc)
+# The controller also checks the real clock when it validates an approved
+# family rule, so a fixed 2026 date makes this fixture expire over time.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 CLIENT = httpx.Client
 
 

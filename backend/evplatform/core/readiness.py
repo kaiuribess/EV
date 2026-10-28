@@ -147,6 +147,8 @@ class ApprovedNativeFamilyRule(StrictRecord):
     # rate; it remains absent until genuine evidence supports a safe bound.
     prophetx_winnings_fee_upper_per_stake: Decimal | None = Field(default=None, ge=0)
     prophetx_fee_source: str | None = None
+    prophetx_fee_evidence_kind: Literal["exchange_verified", "owner_approved_assumption"] = "exchange_verified"
+    prophetx_assumed_winnings_profit_rate: Decimal | None = Field(default=None, ge=0, lt=1)
     prophetx_native_settlement_evidence: str | None = None
     prophetx_source_timestamp_unit: Literal["unknown", "seconds", "milliseconds", "microseconds", "nanoseconds"] = "unknown"
     prophetx_timestamp_unit_evidence: str | None = None
@@ -163,8 +165,14 @@ class ApprovedNativeFamilyRule(StrictRecord):
                 or any(not text.strip() for text in self.allowed_native_rule_texts)
                 or len(set(self.allowed_native_rule_texts)) != len(self.allowed_native_rule_texts)):
             raise ValueError("Approved NBA family rule needs exact source, native and order-grid evidence")
-        if self.scope.venue == "prophetx" and (self.prophetx_winnings_fee_upper_per_stake is None
-                or not self.prophetx_winnings_fee_upper_per_stake.is_finite()
+        if self.scope.venue == "prophetx" and (
+                (self.prophetx_fee_evidence_kind == "exchange_verified" and
+                 (self.prophetx_winnings_fee_upper_per_stake is None or
+                  not self.prophetx_winnings_fee_upper_per_stake.is_finite() or
+                  self.prophetx_assumed_winnings_profit_rate is not None))
+                or (self.prophetx_fee_evidence_kind == "owner_approved_assumption" and
+                    (self.prophetx_winnings_fee_upper_per_stake is not None or
+                     self.prophetx_assumed_winnings_profit_rate != Decimal("0.02")))
                 or not self.prophetx_fee_source
                 or not self.prophetx_native_settlement_evidence
                 or self.prophetx_source_timestamp_unit == "unknown"
@@ -296,6 +304,7 @@ class MarketReadiness(StrictRecord):
     provider_mapping_verified: bool = False
     venue_mapping_verified: bool = False
     fee_schedule_verified: bool = False
+    fee_assumption_approved: bool = False
     native_units_supported: bool = False
     order_minimum_verified: bool = False
     usable_reference_books: int = Field(default=0, ge=0)
@@ -315,10 +324,11 @@ def family_market_ready(market: MarketReadiness, profile: LaunchProfile, *,
                         runtime_age_seconds: float = 0) -> bool:
     """One current exact fixture may arm a reusable scope; others cannot veto it."""
     required = ("identity_verified", "provider_mapping_verified", "venue_mapping_verified",
-        "fee_schedule_verified", "native_units_supported", "order_minimum_verified",
+        "native_units_supported", "order_minimum_verified",
         "required_books_present", "orderbook_synchronized", "market_active",
         "executable_liquidity")
-    return bool(all(getattr(market, name) for name in required) and not market.synthetic
+    return bool((market.fee_schedule_verified or market.fee_assumption_approved)
+        and all(getattr(market, name) for name in required) and not market.synthetic
         and market.usable_reference_books >= profile.min_reference_books
         and market.oldest_reference_age_ms is not None
         and market.orderbook_age_ms is not None
