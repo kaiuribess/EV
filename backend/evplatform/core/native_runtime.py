@@ -957,6 +957,7 @@ class NativeRuntime:
         """Read an authenticated monitor account without binding an executor."""
         from ..plugins.external import NativeMonitor
         from ..venues.account_probe import probe_native_account
+        from ..venues.reconciliation import ReconciliationError
 
         record = self.engine.registry.records.get(venue)
         if (not record or not isinstance(record.plugin, NativeMonitor)
@@ -988,8 +989,10 @@ class NativeRuntime:
                        if venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                raise ValueError("Authenticated account inventory diagnostic failed") from None
+            except ReconciliationError as exc:
+                raise ValueError(f"Authenticated account reconciliation failed: {exc}") from None
+            except Exception as exc:
+                raise ValueError(f"Authenticated account inventory diagnostic failed ({type(exc).__name__})") from None
             current = self.engine.registry.records.get(venue)
             if (current is not record or not record.enabled or record.plugin.client is not client
                     or record.health.get("authenticated") is not True
