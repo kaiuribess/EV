@@ -414,7 +414,11 @@ class ParlayWebSocket(ParlayRest):
                     max_size=8 * 1024 * 1024, max_queue=32,
                 ) as socket:
                     self._sockets[sport] = socket
-                    refresh_interval = getattr(self.config, "baseline_refresh_seconds", None)
+                    # Only the approved NBA game scope needs this periodic
+                    # replacement baseline. Other sports keep their existing
+                    # stream/recovery cadence without extra reconnects.
+                    refresh_interval = (getattr(self.config, "baseline_refresh_seconds", None)
+                                        if sport == "basketball_nba" else None)
                     refresh_at = time.monotonic() + refresh_interval if refresh_interval else None
                     while not self._closed:
                         if refresh_at is not None and time.monotonic() >= refresh_at:
