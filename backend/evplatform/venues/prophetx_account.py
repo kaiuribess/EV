@@ -1,4 +1,5 @@
 """Authenticated ProphetX wallet cash and separate full-inventory verification."""
+import asyncio
 from datetime import timedelta
 from decimal import Decimal
 import math
@@ -90,21 +91,32 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 # not assert that the account has no older settled history.
                 query_to = math.ceil(now.timestamp())
                 query_from = query_to - 60 * 86400 + 1
-                histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
-                    params={"status": status, "from": query_from, "to": query_to},
-                    observed_at=observed_at)
-                    for status in ("open", "inactive")]
-                after = balance_facts(await client.fetch_balance(),
-                    observed_at=observed_at or utcnow(), funded_cash_only=True)
-                if before != after:
-                    blockers.append("ProphetX wallet changed during active-order reads")
-                elif any(history.rows for history in histories):
-                    blockers.append("ProphetX active-order history is not empty")
-                else:
+                for attempt in range(2):
+                    histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+                        params={"status": status, "from": query_from, "to": query_to},
+                        observed_at=observed_at)
+                        for status in ("open", "inactive")]
+                    after = balance_facts(await client.fetch_balance(),
+                        observed_at=observed_at or utcnow(), funded_cash_only=True)
+                    if before != after:
+                        blockers.append("ProphetX wallet changed during active-order reads")
+                        break
+                    if any(history.rows for history in histories):
+                        blockers.append("ProphetX active-order history is not empty")
+                        break
                     watermark = min(history.last_synced_at for history in histories)
+                    if watermark < now and attempt == 0:
+                        # Reporting replicates behind the private order stream.
+                        # One paced retry lets its watermark cover this probe;
+                        # the unchanged wallet and private fence remain required.
+                        await asyncio.sleep(5)
+                        query_to = math.ceil(utcnow().timestamp())
+                        query_from = query_to - 60 * 86400 + 1
+                        continue
                     current = private.reconcile_current_empty(started_at=now,
                         reporting_watermark=watermark, captured_fence=captured_fence,
                         client=client, observed_at=observed_at or utcnow())
+                    break
             except ReconciliationError as exc:
                 blockers.append(str(exc))
                 current = None

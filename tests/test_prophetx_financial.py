@@ -421,6 +421,18 @@ async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case):
     assert "private stream still has active" in private_active.reason
 
 
+async def test_current_empty_inventory_retries_one_lagging_reporting_watermark(case):
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    clocks = iter((iso(-1), iso(-1), iso(), iso()))
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": next(clocks)}
+    result = await probe_prophetx_account(client, observed_at=NOW)
+    assert result.reconciled and result.open_order_count == result.position_count == 0
+    assert [params["status"] for _, params in client.calls] == [
+        "open", "inactive", "open", "inactive"]
+
+
 async def test_external_fill_allows_cash_diagnostic_without_certifying_inventory(case):
     _, client, review = case
     external = SimpleNamespace(venue="prophetx", environment="sandbox",

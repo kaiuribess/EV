@@ -988,7 +988,8 @@ class NativeRuntime:
                     **({"adapter": self.manager.adapters.get(venue)} if venue == "polymarket_us"
                        and getattr(self.manager.adapters.get(venue), "client", None) is client else {}),
                     **({"management_client": record.plugin.management_client}
-                       if venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
+                       if venue == "novig" and getattr(record.plugin, "management_client", None) else {})),
+                    timeout=30 if venue == "prophetx" else 20)
             except asyncio.CancelledError:
                 raise
             except VenueHTTPError as exc:
