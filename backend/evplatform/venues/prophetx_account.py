@@ -45,23 +45,60 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 account_fingerprint=fingerprint, identity_verified=True, observed_at=now)
     private = getattr(client, "private", None)
     captured_fence = private.begin_probe(client=client) if private is not None else None
-    before = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow(),
+    raw_before = await client.fetch_balance()
+    before = balance_facts(raw_before, observed_at=observed_at or utcnow(),
                            funded_cash_only=review is not None)
-    if external_positions and review is not None:
+    if any(row.venue == "prophetx" and row.environment == client.settings.environment
+           for row in external_positions) and review is not None:
         raise ReconciliationError("ProphetX external fills need an account-specific inventory review")
     if review is None:
+        venue_external = [row for row in external_positions if row.venue == "prophetx"
+            and row.environment == client.settings.environment]
+        scoped_external = [row for row in venue_external if row.account_fingerprint == fingerprint]
         cash_verified = (authenticated_identity(client) == (user, fingerprint)
                          and (private is None or private.fence(client=client) == captured_fence))
-        external_cost = sum((row.cost_usd for row in external_positions
-                             if row.venue == "prophetx" and row.environment == client.settings.environment
-                             and row.account_fingerprint == fingerprint), Decimal(0))
-        if len(external_positions) != sum(row.account_fingerprint == fingerprint
-                                         for row in external_positions):
+        external_cost = sum((row.cost_usd for row in scoped_external), Decimal(0))
+        if len(venue_external) != len(scoped_external):
             cash_verified = False
+        current = None
+        # A complete, current *empty* inventory can be established without
+        # reconstructing lifetime history. This never converts a nonempty or
+        # lagging account into a zero-exposure account.
+        no_credit = _number(_object(raw_before.get("data"), "balance data").get("gec_balance"),
+                            "global exposure credit") == 0
+        relevant_managed = [row for row in managed_orders if row.venue == "prophetx"
+            and row.mode == client.settings.environment and row.id not in settled_order_ids
+            and row.status != OrderStatus.REJECTED]
+        if (cash_verified and not relevant_managed and not scoped_external and no_credit
+                and before[1:] == (Decimal(0), Decimal(0)) and private is not None
+                and captured_fence is not None):
+            try:
+                # Query active statuses without a creation-date filter: a
+                # long-running position must not disappear from this check.
+                # Inactive covers the documented pre-match submission state.
+                histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+                    params={"status": status}, observed_at=observed_at)
+                    for status in ("open", "inactive")]
+                after = balance_facts(await client.fetch_balance(),
+                    observed_at=observed_at or utcnow(), funded_cash_only=True)
+                if before == after and all(not history.rows for history in histories):
+                    watermark = min(history.last_synced_at for history in histories)
+                    current = private.reconcile_current_empty(started_at=now,
+                        reporting_watermark=watermark, captured_fence=captured_fence,
+                        client=client, observed_at=observed_at or utcnow())
+            except (ReconciliationError, ValueError, TypeError, AttributeError):
+                current = None
         return NativeAccountSnapshot(**base, balance_usd=before[0], cash_available_verified=cash_verified,
-            external_position_count=len(external_positions), external_cost_usd=external_cost,
-            reason="Current cash is verified; external fills, LEC and older positions require a reviewed funded-cash inventory scope"
-                   if cash_verified else "ProphetX account identity changed during wallet read")
+            open_order_count=0 if current is not None else None,
+            position_count=0 if current is not None else None,
+            reconciled=current is not None,
+            private_connection_generation=captured_fence[0] if current is not None else None,
+            private_revision=captured_fence[1] if current is not None else None,
+            private_as_of=current,
+            external_position_count=len(scoped_external), external_cost_usd=external_cost,
+            reason="" if current is not None else
+                ("Current cash is verified; active orders, wallet exposure or reporting lag prevent zero-inventory verification"
+                 if cash_verified else "ProphetX account identity changed during wallet read"))
     if review.current_inventory_reviewed_at is not None:
         baseline = review.current_inventory_reviewed_at
         if (review.account_fingerprint != fingerprint or review.valid_until <= now

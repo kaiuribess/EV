@@ -379,6 +379,45 @@ async def test_inventory_missing_history_review_never_assumes_empty_account(case
     assert result.balance_usd == D("89.8")
 
 
+async def test_current_empty_inventory_uses_wallet_active_history_and_private_fence(case):
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    def active_status(params):
+        assert params["status"] in {"open", "inactive"}
+        assert "from" not in params and "to" not in params
+        return {"data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
+    client.overrides["/v4/mm/get_order_history"] = active_status
+    other = SimpleNamespace(venue="kalshi", environment="sandbox",
+        account_fingerprint="other", cost_usd=D("10"))
+    result = await probe_prophetx_account(client, observed_at=NOW,
+                                           external_positions=(other,))
+    assert result.reconciled and result.cash_available_verified
+    assert result.open_order_count == result.position_count == 0
+    assert result.external_position_count == 0 and result.external_cost_usd == 0
+    assert result.balance_usd == D("49.10")
+    assert client.private.matches(result, client=client)
+    assert [params["status"] for _, params in client.calls] == ["open", "inactive"]
+
+
+async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case):
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    client.overrides["/v4/mm/get_order_history"] = lambda params: {
+        "data": {"orders": [client.row] if params["status"] == "open" else [],
+                 "next_cursor": None}, "last_synced_at": iso()}
+    active = await probe_prophetx_account(client, observed_at=NOW)
+    assert not active.reconciled and active.open_order_count is None
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-1)}
+    lagging = await probe_prophetx_account(client, observed_at=NOW)
+    assert not lagging.reconciled
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
+    client.private.orders[OID] = ({"status": "open"}, 1)
+    private_active = await probe_prophetx_account(client, observed_at=NOW)
+    assert not private_active.reconciled
+
+
 async def test_external_fill_allows_cash_diagnostic_without_certifying_inventory(case):
     _, client, review = case
     external = SimpleNamespace(venue="prophetx", environment="sandbox",
