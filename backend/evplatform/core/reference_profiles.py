@@ -50,7 +50,7 @@ class ReferenceProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal[1] = 1
     selectors: tuple[ProfileSelector, ...] = Field(min_length=1)
-    phase: Literal["pregame"] = "pregame"
+    phase: Literal["pregame", "inplay"] = "pregame"
     weights_percent: dict[str, Decimal]
     # Anchor-free research and separately approved multi-book scopes are
     # explicit; existing sharp profiles retain their configured anchors.
@@ -84,7 +84,7 @@ class ReferenceProfile(BaseModel):
 class ReferenceFreshnessRule(ProfileSelector):
     provider: str = Field(min_length=1)
     bookmaker: str = Field(min_length=1)
-    phase: Literal["pregame"] = "pregame"
+    phase: Literal["pregame", "inplay"] = "pregame"
     ttl_seconds: Decimal = Field(gt=0)
     verified: bool = False
     evidence: str = Field(min_length=8)
@@ -108,10 +108,13 @@ class ReferenceFreshnessRule(ProfileSelector):
 def profile_for_market(config, market: Market, now: datetime) -> tuple[str, ReferenceProfile] | None:
     if config.reference_profile_mode != "strict":
         return None
-    if market.status != "scheduled" or now >= market.start_time:
-        raise ValueError("Reference profiles are pregame only; scheduled future start required")
+    phase = "pregame" if market.status == "scheduled" and now < market.start_time else (
+        "inplay" if market.status == "live" and now >= market.start_time else None)
+    if phase is None:
+        raise ValueError("Market phase and scheduled start are inconsistent")
     matches = [(name, config.reference_profiles[name]) for name in config.enabled_reference_profiles
-               if any(selector.matches(market) for selector in config.reference_profiles[name].selectors)]
+               if config.reference_profiles[name].phase == phase
+               and any(selector.matches(market) for selector in config.reference_profiles[name].selectors)]
     if not matches:
         raise ValueError("No enabled reference profile matches the exact sport, league, market and statistic")
     if len(matches) != 1:
@@ -128,7 +131,8 @@ def policy_digest(config, market: Market) -> str:
 def freshness_rule(config, market: Market, provider: str, bookmaker: str) -> ReferenceFreshnessRule | None:
     return next((rule for rule in config.profile_freshness_rules
                  if rule.provider == provider and rule.bookmaker == bookmaker and rule.matches(market)
-                 and rule.phase == "pregame" and rule.verified), None)
+                 and rule.phase == ("inplay" if market.status == "live" else "pregame")
+                 and rule.verified), None)
 
 
 def quote_eligibility(config, market: Market, quote: Quote, now: datetime) -> tuple[bool, tuple[str, ...], float | None]:
@@ -166,6 +170,12 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
     """
     if quote.status in {"suspended", "withdrawn"}:
         return False, ("Sportsbook selection explicitly suspended or withdrawn",), None
+    if market.status == "live":
+        clock = quote.source_observed_at if quote.observation_verified else quote.source_time
+        if (market.extensions.get("inplay_price_after_start") is not True
+                or clock is None or clock < market.start_time
+                or not 0 <= (now-clock).total_seconds()*1000 <= config.trusted_max_indicator_age_ms):
+            return False, ("In-play price-row time is missing, prematch or expired",), None
     delivery_age = (now - quote.received_at).total_seconds() * 1000
     if not 0 <= delivery_age <= config.trusted_max_delivery_age_ms:
         return False, ("Provider-delivered price pair is expired or future-dated",), None
@@ -197,6 +207,8 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
             if not 0 <= age <= config.trusted_max_indicator_age_ms:
                 return False, (f"Provider {label} indicator is expired or future-dated",), delivery_age
     caveats = ["Provider-trusted research estimate; not approved for live execution"]
+    if market.status == "live":
+        caveats.append("Price row changed after scheduled start; current event state and selection availability unverified")
     if limited_board:
         caveats.append("Provider board coverage is bounded or paginated; only this complete price pair was used")
     if not quote.observation_verified or quote.source_observed_at is None:

@@ -59,7 +59,8 @@ class TrustedPilotMarketScope(BaseModel):
             market.player is None and market.player_id is None and market.statistic is None
             and market.line is None and len(market.participants) == 2
             and set(market.outcomes) == set(market.participants))
-        return bool(market.sport == self.sport and market.league == self.league
+        return bool(market.status == "scheduled"
+            and market.sport == self.sport and market.league == self.league
             and market.market_type == self.market_type and same_question
             and market.settlement.period == self.period
             and market.settlement.overtime == "included"

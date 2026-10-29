@@ -844,6 +844,14 @@ class TrustedSourceProjector:
         "americanfootball_ncaaf": ("football", "NCAAF"),
         "basketball_ncaab": ("basketball", "NCAABM"),
         "basketball_ncaabm": ("basketball", "NCAABM"),
+        "tennis_atp": ("tennis", "ATP"),
+        "tennis_wta": ("tennis", "WTA"),
+        "soccer_epl": ("soccer", "EPL"),
+        "soccer_spain_la_liga": ("soccer", "LA_LIGA"),
+        "soccer_germany_bundesliga": ("soccer", "BUNDESLIGA"),
+        "soccer_italy_serie_a": ("soccer", "SERIE_A"),
+        "soccer_france_ligue_one": ("soccer", "LIGUE_1"),
+        "soccer_usa_mls": ("soccer", "MLS"),
     }
 
     def __init__(self, pricing_getter):
@@ -865,6 +873,21 @@ class TrustedSourceProjector:
                 del self.active[key]
         return updates
 
+    def invalidate_scope(self, provider: str, selectors: dict[str, str],
+                         sport: str | None = None) -> list[tuple[Market, Quote]]:
+        """Withdraw research quotes when a named source row is removed or fails."""
+        positions = {"bookmaker": 1, "event_id": 2, "market_key": 3}
+        updates = []
+        for key, (market, quote) in list(self.active.items()):
+            if (key[0] != provider
+                    or sport is not None and market.extensions.get("provider_sport") != sport
+                    or any(key[positions[name]] != value for name, value in selectors.items()
+                           if name in positions)):
+                continue
+            updates.append((market, quote.model_copy(update={"status": "withdrawn"})))
+            del self.active[key]
+        return updates
+
     @classmethod
     def _market_quote(cls, envelope: ProviderEnvelope, offer: SourceOffer):
         from evplatform.core.profile_import import STATISTICS
@@ -875,10 +898,21 @@ class TrustedSourceProjector:
         if (sport_league is None or not offer.event_id or not offer.bookmaker
                 or not isinstance(names, list) or len(names) != 2
                 or any(not isinstance(name, str) or not name.strip() for name in names)
-                or names[0] == names[1] or start is None or start <= envelope.received_at):
+                or names[0] == names[1] or start is None):
+            return None
+        inplay = start <= envelope.received_at
+        if inplay and (envelope.provider_id not in {"parlay_ws", "parlay_game_ws"}
+                or envelope.kind != "odds_update" or offer.observed_at is None
+                or not start <= offer.observed_at <= envelope.received_at):
+            # A delivery, heartbeat, or old prematch row does not establish an
+            # in-play price. This is still research: price movement is not a
+            # verified event-state or selection-availability observation.
             return None
         if offer.market_key in {"h2h", "spreads", "totals"} and offer.period not in {None, "FULL", "full_game"}:
             return None  # A period market is not the full-game research profile.
+        if sport_league[0] == "soccer" and offer.market_key == "h2h":
+            # A missing draw price does not establish a two-way winner market.
+            return None
         market_type, statistic, player, line = None, None, None, None
         if offer.market_key == "h2h" and offer.line is None and offer.player_key is None:
             market_type = "moneyline"
@@ -930,13 +964,18 @@ class TrustedSourceProjector:
                     "start": start.isoformat(), "participants": names, "market": offer.market_key,
                     "player": player, "line": str(line) if line is not None else None,
                     "period": period, "outcomes": sorted(odds)}
+        if inplay:
+            # Preserve every existing pregame research ID and give post-start
+            # rows a separate namespace so a prematch quote cannot join them.
+            identity["phase"] = "inplay"
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
         push_possible = line is not None and line == line.to_integral_value()
         if push_possible:
             return None  # Conditional no-push odds need a separate probability model.
         market = Market(id=f"research:parlay:{digest}", event_id=f"research:parlay:{offer.event_id}",
             event_name=f"{names[1]} at {names[0]}", sport=sport_league[0], league=sport_league[1],
-            participants=tuple(names), start_time=start, market_type=market_type,
+            participants=tuple(names), start_time=start,
+            status="live" if inplay else "scheduled", market_type=market_type,
             player=player, player_id=player, statistic=statistic, line=line,
             outcomes=tuple(sorted(odds)), settlement=Settlement(
                 period=period, overtime="unverified", void_rule="unreviewed_source_rules",
@@ -945,7 +984,9 @@ class TrustedSourceProjector:
             original_ids={offer.provider: offer.event_id}, extensions={
                 "research_only": True, "provider_sport": sport_key,
                 "source_market_key": offer.market_key, "native_mapping_reviewed": False,
-                "normal_outcome_reviewed": False, "source_period": offer.period})
+                "normal_outcome_reviewed": False, "source_period": offer.period,
+                "inplay_price_after_start": inplay,
+                "event_state_verified": False})
         status = offer.status if offer.status in {"suspended", "withdrawn"} else (
             "active" if offer.market_status_verified else "unknown")
         quote = Quote(market_id=market.id, provider=offer.provider, bookmaker=offer.bookmaker,
@@ -1056,7 +1097,7 @@ class TrustedSourceProjector:
                 and market.line is not None
                 and market.line != market.line.to_integral_value()
                 and set(market.outcomes) == {"over", "under"}) if scope is not None else False
-            if (policy.enabled and policy.owner_approved and scope is not None
+            if (market.status == "scheduled" and policy.enabled and policy.owner_approved and scope is not None
                     and scope.source_normal_rule_evidence
                     and config.normal_outcome_policy == "winner_only_binary"
                     # Unsuffixed game h2h is documented as full-game. Props
@@ -1093,6 +1134,11 @@ class TrustedSourceProjector:
                 except ValueError:
                     continue
             prior = self.active.get(key)
+            if (prior is not None and prior[0].id == market.id
+                    and prior[1].source_time is not None and quote.source_time is not None
+                    and quote.source_time < prior[1].source_time):
+                # A delayed stream frame must never replace a newer price.
+                continue
             if prior is not None and prior[0].id != market.id:
                 updates.append((prior[0], prior[1].model_copy(update={"status": "withdrawn"})))
             self.active[key] = market, quote
@@ -1357,9 +1403,12 @@ class VerifiedProviderMapper:
             for scope in failed_scopes:
                 self._clear_partial(envelope.provider_id, scope)
                 result.extend(self._invalidate(envelope, scope))
+                if self.research_projector is not None:
+                    self.research_updates.extend(self.research_projector.invalidate_scope(
+                        envelope.provider_id, scope, envelope.metadata.get("sport")))
             offers = self._combine_partial_outcomes(extracted)
             if self.research_projector is not None:
-                self.research_updates = self.research_projector.apply(envelope, offers)
+                self.research_updates.extend(self.research_projector.apply(envelope, offers))
         except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
             self._quarantine(None, "Invalid provider payload or price", envelope.provider_id)
             self._clear_partial(envelope.provider_id)

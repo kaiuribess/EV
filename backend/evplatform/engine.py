@@ -605,6 +605,7 @@ class Engine:
             self.consensus_estimates[market_id] = {
                 "market_id": market_id, "strategy": "multi_book_consensus",
                 "event_name": market.event_name, "sport": market.sport,
+                "phase": "inplay" if market.status == "live" else "pregame",
                 "league": market.league, "market_type": market.market_type,
                 "player": market.player, "statistic": market.statistic,
                 "line": str(market.line) if market.line is not None else None,
@@ -620,7 +621,9 @@ class Engine:
                 "native_market_matched": False, "native_research_estimates": [],
                 "limitations": ["Research only; no consensus strategy execution approval",
                     "Unknown active status and quote-observation age remain explicit per book",
-                    "Book weights are research assumptions, not calibrated probabilities"],
+                    "Book weights are research assumptions, not calibrated probabilities"]
+                    + (["Post-start price movement is not proof of current event state or an executable live selection"]
+                       if market.status == "live" else []),
                 "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
                 "status": "REFERENCE ESTIMATE",
             }

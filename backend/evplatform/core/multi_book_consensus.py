@@ -24,8 +24,14 @@ def consensus_scope(market: Market, quotes: list[Quote], config: PricingConfig,
     scoped = market_config(config, market)
     if not scoped.multi_book_consensus_enabled:
         raise NoSignal("Multi-book consensus research is disabled")
-    if market.status != "scheduled" or market.start_time <= now:
-        raise NoSignal("Multi-book consensus currently supports pregame markets only")
+    if market.status == "scheduled" and market.start_time > now:
+        phase = "pregame"
+    elif (market.status == "live" and market.start_time <= now
+          and market.extensions.get("research_only") is True
+          and market.extensions.get("inplay_price_after_start") is True):
+        phase = "inplay"
+    else:
+        raise NoSignal("Market phase lacks supported sportsbook evidence")
     allowed = set(scoped.multi_book_consensus_books)
     eligible = {quote.bookmaker for quote in quotes
         if quote.provider in SOURCES and quote.bookmaker in allowed
@@ -54,10 +60,10 @@ def consensus_scope(market: Market, quotes: list[Quote], config: PricingConfig,
     weights[last] += Decimal(100) - sum(weights.values())
     selector = ProfileSelector(sport=market.sport, league=market.league,
         market_type=market.market_type, statistic=market.statistic)
-    profile = ReferenceProfile(selectors=(selector,), weights_percent=weights,
+    profile = ReferenceProfile(selectors=(selector,), phase=phase, weights_percent=weights,
         required_any_anchor=(), min_distinct_books=2, status="research_only",
         live_execution_allowed=False, note="No mandatory sharp-book anchor; never execution approved",
-        primary_devig=prior.primary_devig if prior else scoped.devig_method,
+        primary_devig=prior.primary_devig if prior else "power",
         sensitivity_devig=prior.sensitivity_devig if prior else "proportional")
     pilot = scoped.trusted_pilot_policy.model_copy(update={"enabled": False, "owner_approved": False})
     research = scoped.model_copy(update={
