@@ -103,7 +103,9 @@ class ProviderBridge(InputPlugin):
                         "hourly_requests": len(charges)}
                 except (ProviderError, QuotaExceeded, ValueError) as exc:
                     self._live_points_status = {"state": "provider_error",
-                        "error_type": type(exc).__name__, "hourly_requests": len(charges)}
+                        "sport": sport, "error_type": type(exc).__name__,
+                        "reason": str(exc)[:120] if isinstance(exc, ProviderError) else "Invalid PBP snapshot",
+                        "hourly_requests": len(charges)}
             await asyncio.sleep(self.client.config.live_points_interval_seconds)
 
     def _parlay_game_stream_state(self, sport: str) -> tuple[bool, bool]:
