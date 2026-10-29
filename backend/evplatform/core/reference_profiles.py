@@ -208,7 +208,7 @@ def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
                 return False, (f"Provider {label} indicator is expired or future-dated",), delivery_age
     caveats = ["Provider-trusted research estimate; not approved for live execution"]
     if market.status == "live":
-        caveats.append("Price row changed after scheduled start; current event state and selection availability unverified")
+        caveats.append("Price-row timestamp follows scheduled start; current event state and selection availability unverified")
     if limited_board:
         caveats.append("Provider board coverage is bounded or paginated; only this complete price pair was used")
     if not quote.observation_verified or quote.source_observed_at is None:

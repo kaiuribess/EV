@@ -905,8 +905,8 @@ class TrustedSourceProjector:
                 or envelope.kind != "odds_update" or offer.observed_at is None
                 or not start <= offer.observed_at <= envelope.received_at):
             # A delivery, heartbeat, or old prematch row does not establish an
-            # in-play price. This is still research: price movement is not a
-            # verified event-state or selection-availability observation.
+            # in-play price. A post-start row timestamp is still research: it
+            # is not a verified event-state or selection-availability check.
             return None
         if offer.market_key in {"h2h", "spreads", "totals"} and offer.period not in {None, "FULL", "full_game"}:
             return None  # A period market is not the full-game research profile.

@@ -622,7 +622,7 @@ class Engine:
                 "limitations": ["Research only; no consensus strategy execution approval",
                     "Unknown active status and quote-observation age remain explicit per book",
                     "Book weights are research assumptions, not calibrated probabilities"]
-                    + (["Post-start price movement is not proof of current event state or an executable live selection"]
+                    + (["Post-start price-row time is not proof of current event state or an executable live selection"]
                        if market.status == "live" else []),
                 "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
                 "status": "REFERENCE ESTIMATE",
