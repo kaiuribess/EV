@@ -1097,7 +1097,10 @@ class TrustedSourceProjector:
                 and market.line is not None
                 and market.line != market.line.to_integral_value()
                 and set(market.outcomes) == {"over", "under"}) if scope is not None else False
-            if (market.status == "scheduled" and policy.enabled and policy.owner_approved and scope is not None
+            if (scope is not None and ((scope.phase == "pregame" and market.status == "scheduled")
+                    or (scope.phase == "inplay" and market.status == "live"
+                        and market.extensions.get("inplay_price_after_start") is True))
+                    and policy.enabled and policy.owner_approved
                     and scope.source_normal_rule_evidence
                     and config.normal_outcome_policy == "winner_only_binary"
                     # Unsuffixed game h2h is documented as full-game. Props

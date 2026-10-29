@@ -3,9 +3,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from evplatform.core.config import PricingConfig, TrustedPilotMarketScope
-from evplatform.core.multi_book_consensus import consensus_fair_value
-from evplatform.core.pricing import NoSignal
+from decimal import Decimal
+
+from evplatform.core.config import PricingConfig, TrustedPilotMarketScope, TrustedPilotPolicy
+from evplatform.core.multi_book_consensus import consensus_fair_value, native_live_pricing
+from evplatform.core.pricing import NoSignal, fair_value
 from evplatform.integrations.base import ProviderEnvelope
 from evplatform.integrations.normalization import TrustedSourceProjector, VerifiedProviderMapper
 
@@ -123,3 +125,79 @@ def test_tennis_match_and_soccer_total_are_research_only_not_three_way_winners()
     assert len(source.research_updates) == 1
     assert source.research_updates[0][0].market_type == "total"
     assert source.research_updates[0][0].status == "live"
+
+
+def test_separate_live_scope_promotes_normal_question_but_not_unknown_selection_status():
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="basketball", league="NBA",
+        market_type="moneyline", phase="inplay", reviewed_normal_rule_id="NBA-live-fixture",
+        source_normal_rule_evidence="OFFLINE reviewed full-game ordinary winner")
+    policy = TrustedPilotPolicy(enabled=True, owner_approved=True, market_scope=scope,
+        provider_id="parlay_ws", trusted_books=["fanduel", "draftkings", "caesars"],
+        reference_weights_percent={"fanduel": Decimal(40), "draftkings": Decimal(35),
+                                   "caesars": Decimal(25)},
+        min_distinct_books=3, max_indicator_age_ms=3000,
+        inplay_max_row_age_ms=2000,
+        inplay_latency_evidence="OFFLINE measured latency fixture; not production approval",
+        independent_crosscheck="two_distinct_books",
+        uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal(25),
+        max_loss_usd=Decimal(25), pregame_only=False, recurring_authorization=True,
+        maximum_native_attempts=None, automatic_followups=True,
+        approval_evidence="OFFLINE fixture only")
+    config = PricingConfig(reference_profile_mode="strict", reference_quality_mode="trusted_provider",
+        normal_outcome_policy="winner_only_binary", multi_book_consensus_enabled=True,
+        live_multi_book_enabled=True, trusted_pilot_policy=policy,
+        trusted_max_delivery_age_ms=3000, trusted_max_indicator_age_ms=3000)
+    source = VerifiedProviderMapper()
+    source.research_projector = TrustedSourceProjector(lambda: config)
+    source(frame([game(book, period="FULL") for book in policy.trusted_books]))
+    rows = source.research_updates
+    assert len(rows) == 3
+    market, quotes = rows[0][0], [quote for _, quote in rows]
+    assert market.id.startswith("reviewed:") and scope.matches(market)
+    assert all(quote.normal_outcome_verified for quote in quotes)
+    research, _, _ = consensus_fair_value(market, quotes, config, NOW)
+    assert not research.live_execution_allowed and not research.execution_eligible
+    fair = fair_value(market, quotes, native_live_pricing(market, quotes, config, NOW), NOW)
+    assert not fair.live_execution_allowed
+    assert any("current in-play selection status" in reason
+               for reason in fair.ineligibility_reasons)
+    accepted_policy = policy.model_copy(update={
+        "accept_unknown_active_status": True,
+        "accept_unknown_quote_observation_age": True})
+    accepted_config = config.model_copy(update={"trusted_pilot_policy": accepted_policy})
+    trusted = fair_value(market, quotes,
+        native_live_pricing(market, quotes, accepted_config, NOW), NOW)
+    assert trusted.live_execution_allowed and trusted.execution_eligible
+    assert all(reference["source_observed_at"] is None and reference["status"] == "unknown"
+               for reference in trusted.references)
+    assert accepted_policy.model_dump(mode="json")["inplay_max_row_age_ms"] == 2000
+    # Affirmative source evidence also qualifies under the restrictive policy.
+    # This evidence is a fixture, not a current production observation.
+    affirmed = [quote.model_copy(update={"status": "active", "market_status_verified": True,
+        "observation_verified": True, "source_observed_at": NOW,
+        "source_time": NOW}) for quote in quotes]
+    qualified = fair_value(market, affirmed, native_live_pricing(market, affirmed, config, NOW), NOW)
+    assert qualified.live_execution_allowed and qualified.execution_eligible
+    stale = [quote.model_copy(update={"source_observed_at": NOW-timedelta(seconds=3),
+        "source_time": NOW-timedelta(seconds=3)}) for quote in affirmed]
+    old = fair_value(market, stale, native_live_pricing(market, stale, config, NOW), NOW)
+    assert not old.live_execution_allowed
+    suspended = [quote.model_copy(update={"status": "suspended"}) for quote in affirmed]
+    with pytest.raises(NoSignal):
+        native_live_pricing(market, suspended, config, NOW)
+
+
+def test_inplay_source_scope_needs_distinct_latency_policy():
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="basketball", league="NBA",
+        market_type="moneyline", phase="inplay", reviewed_normal_rule_id="NBA-live-fixture",
+        source_normal_rule_evidence="OFFLINE full-game rule")
+    with pytest.raises(ValueError, match="source-row age policy"):
+        TrustedPilotPolicy(enabled=True, owner_approved=True, market_scope=scope,
+            provider_id="parlay_ws", trusted_books=["fanduel", "draftkings", "caesars"],
+            min_distinct_books=3, max_indicator_age_ms=30000,
+            independent_crosscheck="two_distinct_books",
+            uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal(25),
+            max_loss_usd=Decimal(25), pregame_only=False, recurring_authorization=True,
+            maximum_native_attempts=None, automatic_followups=True,
+            approval_evidence="OFFLINE fixture only")
+    assert "inplay_max_row_age_ms" not in PricingConfig().trusted_pilot_policy.model_dump(mode="json")

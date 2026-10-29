@@ -157,6 +157,8 @@ class ApprovedNativeFamilyRule(StrictRecord):
     # A separate in-play rule needs an explicit, reviewed PBP state TTL.
     # No pregame approval inherits an in-play clock or native permission.
     inplay_state_max_age_ms: int | None = Field(default=None, ge=100, le=10000)
+    inplay_event_identity_basis: Literal["provider_id", "exact_same_provider_fixture"] = "provider_id"
+    inplay_identity_evidence: str | None = None
 
     @model_validator(mode="after")
     def coherent_rule(self):
@@ -174,6 +176,11 @@ class ApprovedNativeFamilyRule(StrictRecord):
             raise ValueError("Approved family rule needs exact source, native and order-grid evidence")
         if (self.scope.phase == "inplay") != (self.inplay_state_max_age_ms is not None):
             raise ValueError("In-play family needs its own reviewed live-state age limit")
+        if self.inplay_event_identity_basis == "exact_same_provider_fixture":
+            if self.scope.phase != "inplay" or not self.inplay_identity_evidence or len(self.inplay_identity_evidence) < 16:
+                raise ValueError("Structural PBP identity requires a reviewed in-play family rule")
+        elif self.inplay_identity_evidence is not None:
+            raise ValueError("Provider-ID identity does not use structural crosswalk approval")
         if self.scope.venue == "prophetx" and (
                 (self.prophetx_fee_evidence_kind == "exchange_verified" and
                  (self.prophetx_winnings_fee_upper_per_stake is None or
@@ -197,6 +204,10 @@ class ApprovedNativeFamilyRule(StrictRecord):
             payload["scope"].pop("phase", None)
         if self.inplay_state_max_age_ms is None:
             payload.pop("inplay_state_max_age_ms")
+        if self.inplay_event_identity_basis == "provider_id":
+            payload.pop("inplay_event_identity_basis")
+        if self.inplay_identity_evidence is None:
+            payload.pop("inplay_identity_evidence")
         return digest_json(payload)
 
     def matches(self, market) -> bool:

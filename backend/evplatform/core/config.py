@@ -106,6 +106,10 @@ class TrustedPilotPolicy(BaseModel):
     max_debit_usd: Decimal | None = Field(default=None, gt=0)
     max_loss_usd: Decimal | None = Field(default=None, gt=0)
     pregame_only: bool = True
+    # A retained source row is not a verified selection observation. Its
+    # separate live age bound needs an attributable owner-reviewed policy.
+    inplay_max_row_age_ms: int | None = Field(default=None, ge=100, le=10000)
+    inplay_latency_evidence: str | None = None
     # A recurring source approval is distinct from the original one-shot
     # validation pilot. It still needs a separately reviewed launch profile
     # and bounded, expiring runtime authorization before any order can route.
@@ -113,6 +117,17 @@ class TrustedPilotPolicy(BaseModel):
     maximum_native_attempts: int | None = Field(default=1, ge=1)
     automatic_followups: bool = False
     approval_evidence: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_policy(self, handler):
+        payload = handler(self)
+        # Existing pregame authorization digests must not change when this
+        # optional, separately approved live policy is introduced.
+        if self.inplay_max_row_age_ms is None:
+            payload.pop("inplay_max_row_age_ms", None)
+        if self.inplay_latency_evidence is None:
+            payload.pop("inplay_latency_evidence", None)
+        return payload
 
     def cost_ceiling(self) -> Decimal | None:
         """Optional execution cap; reporting unit size never supplies one."""
@@ -151,6 +166,12 @@ class TrustedPilotPolicy(BaseModel):
                 raise ValueError("Dynamic pilot requires at least three distinct sportsbook references")
             if self.market_scope is not None and self.pregame_only == (self.market_scope.phase == "inplay"):
                 raise ValueError("Approved source phase must match the market-family phase")
+            if self.market_scope is not None and self.market_scope.phase == "inplay":
+                if (self.inplay_max_row_age_ms is None or not self.inplay_latency_evidence
+                        or self.inplay_max_row_age_ms > self.max_indicator_age_ms):
+                    raise ValueError("In-play approval requires an attributable short source-row age policy")
+            elif self.inplay_max_row_age_ms is not None or self.inplay_latency_evidence is not None:
+                raise ValueError("In-play latency policy cannot be inherited by a pregame scope")
             if (not self.recurring_authorization and
                     (self.max_debit_usd > Decimal("5") or self.max_loss_usd > Decimal("5"))):
                 raise ValueError("Trusted pilot debit and loss ceilings cannot exceed five dollars")

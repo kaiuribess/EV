@@ -26,8 +26,11 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
             or config.normal_outcome_policy != "winner_only_binary"
             or config.reference_profile_mode != "strict"):
         reasons.append("Trusted pilot requires the reviewed winner-only reference profile")
-    if (not policy.permits_market(market) or market.status != "scheduled"
-            or market.start_time <= now):
+    phase = policy.market_scope.phase if policy.market_scope is not None else "pregame"
+    phase_ok = ((phase == "pregame" and market.status == "scheduled" and market.start_time > now)
+                or (phase == "inplay" and market.status == "live" and market.start_time <= now
+                    and market.extensions.get("inplay_price_after_start") is True))
+    if not policy.permits_market(market) or not phase_ok:
         reasons.append("Pilot market is outside the reviewed exact selection or normal-question rule")
     books = {ref.get("bookmaker") for ref in references}
     providers = {ref.get("provider") for ref in references}
@@ -57,6 +60,34 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
 
     for ref in references:
         book = str(ref.get("bookmaker", "unknown"))
+        if phase == "inplay":
+            # A price movement, provider heartbeat, or local delivery is not a
+            # selection observation. Unknown status/observation age can only
+            # pass under the separately approved live source policy, while a
+            # short retained-row clock remains mandatory.
+            if ref.get("provider") not in {"parlay_ws", "parlay_game_ws"}:
+                reasons.append(f"{book}: in-play source is not the approved odds stream")
+            if (ref.get("status") != "active" or ref.get("market_status_verified") is not True):
+                if not policy.accept_unknown_active_status:
+                    reasons.append(f"{book}: no affirmative current in-play selection status")
+            if ref.get("observation_verified") is True:
+                age(ref.get("source_observed_at"), f"{book} in-play selection observation",
+                    policy.inplay_max_row_age_ms or 0)
+            elif not policy.accept_unknown_quote_observation_age:
+                reasons.append(f"{book}: no verified in-play selection observation")
+            age(ref.get("source_retained_row_at"), f"{book} in-play retained price row",
+                policy.inplay_max_row_age_ms or 0)
+            age(ref.get("local_receipt_at"), f"{book} in-play delivery",
+                policy.inplay_max_row_age_ms or 0)
+            if ref.get("provider_delivery_at") is not None:
+                age(ref["provider_delivery_at"], f"{book} provider delivery",
+                    policy.inplay_max_row_age_ms or 0)
+            try:
+                stored = datetime.fromisoformat(ref["source_retained_row_at"])
+                if stored.tzinfo is None or stored < market.start_time:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                reasons.append(f"{book}: retained price row did not occur in-play")
         if ref.get("market_fingerprint") != market.identity():
             reasons.append(f"{book}: normal-outcome market identity is unreviewed")
         if ref.get("normal_outcome_verified") is not True or not ref.get("normal_outcome_evidence"):

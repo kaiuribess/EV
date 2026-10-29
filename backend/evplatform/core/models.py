@@ -239,6 +239,7 @@ class GameState(TimedData):
     period: str | None = None
     source_match_id: str | None = None
     identity_verified: bool = False
+    identity_basis: Literal["provider_id", "exact_same_provider_fixture", "unknown"] = "unknown"
 
 
 class PlayerProjection(TimedData):

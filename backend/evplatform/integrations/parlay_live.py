@@ -57,6 +57,7 @@ def project_live_points(frame: ProviderEnvelope, markets: list[Market]) -> list[
         candidates = {market.event_id: market for market in markets
             if market.status == "live" and market.start_time == start
             and set(market.participants) == set(teams)
+            and any(source in market.original_ids for source in ("parlay_ws", "parlay_game_ws", "parlay_rest"))
             and SPORT_LEAGUE_KEYS.get(market.league) == row.get("sport_key")}
         if len(candidates) != 1:
             continue
@@ -66,9 +67,11 @@ def project_live_points(frame: ProviderEnvelope, markets: list[Market]) -> list[
             result = [item for item in result if item.event_id != event_id]
             continue
         seen_events.add(event_id)
+        id_verified = market.original_ids.get("parlay_pbp_match_id") == match_id
         result.append(GameState(event_id=event_id, status="live", score=score,
             clock=state.get("clock") if isinstance(state.get("clock"), str) else None,
             period=str(period), source_match_id=match_id,
-            identity_verified=market.original_ids.get("parlay_pbp_match_id") == match_id,
+            identity_verified=id_verified,
+            identity_basis="provider_id" if id_verified else "exact_same_provider_fixture",
             source_time=source_time, received_at=frame.received_at))
     return result

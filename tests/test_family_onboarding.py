@@ -11,12 +11,14 @@ from evplatform.core.multi_book_consensus import native_live_pricing
 from evplatform.core.models import utcnow
 from evplatform.core.native_accounting import NativeInstrument, NativePriceBand
 from evplatform.core.native_pricing import NativeBook, NativeFeeBound, NativeLevel, instrument_fingerprint, native_opportunity
+from evplatform.core.inplay import inplay_execution_rejections
 from evplatform.core.native_research import kalshi_moneyline_matches, prophetx_matches
 from evplatform.core.native_runtime import NativeRuntime
 from evplatform.core.pricing import NoSignal, fair_value
 from evplatform.core.readiness import ApprovedNativeFamilyRule, LaunchProfile, LiveLimits, MarketReadiness, family_market_ready
 from evplatform.integrations.base import ProviderEnvelope
 from evplatform.integrations.normalization import TrustedSourceProjector, VerifiedProviderMapper
+from evplatform.integrations.parlay_live import project_live_points
 from evplatform.venues.book_normalization import NativeBookMapper
 from evplatform.venues.prophetx_market_data import ProphetXMarketData
 from evplatform.engine import Engine
@@ -132,6 +134,98 @@ def test_two_new_games_onboard_under_one_approved_rule_without_static_ids(monkey
         markets.append((market, quotes, fair))
     assert len(mapper.mappings) == 4 and mapper.mapping_digest == NativeBookMapper().mapping_digest
     assert markets[0][0].id != markets[1][0].id
+
+
+def test_reviewed_inplay_family_can_price_and_size_current_native_book():
+    now = utcnow().replace(microsecond=0)
+    start = now - timedelta(minutes=2)
+    scope = TrustedPilotMarketScope(venue="prophetx", sport="basketball", league="NBA",
+        market_type="moneyline", phase="inplay", reviewed_normal_rule_id=RULE_ID,
+        source_normal_rule_evidence="OFFLINE reviewed NBA full-game and overtime rule")
+    policy = TrustedPilotPolicy(enabled=True, owner_approved=True, market_scope=scope,
+        provider_id="parlay_ws", trusted_books=list(BOOKS), min_distinct_books=3,
+        reference_weights_percent={"fanduel": Decimal(40), "draftkings": Decimal(35),
+            "caesars": Decimal(25)}, accept_unknown_active_status=True,
+        accept_unknown_quote_observation_age=True, max_indicator_age_ms=2000,
+        inplay_max_row_age_ms=2000,
+        inplay_latency_evidence="OFFLINE row and delivery latency fixture; no production approval",
+        independent_crosscheck="two_distinct_books",
+        uncertainty_margin_probability=Decimal(".01"), max_debit_usd=Decimal(25),
+        max_loss_usd=Decimal(25), pregame_only=False, recurring_authorization=True,
+        maximum_native_attempts=None, automatic_followups=True,
+        approval_evidence="OFFLINE source review fixture only")
+    config = PricingConfig(reference_profile_mode="strict", reference_quality_mode="trusted_provider",
+        normal_outcome_policy="winner_only_binary", multi_book_consensus_enabled=True,
+        live_multi_book_enabled=True, trusted_pilot_policy=policy,
+        trusted_max_delivery_age_ms=2000, trusted_max_indicator_age_ms=2000)
+    source = VerifiedProviderMapper()
+    source.research_projector = TrustedSourceProjector(lambda: config)
+    rows = [{"event_id": "offline-live-event", "home_team": TEAMS[1],
+        "away_team": TEAMS[0], "commence_time": start.isoformat(),
+        "bookmaker": book, "kind": "game", "market_key": "h2h", "period": "FULL",
+        "home_ml": -120, "away_ml": 110, "last_update": now.isoformat()}
+        for book in BOOKS]
+    source(ProviderEnvelope("parlay_ws", "odds_update", {"data": rows}, now, 1,
+        published_at=now, metadata={"sport": "basketball_nba"}))
+    market = source.research_updates[0][0]
+    quotes = [quote for _, quote in source.research_updates]
+    assert scope.matches(market) and len(quotes) == 3
+    pbp = ProviderEnvelope("parlay_rest", "snapshot", {"matches": [{
+        "match_id": "offline-pbp-123", "sport_key": "basketball_nba", "in_play": True,
+        "team_or_player_a": TEAMS[1], "team_or_player_b": TEAMS[0],
+        "score_a": "54", "score_b": "51", "last_event_at_ms": int(now.timestamp()*1000),
+        "state": {"period": 2, "commence_time": start.isoformat()}}]}, now, 1)
+    state = project_live_points(pbp, [market])[0]
+    assert not state.identity_verified and state.identity_basis == "exact_same_provider_fixture"
+    native = {"name": "Moneyline", "type": "moneyline", "sub_type": "moneyline",
+        "period": "full_game", "status": "active", "strikes": {
+            "atl-strike": {"name": TEAMS[1], "outcome_id": "4", "status": "active"},
+            "cha-strike": {"name": TEAMS[0], "outcome_id": "5", "status": "active"}}}
+    catalog = {("123", "219"): native}
+    events = {"123": {"event_id": 123, "name": market.event_name,
+        "scheduled": start.isoformat(), "status": "live", "league": "NBA"}}
+    matches = prophetx_matches(market, catalog, events, observed_at=now)
+    assert len(matches) == 2
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-live-v1",
+        approved_by="fixture", approval_evidence="OFFLINE exact live family rule only",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(hours=1),
+        allowed_native_rule_texts=("moneyline|moneyline|full_game",),
+        quantity_step=Decimal(".01"), minimum_quantity=Decimal(1),
+        minimum_order_cost_usd=Decimal(1), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE ProphetX order grid fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE 2% winnings-profit assumption",
+        prophetx_native_settlement_evidence="OFFLINE full-game winner and overtime terms",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE v2 timestamp fixture",
+        inplay_state_max_age_ms=2000,
+        inplay_event_identity_basis="exact_same_provider_fixture",
+        inplay_identity_evidence="OFFLINE exact league, participants and start rule")
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market},
+            game_states={market.event_id: state}))
+    monitor = SimpleNamespace(research_catalog_at=now, research_events=events,
+        client=SimpleNamespace(public_market_data=SimpleNamespace(catalog=catalog)))
+    assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market, matches, monitor, now=now) == 2
+    mapping = next(item for item in runtime.mapper.mappings if item.instrument.outcome == TEAMS[1])
+    book = NativeBook(instrument=mapping.instrument, market_fingerprint=market.identity(),
+        asks=(NativeLevel(price=Decimal(300), quantity=Decimal(5)),),
+        fee_bound=mapping.fee_bound, source_time=now, received_at=now,
+        revision=1, synchronized=True, status="active", synthetic=False)
+    assert not inplay_execution_rejections(market, state, book, now=now,
+        max_state_age_ms=2000, max_book_age_ms=2000,
+        allow_exact_fixture_identity=True, native_permission=True,
+        native_permission_source="OFFLINE active native live catalog")
+    priced = native_live_pricing(market, quotes, config, now)
+    fair = fair_value(market, quotes, priced, now)
+    assert fair.live_execution_allowed and fair.execution_eligible
+    candidate = native_opportunity(market, fair, book, priced,
+        max_stake_usd=Decimal(25), mode="production", stake_sizing="quarter_kelly",
+        available_cash_usd=Decimal(25), now=now)
+    assert candidate.qualified and candidate.execution_eligible
+    assert candidate.uncertainty_margin_probability == Decimal(".01")
 
 
 def test_family_rejects_changed_rules_missing_evidence_and_stale_quotes(monkeypatch):

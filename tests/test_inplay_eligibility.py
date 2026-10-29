@@ -4,10 +4,12 @@ from types import SimpleNamespace
 import asyncio
 
 import httpx
+import pytest
 
 from evplatform.core.config import TrustedPilotMarketScope
 from evplatform.core.inplay import inplay_execution_rejections
 from evplatform.core.models import GameState, Market, Settlement
+from evplatform.core.readiness import ApprovedNativeFamilyRule
 from evplatform.integrations.base import ProviderEnvelope
 from evplatform.integrations.parlay_live import project_live_points
 from evplatform.integrations.parlay import ParlayRest
@@ -23,7 +25,7 @@ def market(*, pbp_id=None, period="FULL", status="live"):
         participants=("New York Knicks", "Chicago Bulls"), start_time=START,
         status=status, market_type="moneyline", outcomes=("New York Knicks", "Chicago Bulls"),
         settlement=Settlement(period=period),
-        original_ids={"parlay_pbp_match_id": pbp_id} if pbp_id else {})
+        original_ids={"parlay_ws": "nba-event", **({"parlay_pbp_match_id": pbp_id} if pbp_id else {})})
 
 
 def frame(*, match_id="401909886", captured=None, period=1):
@@ -46,15 +48,21 @@ def test_pbp_match_is_research_association_without_explicit_id_crosswalk():
     assert states[0].score == {"New York Knicks": 18, "Chicago Bulls": 17}
     assert states[0].period == "1" and states[0].source_match_id == "401909886"
     assert not states[0].identity_verified
+    assert states[0].identity_basis == "exact_same_provider_fixture"
     assert "attributable" in "; ".join(inplay_execution_rejections(market(), states[0], book(),
         now=NOW, max_state_age_ms=2000, max_book_age_ms=2000,
         native_permission=True, native_permission_source="active live catalog"))
+    assert not inplay_execution_rejections(market(), states[0], book(),
+        now=NOW, max_state_age_ms=2000, max_book_age_ms=2000,
+        allow_exact_fixture_identity=True,
+        native_permission=True, native_permission_source="active live catalog")
 
 
 def test_explicit_crosswalk_live_status_and_native_depth_all_required():
     m = market(pbp_id="401909886")
     state = project_live_points(frame(), [m])[0]
-    assert state.identity_verified and state.source_time == NOW - timedelta(seconds=1)
+    assert state.identity_verified and state.identity_basis == "provider_id"
+    assert state.source_time == NOW - timedelta(seconds=1)
     assert not inplay_execution_rejections(m, state, book(), now=NOW,
         max_state_age_ms=2000, max_book_age_ms=2000,
         native_permission=True, native_permission_source="active live catalog")
@@ -103,3 +111,24 @@ def test_live_points_uses_one_authenticated_bounded_snapshot_request():
             assert provider.quota.stats()["reserved_cost"] == 1
     asyncio.run(run())
     assert seen == [("/v1/sports/basketball_nba/live/points", "fixture-secret")]
+
+
+def test_exact_fixture_crosswalk_requires_separate_expiring_family_review():
+    scope = TrustedPilotMarketScope(venue="kalshi", sport="basketball", league="NBA",
+        market_type="moneyline", phase="inplay", reviewed_normal_rule_id="NBA-live-rule",
+        source_normal_rule_evidence="OFFLINE reviewed full-game winner rules")
+    values = dict(scope=scope, rule_version="OFFLINE-live-v1", approved_by="fixture",
+        approval_evidence="OFFLINE fixture approval, not production",
+        approved_at=NOW-timedelta(minutes=1), expires_at=NOW+timedelta(hours=1),
+        allowed_native_rule_texts=("OFFLINE winner terms",),
+        quantity_step="1", minimum_quantity="1", minimum_order_cost_usd="0",
+        cash_quantum_usd="0.01", order_minimum_source="OFFLINE order-grid fixture",
+        kalshi_exchange_index=3, inplay_state_max_age_ms=2000,
+        inplay_event_identity_basis="exact_same_provider_fixture")
+    with pytest.raises(ValueError, match="Structural PBP identity"):
+        ApprovedNativeFamilyRule(**values)
+    rule = ApprovedNativeFamilyRule(**values,
+        inplay_identity_evidence="OFFLINE exact league, participants and start-time rule")
+    assert rule.inplay_event_identity_basis == "exact_same_provider_fixture"
+    assert rule.digest() != ApprovedNativeFamilyRule(**{**values,
+        "inplay_event_identity_basis": "provider_id"}).digest()

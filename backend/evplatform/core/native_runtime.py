@@ -228,6 +228,7 @@ class NativeRuntime:
         subscription; it does not arm trading or submit an order.
         """
         from .native_accounting import NativeInstrument, NativePriceBand
+        from .inplay import inplay_state_identity_ok
         from .native_pricing import NativeFeeBound, instrument_fingerprint
         from ..venues.book_normalization import NativeBookMapper, NativeMarketMapping
         from ..venues.kalshi_fees import kalshi_taker_fee_bound
@@ -245,7 +246,9 @@ class NativeRuntime:
                 or (rule.scope.phase == "pregame" and market.start_time <= now)
                 or (rule.scope.phase == "inplay" and (market.start_time > now
                     or (state := self.engine.game_states.get(market.event_id)) is None
-                    or not state.identity_verified or state.status != "live"
+                    or not inplay_state_identity_ok(
+                        state, allow_exact_fixture=rule.inplay_event_identity_basis == "exact_same_provider_fixture")
+                    or state.status != "live"
                     or state.source_time is None
                     or not 0 <= (now-state.source_time).total_seconds()*1000
                         <= rule.inplay_state_max_age_ms))
@@ -1221,6 +1224,7 @@ class NativeRuntime:
                 self.engine.game_states.get(market.event_id), book, now=utcnow(),
                 max_state_age_ms=rule.inplay_state_max_age_ms,
                 max_book_age_ms=min(profile.max_orderbook_age_ms, rule.inplay_state_max_age_ms),
+                allow_exact_fixture_identity=rule.inplay_event_identity_basis == "exact_same_provider_fixture",
                 native_permission=evidence.get("native_inplay_permission") is True,
                 native_permission_source=evidence.get("native_inplay_permission_source"))
             if reasons:
@@ -1797,6 +1801,7 @@ class NativeRuntime:
                     not inplay_execution_rejections(market, engine.game_states.get(market.event_id),
                         book, now=now, max_state_age_ms=rule.inplay_state_max_age_ms,
                         max_book_age_ms=min(p.max_orderbook_age_ms, rule.inplay_state_max_age_ms),
+                        allow_exact_fixture_identity=rule.inplay_event_identity_basis == "exact_same_provider_fixture",
                         native_permission=(evidence := self.mapper.dynamic_evidence.get(
                             (venue, market_id, book.instrument.outcome), {})).get("native_inplay_permission") is True,
                         native_permission_source=evidence.get("native_inplay_permission_source"))

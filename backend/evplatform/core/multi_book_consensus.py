@@ -27,7 +27,6 @@ def consensus_scope(market: Market, quotes: list[Quote], config: PricingConfig,
     if market.status == "scheduled" and market.start_time > now:
         phase = "pregame"
     elif (market.status == "live" and market.start_time <= now
-          and market.extensions.get("research_only") is True
           and market.extensions.get("inplay_price_after_start") is True):
         phase = "inplay"
     else:
