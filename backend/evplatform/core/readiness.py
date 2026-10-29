@@ -303,6 +303,20 @@ class LaunchProfile(StrictRecord):
             payload.pop("validation_pilot")
         if self.family_rule is None:
             payload.pop("family_rule")
+        else:
+            # The in-play fields are opt-in. Keep an existing pregame family
+            # authorization bound to the same rules when these defaults are
+            # introduced by a newer build, while hashing every approved
+            # in-play value when it is actually configured.
+            family = payload["family_rule"]
+            if self.family_rule.scope.phase == "pregame":
+                family["scope"].pop("phase", None)
+            if self.family_rule.inplay_state_max_age_ms is None:
+                family.pop("inplay_state_max_age_ms", None)
+            if self.family_rule.inplay_event_identity_basis == "provider_id":
+                family.pop("inplay_event_identity_basis", None)
+            if self.family_rule.inplay_identity_evidence is None:
+                family.pop("inplay_identity_evidence", None)
         if self.limits.max_native_order_attempts is None:
             payload["limits"].pop("max_native_order_attempts")
         if self.limits.max_native_daily_attempts is None:

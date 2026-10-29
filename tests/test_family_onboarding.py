@@ -15,7 +15,7 @@ from evplatform.core.inplay import inplay_execution_rejections
 from evplatform.core.native_research import kalshi_moneyline_matches, prophetx_matches
 from evplatform.core.native_runtime import NativeRuntime
 from evplatform.core.pricing import NoSignal, fair_value
-from evplatform.core.readiness import ApprovedNativeFamilyRule, LaunchProfile, LiveLimits, MarketReadiness, family_market_ready
+from evplatform.core.readiness import ApprovedNativeFamilyRule, LaunchProfile, LiveLimits, MarketReadiness, digest_json, family_market_ready
 from evplatform.integrations.base import ProviderEnvelope
 from evplatform.integrations.normalization import TrustedSourceProjector, VerifiedProviderMapper
 from evplatform.integrations.parlay_live import project_live_points
@@ -812,6 +812,16 @@ def test_family_scope_digest_stays_fixed_across_new_fixture_and_checks_live_fact
         max_orderbook_age_ms=5000,
         settlement_policy="kalshi_ioc_binary_halt_on_exception")
     digest = profile.digest()
+    legacy = profile.model_dump(mode="json", exclude={"evidence"})
+    legacy["family_rule"]["scope"].pop("phase", None)
+    for field in ("inplay_state_max_age_ms", "inplay_event_identity_basis",
+                  "inplay_identity_evidence"):
+        legacy["family_rule"].pop(field)
+    legacy["limits"].pop("max_native_order_attempts")
+    legacy["limits"].pop("max_native_daily_attempts")
+    legacy["limits"].pop("external_exposure_scope")
+    legacy.pop("validation_pilot")
+    assert digest == digest_json(legacy)
     facts = MarketReadiness(market_id="new-fixture-a", identity_verified=True,
         provider_mapping_verified=True, venue_mapping_verified=True,
         fee_schedule_verified=True, native_units_supported=True,
