@@ -236,6 +236,9 @@ class GameState(TimedData):
     status: str
     score: dict[str, int]
     clock: str | None = None
+    period: str | None = None
+    source_match_id: str | None = None
+    identity_verified: bool = False
 
 
 class PlayerProjection(TimedData):

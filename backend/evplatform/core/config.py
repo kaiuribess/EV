@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .reference_profiles import ReferenceFreshnessRule, ReferenceProfile
@@ -19,10 +19,20 @@ class TrustedPilotMarketScope(BaseModel):
                               "points", "rebounds", "assists", "threes", "pra",
                               "pitcher_strikeouts", "hits", "total_bases", "shots_on_goal"], ...] = ()
     period: Literal["FULL"] = "FULL"
+    phase: Literal["pregame", "inplay"] = "pregame"
     reviewed_normal_rule_id: str = Field(min_length=8)
     # A family approval needs an attributable source contract for the ordinary
     # winner and overtime scope. Unknown exceptional settlement stays unknown.
     source_normal_rule_evidence: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_scope(self, handler):
+        payload = handler(self)
+        # Preserve the signed pregame policy digest. An explicitly approved
+        # in-play scope records its phase and has a distinct digest.
+        if self.phase == "pregame":
+            payload.pop("phase", None)
+        return payload
 
     @model_validator(mode="after")
     def distinct_statistics(self):
@@ -59,7 +69,9 @@ class TrustedPilotMarketScope(BaseModel):
             market.player is None and market.player_id is None and market.statistic is None
             and market.line is None and len(market.participants) == 2
             and set(market.outcomes) == set(market.participants))
-        return bool(market.status == "scheduled"
+        phase_matches = ((self.phase == "pregame" and market.status == "scheduled")
+                         or (self.phase == "inplay" and market.status == "live"))
+        return bool(phase_matches
             and market.sport == self.sport and market.league == self.league
             and market.market_type == self.market_type and same_question
             and market.settlement.period == self.period
@@ -93,7 +105,7 @@ class TrustedPilotPolicy(BaseModel):
     fee_estimate_mode: Literal["after_fees", "exclude_fees"] = "after_fees"
     max_debit_usd: Decimal | None = Field(default=None, gt=0)
     max_loss_usd: Decimal | None = Field(default=None, gt=0)
-    pregame_only: Literal[True] = True
+    pregame_only: bool = True
     # A recurring source approval is distinct from the original one-shot
     # validation pilot. It still needs a separately reviewed launch profile
     # and bounded, expiring runtime authorization before any order can route.
@@ -137,6 +149,8 @@ class TrustedPilotPolicy(BaseModel):
                 raise ValueError("Approved live weights must cover exactly the trusted books and total 100 percent")
             if self.market_scope is not None and self.min_distinct_books < 3:
                 raise ValueError("Dynamic pilot requires at least three distinct sportsbook references")
+            if self.market_scope is not None and self.pregame_only == (self.market_scope.phase == "inplay"):
+                raise ValueError("Approved source phase must match the market-family phase")
             if (not self.recurring_authorization and
                     (self.max_debit_usd > Decimal("5") or self.max_loss_usd > Decimal("5"))):
                 raise ValueError("Trusted pilot debit and loss ceilings cannot exceed five dollars")

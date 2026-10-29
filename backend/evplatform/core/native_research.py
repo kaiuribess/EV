@@ -103,8 +103,10 @@ def _aware(value: object) -> datetime | None:
 
 def kalshi_moneyline_matches(market: Market, rows: list[dict], *, observed_at: datetime) -> list[ResearchNativeMatch]:
     """Use the existing reviewed NBA ticker/rule parser; require both winners."""
-    if (market.league != "NBA" or market.market_type != "moneyline" or market.status != "scheduled"
-            or len(market.outcomes) != 2 or market.start_time <= observed_at):
+    phase_ok = ((market.status == "scheduled" and market.start_time > observed_at)
+                or (market.status == "live" and market.start_time <= observed_at))
+    if (market.league != "NBA" or market.market_type != "moneyline" or not phase_ok
+            or len(market.outcomes) != 2):
         return []
     by_event: dict[str, dict[str, dict]] = {}
     conflicts: set[str] = set()
@@ -112,6 +114,10 @@ def kalshi_moneyline_matches(market: Market, rows: list[dict], *, observed_at: d
         if (not isinstance(row, dict) or row.get("status") not in {"active", "open"}
                 or row.get("market_type") != "binary"):
             continue
+        if market.status == "live":
+            close = _aware(row.get("close_time"))
+            if close is None or close <= observed_at:
+                continue
         event, ticker = row.get("event_ticker"), row.get("ticker")
         fixture = _fixture(event) if isinstance(event, str) else None
         winner = _listed_winner(row)
@@ -413,13 +419,16 @@ def prophetx_matches(market: Market, catalog: dict[tuple[str, str], dict],
     Player props need explicit native player/stat/line metadata. A free-text
     title is not enough to distinguish a different threshold or period.
     """
-    if (market.status != "scheduled" or market.start_time <= observed_at
-            or len(market.outcomes) != 2 or market.settlement.period.lower() not in {"full", "full_game"}):
+    phase_ok = ((market.status == "scheduled" and market.start_time > observed_at)
+                or (market.status == "live" and market.start_time <= observed_at))
+    if (not phase_ok or len(market.outcomes) != 2
+            or market.settlement.period.lower() not in {"full", "full_game"}):
         return []
     candidates = []
     for (event_id, market_id), native in catalog.items():
         event = events.get(event_id)
-        if not isinstance(event, dict) or event.get("status") != "not_started":
+        expected_event_status = {"not_started"} if market.status == "scheduled" else {"in_play", "live"}
+        if not isinstance(event, dict) or event.get("status") not in expected_event_status:
             continue
         native_start = _aware(event.get("scheduled"))
         if native_start is None or abs((native_start-market.start_time).total_seconds()) > 120:

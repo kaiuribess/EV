@@ -49,6 +49,11 @@ class ParlayConfig(ProviderConfig):
     startup_stream_wait_seconds: int = Field(default=12, ge=0, le=30)
     watchdog_seconds: float = Field(default=90, ge=10, le=180)
     account_tier: Literal["unknown", "free", "starter", "pro", "business", "enterprise", "scale"] = "unknown"
+    # The separate PBP snapshot is billable. It informs research game state;
+    # the slow bounded poll is never an in-play execution freshness certificate.
+    live_points_enabled: bool = False
+    live_points_hourly_budget: int = Field(default=12, ge=1, le=60)
+    live_points_interval_seconds: int = Field(default=90, ge=30, le=600)
 
 
 class ParlayGameBoardConfig(ParlayConfig):
@@ -93,6 +98,12 @@ class ParlayRest(RestProvider):
 
     async def discover_events(self, sport: str, **filters: Any) -> ProviderEnvelope:
         return await self.request(f"/v1/sports/{safe_component(sport)}/events", params=filters, cost=0)
+
+    async def fetch_live_points(self, sport: str, *, match_id: str | None = None) -> ProviderEnvelope:
+        """One billable PBP state snapshot; never a sportsbook quote observation."""
+        params = {"match_id": safe_component(match_id)} if match_id else None
+        return await self.request(f"/v1/sports/{safe_component(sport)}/live/points",
+                                  params=params, cost=1)
 
     async def discover_markets(self, sport: str | None = None) -> ProviderEnvelope:
         path = f"/v1/sports/{safe_component(sport)}/props/markets" if sport else "/v1/markets"

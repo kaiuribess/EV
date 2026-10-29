@@ -107,6 +107,7 @@ def live_consensus_scope(market: Market, quotes: list[Quote], config: PricingCon
     weights[last] += Decimal(100) - sum(weights.values())
     profile = ReferenceProfile(selectors=(ProfileSelector(sport=market.sport,
         league=market.league, market_type=market.market_type, statistic=market.statistic),),
+        phase="inplay" if market.status == "live" else "pregame",
         weights_percent=weights, required_any_anchor=(),
         min_distinct_books=policy.min_distinct_books, status="approved_multi_book",
         live_execution_allowed=False, primary_devig="power",

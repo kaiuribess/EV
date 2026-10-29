@@ -2,6 +2,7 @@
 import asyncio
 import os
 import time
+from collections import deque
 from dataclasses import replace
 from datetime import datetime
 from typing import Literal
@@ -45,6 +46,7 @@ class ProviderBridge(InputPlugin):
         self.client = None
         self.task = None
         self.focused_task = None
+        self.live_state_task = None
         self.mapper = None
         self._map_lock = asyncio.Lock()
         self._focused_status: dict = {"state": "disabled"}
@@ -65,6 +67,44 @@ class ProviderBridge(InputPlugin):
             if self.manifest.name == "parlay_rest" and self.client.config.focused_novig_nfl_props:
                 self.focused_task = asyncio.create_task(self._run_focused_novig_props(),
                                                         name="parlay-focused-novig-nfl-props")
+            if self.manifest.name == "parlay_rest" and self.client.config.live_points_enabled:
+                self.live_state_task = asyncio.create_task(self._run_live_points(),
+                                                           name="parlay-live-points-research")
+
+    async def _run_live_points(self):
+        """At most one sport per interval, with an hourly paid-credit ceiling."""
+        from ..integrations.parlay_live import SPORT_LEAGUE_KEYS, project_live_points
+        from ..integrations.base import ProviderError, QuotaExceeded
+
+        charges = deque()
+        cursor = 0
+        while True:
+            now = time.monotonic()
+            while charges and now - charges[0] >= 3600:
+                charges.popleft()
+            sports = sorted({key for market in self.engine.markets.values()
+                if market.status == "live" and market.extensions.get("research_only") is True
+                for key in self.client.config.sports
+                if key == SPORT_LEAGUE_KEYS.get(market.league)})
+            if sports and len(charges) < self.client.config.live_points_hourly_budget:
+                sport = sports[cursor % len(sports)]
+                cursor += 1
+                # Reserve locally before the request. A transport failure may
+                # still have been billed by the provider.
+                charges.append(now)
+                try:
+                    frame = await self.client.fetch_live_points(sport)
+                    states = project_live_points(frame, list(self.engine.markets.values()))
+                    for state in states:
+                        await self.context.bus.publish(Envelope(schema_name="sports.game_state",
+                            source="parlay_live_points", payload=state))
+                    self._live_points_status = {"state": "research_snapshot", "sport": sport,
+                        "received_at": frame.received_at.isoformat(), "mapped_matches": len(states),
+                        "hourly_requests": len(charges)}
+                except (ProviderError, QuotaExceeded, ValueError) as exc:
+                    self._live_points_status = {"state": "provider_error",
+                        "error_type": type(exc).__name__, "hourly_requests": len(charges)}
+            await asyncio.sleep(self.client.config.live_points_interval_seconds)
 
     def _parlay_game_stream_state(self, sport: str) -> tuple[bool, bool]:
         record = self.engine.registry.records.get("parlay_game_ws")
@@ -267,6 +307,10 @@ class ProviderBridge(InputPlugin):
             await self._invalidate()
 
     async def stop(self):
+        if self.live_state_task:
+            self.live_state_task.cancel()
+            await asyncio.gather(self.live_state_task, return_exceptions=True)
+            self.live_state_task = None
         if self.focused_task:
             self.focused_task.cancel()
             await asyncio.gather(self.focused_task, return_exceptions=True)
@@ -316,6 +360,7 @@ class ProviderBridge(InputPlugin):
         if status != "blocked" and self.task and self.task.done():
             status = "error"
         return {**health, "status": status, "message": health["reason"],
+                "live_points_research": getattr(self, "_live_points_status", {"state": "disabled"}),
                 "focused_novig_nfl_props": dict(self._focused_status),
                 "mapped_quotes": self.mapper.mapped_count if self.mapper else 0,
                 "quarantined": len(self.mapper.quarantine) if self.mapper else 0}
@@ -326,6 +371,9 @@ class ProviderBridge(InputPlugin):
         if self.client:
             health["quota"] = self.client.quota.stats()
             health["focused_novig_nfl_props"] = dict(self._focused_status)
+            health["live_points_research"] = dict(getattr(self, "_live_points_status", {"state": "disabled"}))
+            if self.live_state_task and self.live_state_task.done():
+                health["live_points_research"] = {"state": "task_stopped"}
             health["mapped_quotes"] = self.mapper.mapped_count if self.mapper else 0
             health["quarantined"] = len(self.mapper.quarantine) if self.mapper else 0
             if self.focused_task and self.focused_task.done():

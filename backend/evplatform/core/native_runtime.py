@@ -241,7 +241,14 @@ class NativeRuntime:
                 or not rule.approved_at <= now < rule.expires_at
                 or source_policy.market_scope != rule.scope
                 or not source_policy.enabled or not source_policy.owner_approved
-                or self.mapper is None or market.start_time <= now
+                or self.mapper is None
+                or (rule.scope.phase == "pregame" and market.start_time <= now)
+                or (rule.scope.phase == "inplay" and (market.start_time > now
+                    or (state := self.engine.game_states.get(market.event_id)) is None
+                    or not state.identity_verified or state.status != "live"
+                    or state.source_time is None
+                    or not 0 <= (now-state.source_time).total_seconds()*1000
+                        <= rule.inplay_state_max_age_ms))
                 or monitor.research_catalog_at is None
                 or not 0 <= (now-monitor.research_catalog_at).total_seconds() <= 60):
             return 0
@@ -261,6 +268,7 @@ class NativeRuntime:
         new_mappings = []
         rows = getattr(monitor, "research_catalog_rows", ())
         for match in selected:
+            native_inplay_source = None
             if venue == "kalshi":
                 row = next((item for item in rows if item.get("ticker") == match.native_market_id), None)
                 metadata = monitor.research_fee_metadata.get(match.native_event_id)
@@ -271,6 +279,12 @@ class NativeRuntime:
                         or not isinstance(metadata, dict) or not isinstance(row.get("price_ranges"), list)
                         or not row["price_ranges"]):
                     return 0
+                if rule.scope.phase == "inplay":
+                    from .native_research import _aware
+                    close = _aware(row.get("close_time"))
+                    if close is None or close <= now:
+                        return 0
+                    native_inplay_source = f"Kalshi open market {match.native_market_id} with close_time after current PBP state"
                 try:
                     bands = tuple(NativePriceBand(minimum=item["start"], maximum=item["end"],
                         step=item["step"]) for item in row["price_ranges"])
@@ -331,6 +345,10 @@ class NativeRuntime:
                         or native.get("strikes", {}).get(match.native_strike_id, {}).get("outcome_id")
                             != match.native_outcome_id):
                     return 0
+                if rule.scope.phase == "inplay":
+                    if event.get("status") not in {"in_play", "live"}:
+                        return 0
+                    native_inplay_source = f"ProphetX active market {match.native_market_id} in live event {match.native_event_id}"
                 try:
                     instrument = NativeInstrument(venue=venue, instrument_id=match.native_strike_id,
                         canonical_market_id=market.id, outcome=match.outcome,
@@ -382,6 +400,8 @@ class NativeRuntime:
                     "native_outcome_id": match.native_outcome_id,
                     "native_instrument_id": item.instrument.instrument_id,
                     "native_rule_sha256": match.rules_sha256,
+                    "native_inplay_permission": rule.scope.phase == "inplay" and bool(native_inplay_source),
+                    "native_inplay_permission_source": native_inplay_source,
                     "native_rule_excerpt": match.rules_excerpt,
                     "native_settlement_provenance": (rule.prophetx_native_settlement_evidence
                         if venue == "prophetx" else match.rules_excerpt),
@@ -1189,6 +1209,22 @@ class NativeRuntime:
         book = self.books.get((order.market_id, order.venue, order.outcome))
         if book is None:
             raise RiskRejected("Native executable book is missing")
+        if market.status == "live":
+            from .inplay import inplay_execution_rejections
+            profile = self.profile_for(order.venue)
+            rule = profile.family_rule if profile else None
+            evidence = self.mapper.dynamic_evidence.get(
+                (order.venue, order.market_id, order.outcome), {}) if self.mapper else {}
+            if rule is None or rule.scope.phase != "inplay":
+                raise RiskRejected("No separately approved in-play market-family rule")
+            reasons = inplay_execution_rejections(market,
+                self.engine.game_states.get(market.event_id), book, now=utcnow(),
+                max_state_age_ms=rule.inplay_state_max_age_ms,
+                max_book_age_ms=min(profile.max_orderbook_age_ms, rule.inplay_state_max_age_ms),
+                native_permission=evidence.get("native_inplay_permission") is True,
+                native_permission_source=evidence.get("native_inplay_permission_source"))
+            if reasons:
+                raise RiskRejected("; ".join(reasons))
         try:
             from .multi_book_consensus import native_live_pricing
             quotes = list(self.engine.quotes.get(market.id, {}).values())
@@ -1196,6 +1232,17 @@ class NativeRuntime:
             fair = fair_value(market, quotes, pricing)
             if self.engine.settings.mode == "production" and not fair.live_execution_allowed:
                 raise NoSignal("Reference profile has not been validated for live execution")
+            if market.status == "live":
+                profile = self.profile_for(order.venue)
+                if profile is None or profile.family_rule is None or profile.family_rule.scope.phase != "inplay":
+                    raise NoSignal("In-play references need a separate approved family and latency policy")
+                for reference in fair.references:
+                    receipt = datetime.fromisoformat(reference["local_receipt_at"])
+                    row_clock = datetime.fromisoformat(reference["source_time"]) if reference.get("source_time") else None
+                    if (row_clock is None or row_clock < market.start_time
+                            or any(not 0 <= (utcnow()-stamp).total_seconds()*1000
+                                   <= profile.max_reference_age_ms for stamp in (receipt, row_clock))):
+                        raise NoSignal("In-play sportsbook row or delivery exceeds the approved live latency limit")
             native_revalidate_intent(order.intent, market, fair, book, pricing,
                                      remaining_quantity=order.quantity-order.filled_quantity,
                                      fees_already_paid_usd=order.fees)
@@ -1730,11 +1777,30 @@ class NativeRuntime:
                 oldest_reference_age = (max(delivery_ages) if delivery_ages and all(
                     isinstance(age, (int, float)) and age >= 0 for age in delivery_ages) else None)
                 age_basis = "provider_delivery"
+                if market.status == "live":
+                    row_ages = [((now-datetime.fromisoformat(r["source_time"])).total_seconds()*1000
+                        if r.get("source_time") else None) for r in refs]
+                    oldest_reference_age = (max([*delivery_ages, *row_ages])
+                        if all(isinstance(age, (int, float)) and age >= 0
+                               for age in [*delivery_ages, *row_ages]) else None)
+                    age_basis = "provider_delivery"
             exact_mapping = bool(market and books and (venue, market_id) not in self.invalidated_family_markets
                 and all(b.market_fingerprint == market.identity()
                 and b.instrument.settlement_rules_fingerprint == market.identity() and b.instrument.verified
                 and b.instrument.canonical_market_id == market_id and b.instrument.venue == venue
                 and b.instrument.outcome in market.outcomes for b in books))
+            inplay_ready = True
+            if market and market.status == "live":
+                from .inplay import inplay_execution_rejections
+                rule = p.family_rule if p else None
+                inplay_ready = bool(rule and rule.scope.phase == "inplay" and books and all(
+                    not inplay_execution_rejections(market, engine.game_states.get(market.event_id),
+                        book, now=now, max_state_age_ms=rule.inplay_state_max_age_ms,
+                        max_book_age_ms=min(p.max_orderbook_age_ms, rule.inplay_state_max_age_ms),
+                        native_permission=(evidence := self.mapper.dynamic_evidence.get(
+                            (venue, market_id, book.instrument.outcome), {})).get("native_inplay_permission") is True,
+                        native_permission_source=evidence.get("native_inplay_permission_source"))
+                    for book in books))
             markets.append(MarketReadiness(market_id=market_id,
                 identity_verified=exact_mapping,
                 provider_mapping_verified=bool(refs) and all(r.get("provider") in p.provider_ids for r in refs),
@@ -1755,7 +1821,8 @@ class NativeRuntime:
                 reference_age_basis=age_basis,
                 orderbook_age_ms=max(ages) if valid_ages else None,
                 orderbook_synchronized=bool(books) and all(b.synchronized for b in books),
-                market_active=bool(market and market.status not in {"closed", "suspended"} and books and all(b.status == "active" for b in books)),
+                market_active=bool(market and market.status not in {"closed", "suspended"}
+                    and inplay_ready and books and all(b.status == "active" for b in books)),
                 executable_liquidity=any(b.asks for b in books),
                 synthetic=fair is None or fair.synthetic or any(b.synthetic for b in books)))
         unknown = sum(o.status == OrderStatus.UNKNOWN for o in engine.risk.native_orders.values())

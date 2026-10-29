@@ -103,6 +103,8 @@ Configure-Input 'parlay_rest' @{
     focused_novig_nfl_props = ($isNative -and $state.mode -eq 'production');
     focused_props_interval_seconds = 120; focused_props_hourly_credit_budget = 36;
     focused_props_limit = 200;
+    live_points_enabled = ($isNative -and $state.mode -eq 'production');
+    live_points_hourly_budget = 12; live_points_interval_seconds = 90;
     account_tier = 'unknown'
 }
 

@@ -89,6 +89,7 @@ class Engine:
         self._last_signal_publication_at = None
         self.history = {}
         self.latest_typed = {}
+        self.game_states: dict[str, GameState] = {}
         self.expirations = []
         self.expiration_revisions = {}
         self.events = deque(maxlen=100)
@@ -442,6 +443,12 @@ class Engine:
         payload = event.payload
         self.latest_typed[event.schema_name] = payload
         market_id = getattr(payload, "market_id", None)
+        if isinstance(payload, GameState):
+            old = self.game_states.get(payload.event_id)
+            if (old is None or old.source_time is None or
+                    payload.source_time is not None and payload.source_time >= old.source_time):
+                self.game_states[payload.event_id] = payload
+            return
         if isinstance(payload, Market):
             market_id = payload.id
             self.matcher.register(payload)
@@ -1181,6 +1188,7 @@ class Engine:
             "started_at": self.started_at.isoformat(),
             "timestamp": utcnow().isoformat(), "plugins": self.registry.public(),
             "markets": [m.model_dump(mode="json") for m in self.markets.values()],
+            "live_game_states": [state.model_dump(mode="json") for state in self.game_states.values()],
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
             "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
             "reference_estimates": research_rows,

@@ -154,6 +154,9 @@ class ApprovedNativeFamilyRule(StrictRecord):
     prophetx_native_settlement_evidence: str | None = None
     prophetx_source_timestamp_unit: Literal["unknown", "seconds", "milliseconds", "microseconds", "nanoseconds"] = "unknown"
     prophetx_timestamp_unit_evidence: str | None = None
+    # A separate in-play rule needs an explicit, reviewed PBP state TTL.
+    # No pregame approval inherits an in-play clock or native permission.
+    inplay_state_max_age_ms: int | None = Field(default=None, ge=100, le=10000)
 
     @model_validator(mode="after")
     def coherent_rule(self):
@@ -169,6 +172,8 @@ class ApprovedNativeFamilyRule(StrictRecord):
                 or any(not text.strip() for text in self.allowed_native_rule_texts)
                 or len(set(self.allowed_native_rule_texts)) != len(self.allowed_native_rule_texts)):
             raise ValueError("Approved family rule needs exact source, native and order-grid evidence")
+        if (self.scope.phase == "inplay") != (self.inplay_state_max_age_ms is not None):
+            raise ValueError("In-play family needs its own reviewed live-state age limit")
         if self.scope.venue == "prophetx" and (
                 (self.prophetx_fee_evidence_kind == "exchange_verified" and
                  (self.prophetx_winnings_fee_upper_per_stake is None or
@@ -187,10 +192,15 @@ class ApprovedNativeFamilyRule(StrictRecord):
         return self
 
     def digest(self) -> str:
-        return digest_json(self.model_dump(mode="json"))
+        payload = self.model_dump(mode="json")
+        if self.scope.phase == "pregame":
+            payload["scope"].pop("phase", None)
+        if self.inplay_state_max_age_ms is None:
+            payload.pop("inplay_state_max_age_ms")
+        return digest_json(payload)
 
     def matches(self, market) -> bool:
-        return self.scope.matches(market) and market.status == "scheduled"
+        return self.scope.matches(market)
 
 
 class LaunchProfile(StrictRecord):
