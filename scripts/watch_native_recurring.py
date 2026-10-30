@@ -88,7 +88,8 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
     if any(p.get("venue") not in venues or p.get("environment") != "production"
            or p.get("validation_pilot") is True
            or p.get("strategy_ids") != ["native_positive_ev"]
-           or not p.get("markets") for p in profiles):
+           or not isinstance(p.get("markets"), list)
+           or (not p["markets"] and p.get("family_rule") is None) for p in profiles):
         return "launch_scope_outside_recurring_authorization"
     for profile in profiles:
         family = profile.get("family_rule")
@@ -124,8 +125,10 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
         if isinstance(row, dict):
             by_id.setdefault(row.get("id"), []).append(row)
     selected = [item.get("id") for profile in profiles for item in profile["markets"]]
-    if not selected or len(selected) != len(set(selected)):
+    if len(selected) != len(set(selected)):
         return "selected_market_not_in_current_canonical_state"
+    no_selected_family = not selected and all(
+        profile.get("family_rule") is not None for profile in profiles)
     for profile in profiles:
         for item in profile["markets"]:
             matched = by_id.get(item.get("id"), [])
@@ -154,6 +157,11 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
     venue_activation = (activation.get("by_venue") or {}).get(next(iter(venues)), {})
     if venue_activation.get("scope_digest") != authorized_digest:
         return "reviewed_launch_digest_changed"
+    # An already armed family lease survives a quiet market interval. The
+    # application still rejects every order until a fresh exact family market
+    # passes its own readiness and final dispatch checks.
+    if no_selected_family:
+        return "waiting_for_live_checks"
     if venue_activation.get("available") is not True:
         return "waiting_for_live_checks"
     return "ready"

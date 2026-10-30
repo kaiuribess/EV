@@ -178,3 +178,68 @@ def test_recurring_family_scope_arms_without_a_static_market_list(monkeypatch, t
     current["markets"] = [later.model_dump(mode="json")]
     assert gate.tick(now=NOW) == "armed"
     assert calls.count(("POST", "/api/control")) == 1
+
+
+def test_armed_family_stays_armed_when_no_market_current(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path)
+    config, scope = approved_config()
+    market, _ = source_fixture(config, NOW, "OFFLINE-family-game", NOW+timedelta(hours=5))
+    launch["launch_scope"][0].update(venue="kalshi",
+        family_rule=family_rule(scope, NOW).model_dump(mode="json"),
+        markets=[{"id": market.id}])
+    launch["activation"]["by_venue"] = {"kalshi": {"available": True, "scope_digest": DIGEST}}
+    launch["pricing"] = config.model_dump(mode="json")
+    current["markets"] = [market.model_dump(mode="json")]
+    saved = authorization()
+    saved["venues"] = ["kalshi"]
+    gate.AUTH_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    launch["launch_scope"][0]["markets"] = []
+    launch["activation"]["by_venue"]["kalshi"]["available"] = False
+    current["markets"] = []
+    assert gate.tick(now=NOW) == "waiting_for_live_checks"
+    assert current["kill_switch"] and not current["auto_trade"]
+    assert ("POST", "/api/control") not in calls
+    launch["launch_scope"][0]["markets"] = [{"id": market.id}]
+    launch["activation"]["by_venue"]["kalshi"]["available"] = True
+    current["markets"] = [market.model_dump(mode="json")]
+    assert gate.tick(now=NOW) == "armed"
+
+    launch["launch_scope"][0]["markets"] = []
+    launch["activation"]["by_venue"]["kalshi"]["available"] = False
+    current["markets"] = []
+    assert gate.tick(now=NOW) == "armed"
+    assert current["auto_trade"] and not current["kill_switch"]
+    assert calls.count(("POST", "/api/control")) == 1
+
+    launch["launch_scope"][0]["markets"] = [{"id": market.id}]
+    launch["activation"]["by_venue"]["kalshi"]["available"] = True
+    current["markets"] = [market.model_dump(mode="json")]
+    assert gate.tick(now=NOW) == "armed"
+    assert calls.count(("POST", "/api/control")) == 1
+
+    current.update(auto_trade=False, kill_switch=True)
+    assert gate.tick(now=NOW) == "interrupted"
+    assert calls.count(("POST", "/api/control")) == 1
+
+
+def test_armed_family_disarms_if_reviewed_digest_changes_while_idle(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path)
+    config, scope = approved_config()
+    market, _ = source_fixture(config, NOW, "OFFLINE-family-game", NOW+timedelta(hours=5))
+    launch["launch_scope"][0].update(venue="kalshi",
+        family_rule=family_rule(scope, NOW).model_dump(mode="json"),
+        markets=[{"id": market.id}])
+    launch["activation"]["by_venue"] = {"kalshi": {"available": True, "scope_digest": DIGEST}}
+    launch["pricing"] = config.model_dump(mode="json")
+    current["markets"] = [market.model_dump(mode="json")]
+    saved = authorization()
+    saved["venues"] = ["kalshi"]
+    gate.AUTH_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    assert gate.tick(now=NOW) == "armed"
+    launch["launch_scope"][0]["markets"] = []
+    current["markets"] = []
+    launch["activation"]["by_venue"]["kalshi"].update(
+        available=False, scope_digest="e" * 64)
+    assert gate.tick(now=NOW) == "blocked"
+    assert current["kill_switch"] and not current["auto_trade"]
+    assert calls.count(("POST", "/api/control")) == 2
