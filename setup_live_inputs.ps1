@@ -154,11 +154,12 @@ if ($isNative -and $state.mode -eq 'production') {
             'HITS', 'TOTAL_BASES', 'RBIS', 'RUNS', 'SHOTS_ON_GOAL');
         discovery_page_size = 2000; max_discovered_markets = 16
     }
-    # Keep the reviewed NBA tournament while discovering current NFL/MLB/NHL
-    # IDs from the authenticated active catalog. This is subscription scope,
-    # not a longer sportsbook quote freshness or event-identity tolerance.
+    # Keep the reviewed NBA tournament while ranking current tournaments
+    # across supported two-way research sports. Discovery still selects at
+    # most four actual tournament IDs and does not approve execution.
     Configure-Input 'prophetx' @{
-        discovery_leagues = @('NFL', 'NBA', 'MLB', 'NHL')
+        discovery_leagues = @('NFL', 'NBA', 'MLB', 'NHL', 'NCAAF', 'NCAABM',
+            'UFC', 'ATP', 'WTA')
         discovery_lookahead_hours = 96
     }
 }
