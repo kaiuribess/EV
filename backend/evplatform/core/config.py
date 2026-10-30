@@ -12,9 +12,12 @@ class TrustedPilotMarketScope(BaseModel):
     """A rule-bound normal question, not approval of a discovered native ID."""
     model_config = ConfigDict(extra="forbid")
     venue: Literal["kalshi", "novig", "prophetx"]
-    sport: Literal["football", "basketball", "baseball", "hockey"]
-    league: Literal["NFL", "NBA", "MLB", "NHL", "NCAAF", "NCAABM"]
+    sport: Literal["football", "basketball", "baseball", "hockey", "tennis", "mma"]
+    league: Literal["NFL", "NBA", "MLB", "NHL", "NCAAF", "NCAABM", "ATP", "WTA", "UFC"]
     market_type: Literal["player_prop", "moneyline"]
+    # Opt-in competitions share one reviewed normal-question rule. The
+    # primary sport/league remains unchanged for existing signed profiles.
+    additional_competitions: tuple[tuple[str, str], ...] = ()
     statistics: tuple[Literal["receptions", "receiving_yards", "passing_yards", "rushing_yards",
                               "points", "rebounds", "assists", "threes", "pra",
                               "pitcher_strikeouts", "hits", "total_bases", "shots_on_goal"], ...] = ()
@@ -32,6 +35,8 @@ class TrustedPilotMarketScope(BaseModel):
         # in-play scope records its phase and has a distinct digest.
         if self.phase == "pregame":
             payload.pop("phase", None)
+        if not self.additional_competitions:
+            payload.pop("additional_competitions", None)
         return payload
 
     @model_validator(mode="after")
@@ -45,6 +50,9 @@ class TrustedPilotMarketScope(BaseModel):
             ("hockey", "NHL"): {"shots_on_goal", "points"},
             ("football", "NCAAF"): set(),
             ("basketball", "NCAABM"): set(),
+            ("tennis", "ATP"): set(),
+            ("tennis", "WTA"): set(),
+            ("mma", "UFC"): set(),
         }
         allowed = supported.get((self.sport, self.league))
         if allowed is None:
@@ -59,7 +67,16 @@ class TrustedPilotMarketScope(BaseModel):
         elif (self.market_type == "moneyline" and self.statistics
                 or self.market_type == "player_prop" and (not self.statistics or not set(self.statistics) <= allowed)):
             raise ValueError("ProphetX pilot scope requires reviewed normal moneylines or supported player props")
+        if self.additional_competitions:
+            competitions = ((self.sport, self.league), *self.additional_competitions)
+            if (self.venue != "prophetx" or self.market_type != "moneyline"
+                    or len(set(competitions)) != len(competitions)
+                    or any(pair not in supported for pair in self.additional_competitions)):
+                raise ValueError("Additional competitions require distinct supported ProphetX moneylines")
         return self
+
+    def competition_permitted(self, sport: str, league: str) -> bool:
+        return (sport, league) in ((self.sport, self.league), *self.additional_competitions)
 
     def matches(self, market) -> bool:
         same_question = (market.statistic in self.statistics
@@ -72,7 +89,7 @@ class TrustedPilotMarketScope(BaseModel):
         phase_matches = ((self.phase == "pregame" and market.status == "scheduled")
                          or (self.phase == "inplay" and market.status == "live"))
         return bool(phase_matches
-            and market.sport == self.sport and market.league == self.league
+            and self.competition_permitted(market.sport, market.league)
             and market.market_type == self.market_type and same_question
             and market.settlement.period == self.period
             and market.settlement.overtime == "included"

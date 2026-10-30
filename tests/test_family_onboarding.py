@@ -51,19 +51,19 @@ def approved_config(venue="kalshi"):
     return config, scope
 
 
-def source_fixture(config, now, event, start):
-    payload = [{"id": event, "sport_key": "basketball_nba", "home_team": TEAMS[0],
-        "away_team": TEAMS[1], "commence_time": start.isoformat(),
+def source_fixture(config, now, event, start, *, sport_key="basketball_nba", teams=TEAMS):
+    payload = [{"id": event, "sport_key": sport_key, "home_team": teams[0],
+        "away_team": teams[1], "commence_time": start.isoformat(),
         "bookmakers": [{"key": book, "verified_at": (now-timedelta(seconds=1)).isoformat(),
             "is_current": True, "line_changed_at_ms": int((now-timedelta(seconds=1)).timestamp()*1000),
             "markets": [{"key": "h2h", "period": "FULL",
-                "outcomes": [{"name": TEAMS[0], "price": 2.40},
-                             {"name": TEAMS[1], "price": 1.60}]}]}
+                "outcomes": [{"name": teams[0], "price": 2.40},
+                             {"name": teams[1], "price": 1.60}]}]}
             for book in BOOKS]}]
     mapper = VerifiedProviderMapper()
     mapper.research_projector = TrustedSourceProjector(lambda: config)
     envelope = ProviderEnvelope("parlay_rest", "snapshot", payload, now, 1,
-        published_at=now, metadata={"sport": "basketball_nba"})
+        published_at=now, metadata={"sport": sport_key})
     assert mapper(envelope) == []
     updates = mapper.research_updates
     assert len(updates) == 3
@@ -366,6 +366,82 @@ def test_non_nba_prophetx_family_requires_explicit_full_period_and_league():
     native["period"] = None
     assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 0
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[0])
+
+
+def test_one_reviewed_prophetx_moneyline_rule_covers_distinct_leagues_without_static_ids():
+    now = utcnow().replace(microsecond=0)
+    config, base_scope = approved_config("prophetx")
+    scope = TrustedPilotMarketScope.model_validate({**base_scope.model_dump(),
+        "additional_competitions": (("football", "NFL"), ("tennis", "ATP"),
+            ("mma", "UFC"))})
+    with pytest.raises(ValueError, match="distinct supported"):
+        TrustedPilotMarketScope.model_validate({**base_scope.model_dump(),
+            "additional_competitions": (("football", "NFL"), ("football", "NFL"))})
+    config = config.model_copy(update={"trusted_pilot_policy":
+        config.trusted_pilot_policy.model_copy(update={"market_scope": scope})})
+    rule_fields = dict(scope=scope, rule_version="OFFLINE-multi-v1",
+        approved_by="fixture", approval_evidence="OFFLINE two-league review fixture only",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=1),
+        allowed_native_rule_texts=("moneyline|moneyline|full_game",),
+        quantity_step=Decimal(".01"), minimum_quantity=Decimal(1),
+        minimum_order_cost_usd=Decimal(1), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE ProphetX order grid fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE fee assumption fixture",
+        prophetx_native_settlement_evidence="OFFLINE NBA winner and overtime rule",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE v2 clock fixture")
+    with pytest.raises(ValueError, match="added competition"):
+        ApprovedNativeFamilyRule(**rule_fields)
+    rule = ApprovedNativeFamilyRule(**rule_fields,
+        additional_native_settlement_evidence={
+            "football:NFL": "OFFLINE NFL winner and overtime rule",
+            "tennis:ATP": "OFFLINE ATP natural-conclusion winner rule",
+            "mma:UFC": "OFFLINE UFC normal-result winner rule"})
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    engine = SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={})
+    runtime = SimpleNamespace(profile_for=lambda venue: profile,
+        mapper=NativeBookMapper(), engine=engine)
+    for index, (sport_key, teams, league) in enumerate((
+        ("basketball_nba", TEAMS, "NBA"),
+        ("americanfootball_nfl", ("Carolina Panthers", "Atlanta Falcons"), "NFL"),
+        ("tennis_atp", ("Example Tennis A", "Example Tennis B"), "ATP"),
+        ("mma_mixed_martial_arts", ("Example Fighter A", "Example Fighter B"), "UFC"),
+    )):
+        market, quotes = source_fixture(config, now, f"multi-{index}",
+            now+timedelta(days=index+1), sport_key=sport_key, teams=teams)
+        assert market.league == league and rule.matches(market)
+        native = {"name": "Moneyline", "type": "moneyline",
+            "sub_type": "moneyline", "period": "full_game", "status": "active",
+            "strikes": {f"{index}-home": {"name": teams[0], "outcome_id": "4", "status": "active"},
+                f"{index}-away": {"name": teams[1], "outcome_id": "5", "status": "active"}}}
+        event_id, native_id = str(100+index), str(200+index)
+        catalog = {(event_id, native_id): native}
+        events = {event_id: {"event_id": int(event_id), "name": market.event_name,
+            "scheduled": market.start_time.isoformat(), "status": "not_started",
+            "league": league}}
+        matches = prophetx_matches(market, catalog, events, observed_at=now)
+        assert len(matches) == 2
+        monitor = SimpleNamespace(research_catalog_at=now, research_events=events,
+            client=SimpleNamespace(public_market_data=SimpleNamespace(catalog=catalog)))
+        assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market,
+            matches, monitor, now=now) == 2
+        engine.markets[market.id] = market
+        assert all(NativeRuntime.profile_permits_market(runtime, profile, market.id,
+            outcome) for outcome in market.outcomes)
+        fair = fair_value(market, quotes, native_live_pricing(market, quotes, config, now), now)
+        assert fair.live_execution_allowed and fair.execution_eligible
+        evidence = {runtime.mapper.dynamic_evidence[("prophetx", market.id, outcome)][
+            "native_settlement_provenance"] for outcome in market.outcomes}
+        assert evidence == {rule.settlement_evidence_for(market)}
+        if league == "NFL":
+            native["period"] = None
+            assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market,
+                matches, monitor) == 0
+            assert not NativeRuntime.profile_permits_market(runtime, profile,
+                market.id, market.outcomes[0])
+
 
 
 def test_prophetx_prop_family_needs_exact_player_stat_line_and_period():

@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -34,6 +35,12 @@ class ControlBody(BaseModel):
     expected_launch_digest: str | None = None
     authorization_expires_at: datetime | None = None
     native_venues: list[Literal["kalshi", "novig", "prophetx", "polymarket_us"]] | None = None
+
+
+class RecurringActivationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    venue: Literal["prophetx"]
+    expected_launch_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ToggleBody(BaseModel):
@@ -441,6 +448,32 @@ def create_app(settings=None):
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         return engine.state()
+
+    @app.post("/api/launch/recurring/activate")
+    async def activate_recurring(body: RecurringActivationBody):
+        """Use the supervised recurring gate, including its saved authorization.
+
+        This cannot create or renew an authorization and never calls a venue
+        order API. The controller's durable status and normal OMS remain the
+        sole activation and execution paths.
+        """
+        if engine.settings.mode != "production":
+            raise HTTPException(409, "Recurring activation requires production")
+        profile = engine.native.profile_for(body.venue)
+        if profile is None or profile.validation_pilot:
+            raise HTTPException(409, "No reviewed recurring ProphetX launch profile is loaded")
+        if body.expected_launch_digest != engine.native.report(body.venue).profile_digest:
+            raise HTTPException(409, "The reviewed launch scope changed")
+        try:
+            from scripts import watch_native_recurring
+            phase = await asyncio.to_thread(watch_native_recurring.tick,
+                f"http://127.0.0.1:{engine.settings.port}")
+        except (ImportError, OSError, ValueError, httpx.HTTPError) as exc:
+            raise HTTPException(409, f"Recurring controller unavailable: {type(exc).__name__}") from exc
+        if phase != "armed" or not engine.risk.auto_trade or engine.risk.kill_switch:
+            raise HTTPException(409, f"Recurring activation remains {phase}")
+        return {"phase": phase, "venue": body.venue,
+                "authorization_expires_at": engine.risk.native_authorization_expires_at}
 
     @app.post("/api/orders/{order_id}/cancel")
     async def cancel(order_id: str):

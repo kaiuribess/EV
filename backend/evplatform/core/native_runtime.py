@@ -406,7 +406,7 @@ class NativeRuntime:
                     "native_inplay_permission": rule.scope.phase == "inplay" and bool(native_inplay_source),
                     "native_inplay_permission_source": native_inplay_source,
                     "native_rule_excerpt": match.rules_excerpt,
-                    "native_settlement_provenance": (rule.prophetx_native_settlement_evidence
+                    "native_settlement_provenance": (rule.settlement_evidence_for(market)
                         if venue == "prophetx" else match.rules_excerpt),
                     "fee_schedule_source": item.fee_bound.source,
                     "fee_schedule_bound": item.fee_bound.model_dump(mode="json"),

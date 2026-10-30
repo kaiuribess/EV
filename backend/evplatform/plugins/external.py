@@ -456,7 +456,7 @@ class ProphetXMonitorConfig(BaseModel):
     prop_subtypes: dict[str, list[str]] = Field(default_factory=dict, description="Event ID to discovered prop sub_type values")
     discovery_tournament_ids: list[int] = Field(default_factory=list, max_length=4,
         description="Authenticated tournament catalogs to refresh for game-market subscriptions")
-    discovery_leagues: list[Literal["NFL", "NBA", "MLB", "NHL"]] = Field(default_factory=list, max_length=4,
+    discovery_leagues: list[Literal["NFL", "NBA", "MLB", "NHL", "NCAAF", "NCAABM", "UFC", "ATP", "WTA"]] = Field(default_factory=list, max_length=9,
         description="Exact active tournament names to discover through the Trading/MM catalog")
     discovery_lookahead_hours: int = Field(default=30, ge=30, le=168,
         description="Upcoming event subscription horizon; does not relax quote freshness or identity matching")
@@ -487,7 +487,7 @@ class ProphetXMonitorConfig(BaseModel):
     @field_validator("discovery_tournament_ids")
     @classmethod
     def valid_discovery_tournaments(cls, values):
-        if any(type(value) is not int or value <= 0 or value > 1_000_000_000 for value in values) or len(set(values)) != len(values):
+        if any(type(value) is not int or value <= 0 or value > 9_223_372_036_854_775_807 for value in values) or len(set(values)) != len(values):
             raise ValueError("Use distinct positive tournament IDs from native discovery")
         return values
 
@@ -1191,7 +1191,7 @@ class NativeMonitor(Plugin):
             return await NativeMonitor._refresh_discovery_once(self, preserve_scope=preserve_scope)
 
     async def _refresh_discovery_once(self, *, preserve_scope=False):
-        from ..integrations.prophetx_discovery import active_tournament_ids, open_event_ids
+        from ..integrations.prophetx_discovery import active_tournament_options, open_event_ids
         from ..core.native_research import _aware
         try:
             config = self.context.config
@@ -1202,11 +1202,11 @@ class NativeMonitor(Plugin):
                 for market_id, row in source_rows.items() if market_id in known_markets]
             pinned = list(config.get("discovery_tournament_ids", []))
             leagues = config.get("discovery_leagues", [])
-            discovered, catalog_error = {}, ""
+            discovered, catalog_error = [], ""
             if leagues:
                 try:
                     payload = await self.client.discover_sports(active_events_only=True)
-                    discovered = active_tournament_ids(payload, leagues)
+                    discovered = active_tournament_options(payload, leagues)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -1215,10 +1215,10 @@ class NativeMonitor(Plugin):
                     catalog_error = type(exc).__name__
             league_scores = {league: max((int(count) for market, count in source_markets
                 if market.league == league), default=0) for league in leagues}
-            ranked_leagues = sorted(discovered, key=lambda league: (-league_scores[league],
-                                                                      leagues.index(league)))
-            tournaments = list(dict.fromkeys([*pinned, *(discovered[league] for league in ranked_leagues)]))[:4]
-            labels_by_tournament = {native_id: league for league, native_id in discovered.items()}
+            ranked_tournaments = sorted(discovered, key=lambda item: (-league_scores[item[0]],
+                leagues.index(item[0]), discovered.index(item)))
+            tournaments = list(dict.fromkeys([*pinned, *(native_id for _, native_id in ranked_tournaments)]))[:4]
+            labels_by_tournament = {native_id: league for league, native_id in discovered}
             payloads = [await self.client.discover_events(tournament_id=tournament_id)
                         for tournament_id in tournaments]
             pool = open_event_ids(payloads, now=utcnow(), max_events=50,
@@ -1325,8 +1325,10 @@ class NativeMonitor(Plugin):
             return
         self.discovery_status = "current"
         self.discovery_error_type = catalog_error
-        self.discovered_tournaments = {league: native_id for league, native_id in discovered.items()
-                                       if native_id in tournaments}
+        self.discovered_tournaments = {}
+        for league, native_id in discovered:
+            if native_id in tournaments:
+                self.discovered_tournaments.setdefault(league, native_id)
         self.discovered_event_ids = selected
         self.discovered_prop_subtypes = props
 

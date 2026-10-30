@@ -404,6 +404,45 @@ def test_setup_endpoint_is_read_only_with_unapplied_limits(tmp_path, monkeypatch
         assert client.get("/api/native/orders").json()["orders"] == []
 
 
+def test_recurring_live_button_uses_existing_controller_and_saved_scope(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from scripts import watch_native_recurring
+
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        calls = []
+        monkeypatch.setattr(engine.native, "profile_for", lambda venue:
+            SimpleNamespace(validation_pilot=False) if venue == "prophetx" else None)
+        monkeypatch.setattr(engine.native, "report", lambda venue:
+            SimpleNamespace(profile_digest="a" * 64))
+
+        def guarded_tick(url):
+            calls.append(url)
+            engine.risk.auto_trade = True
+            engine.risk.kill_switch = False
+            return "armed"
+
+        monkeypatch.setattr(watch_native_recurring, "tick", guarded_tick)
+        route = "/api/launch/recurring/activate"
+        monkeypatch.setattr(engine.native, "profile_for", lambda venue:
+            SimpleNamespace(validation_pilot=True))
+        assert client.post(route, headers=HEADERS, json={"venue": "prophetx",
+            "expected_launch_digest": "a" * 64}).status_code == 409
+        monkeypatch.setattr(engine.native, "profile_for", lambda venue:
+            SimpleNamespace(validation_pilot=False) if venue == "prophetx" else None)
+        assert client.post(route, json={"venue": "prophetx",
+            "expected_launch_digest": "a" * 64}).status_code == 403
+        assert client.post(route, headers=HEADERS, json={"venue": "prophetx",
+            "expected_launch_digest": "b" * 64}).status_code == 409
+        assert not calls and engine.risk.kill_switch
+        response = client.post(route, headers=HEADERS, json={"venue": "prophetx",
+            "expected_launch_digest": "a" * 64})
+        assert response.status_code == 200 and response.json()["phase"] == "armed"
+        assert len(calls) == 1 and calls[0].startswith("http://127.0.0.1:")
+        assert engine.risk.auto_trade and not engine.risk.kill_switch
+
+
 def test_operator_can_edit_limits_draft_without_arming_or_changing_runtime_risk(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with TestClient(native_app(tmp_path)) as client:

@@ -195,6 +195,23 @@ def test_prophetx_discovery_config_rejects_duplicate_or_invalid_tournaments():
         ProphetXMonitorConfig(discovery_tournament_ids=[0])
     with pytest.raises(ValueError):
         ProphetXMonitorConfig(discovery_leagues=["NFL", "NFL"])
+    assert ProphetXMonitorConfig(discovery_leagues=["NBA", "NCAAF", "NCAABM", "UFC",
+        "ATP", "WTA"]).discovery_leagues[-1] == "WTA"
+
+
+def test_current_tournament_names_map_to_exact_canonical_leagues():
+    from evplatform.integrations.prophetx_discovery import active_tournament_options
+    catalog = {"data": {"tournaments": [
+        {"id": 132, "name": "NBA"}, {"id": 27653, "name": "College Football"},
+        {"id": 648, "name": "College Basketball"}, {"id": 1500000003, "name": "UFC"},
+        {"id": 2613, "name": "ATP Basel"}, {"id": 3103, "name": "ATP Vienna"},
+        {"id": 3165, "name": "WTA Pan Pacific Open"},
+        {"id": 5065, "name": "ATP Challenger Men Singles"},
+        {"id": 1600000234, "name": "Golf Markets"}]}}
+    assert active_tournament_options(catalog, ["NBA", "NCAAF", "NCAABM", "UFC",
+        "ATP", "WTA"]) == [("NBA", 132), ("NCAAF", 27653),
+        ("NCAABM", 648), ("UFC", 1500000003), ("ATP", 2613),
+        ("ATP", 3103), ("WTA", 3165)]
 
 
 @pytest.mark.asyncio

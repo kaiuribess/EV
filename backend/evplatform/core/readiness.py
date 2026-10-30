@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from .models import utcnow
 from .config import TrustedPilotMarketScope
@@ -152,6 +152,9 @@ class ApprovedNativeFamilyRule(StrictRecord):
     prophetx_fee_evidence_kind: Literal["exchange_verified", "owner_approved_assumption"] = "exchange_verified"
     prophetx_assumed_winnings_profit_rate: Decimal | None = Field(default=None, ge=0, lt=1)
     prophetx_native_settlement_evidence: str | None = None
+    # A multi-competition rule cannot inherit NBA settlement evidence. Every
+    # additional competition has its own reviewed native contract source.
+    additional_native_settlement_evidence: dict[str, str] = Field(default_factory=dict)
     prophetx_source_timestamp_unit: Literal["unknown", "seconds", "milliseconds", "microseconds", "nanoseconds"] = "unknown"
     prophetx_timestamp_unit_evidence: str | None = None
     # A separate in-play rule needs an explicit, reviewed PBP state TTL.
@@ -159,6 +162,13 @@ class ApprovedNativeFamilyRule(StrictRecord):
     inplay_state_max_age_ms: int | None = Field(default=None, ge=100, le=10000)
     inplay_event_identity_basis: Literal["provider_id", "exact_same_provider_fixture"] = "provider_id"
     inplay_identity_evidence: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_rule(self, handler):
+        payload = handler(self)
+        if not self.additional_native_settlement_evidence:
+            payload.pop("additional_native_settlement_evidence", None)
+        return payload
 
     @model_validator(mode="after")
     def coherent_rule(self):
@@ -194,12 +204,19 @@ class ApprovedNativeFamilyRule(StrictRecord):
                 or self.prophetx_source_timestamp_unit == "unknown"
                 or not self.prophetx_timestamp_unit_evidence):
             raise ValueError("ProphetX family rule needs an account-applicable winnings fee bound")
+        expected = {f"{sport}:{league}" for sport, league in self.scope.additional_competitions}
+        if (set(self.additional_native_settlement_evidence) != expected
+                or any(not isinstance(value, str) or len(value.strip()) < 16
+                       for value in self.additional_native_settlement_evidence.values())):
+            raise ValueError("Each added competition needs its own reviewed native settlement evidence")
         if self.scope.venue == "kalshi" and self.kalshi_exchange_index is None:
             raise ValueError("Kalshi family rule needs an exact approved exchange index")
         return self
 
     def digest(self) -> str:
         payload = self.model_dump(mode="json")
+        if not self.additional_native_settlement_evidence:
+            payload.pop("additional_native_settlement_evidence", None)
         if self.scope.phase == "pregame":
             payload["scope"].pop("phase", None)
         if self.inplay_state_max_age_ms is None:
@@ -209,6 +226,11 @@ class ApprovedNativeFamilyRule(StrictRecord):
         if self.inplay_identity_evidence is None:
             payload.pop("inplay_identity_evidence")
         return digest_json(payload)
+
+    def settlement_evidence_for(self, market) -> str | None:
+        if (market.sport, market.league) == (self.scope.sport, self.scope.league):
+            return self.prophetx_native_settlement_evidence
+        return self.additional_native_settlement_evidence.get(f"{market.sport}:{market.league}")
 
     def matches(self, market) -> bool:
         return self.scope.matches(market)
@@ -317,6 +339,8 @@ class LaunchProfile(StrictRecord):
                 family.pop("inplay_event_identity_basis", None)
             if self.family_rule.inplay_identity_evidence is None:
                 family.pop("inplay_identity_evidence", None)
+            if not self.family_rule.additional_native_settlement_evidence:
+                family.pop("additional_native_settlement_evidence", None)
         if self.limits.max_native_order_attempts is None:
             payload["limits"].pop("max_native_order_attempts")
         if self.limits.max_native_daily_attempts is None:

@@ -846,6 +846,7 @@ class TrustedSourceProjector:
         "basketball_ncaabm": ("basketball", "NCAABM"),
         "tennis_atp": ("tennis", "ATP"),
         "tennis_wta": ("tennis", "WTA"),
+        "mma_mixed_martial_arts": ("mma", "UFC"),
         "soccer_epl": ("soccer", "EPL"),
         "soccer_spain_la_liga": ("soccer", "LA_LIGA"),
         "soccer_germany_bundesliga": ("soccer", "BUNDESLIGA"),
@@ -1110,7 +1111,7 @@ class TrustedSourceProjector:
                     and (full_game_winner or full_game_prop)
                     and offer.provider in {policy.provider_id, policy.crosscheck_provider_id}
                     and offer.bookmaker in policy.trusted_books
-                    and market.sport == scope.sport and market.league == scope.league
+                    and scope.competition_permitted(market.sport, market.league)
                     and market.settlement.period == "FULL"):
                 # Approval establishes only the ordinary full-game question.
                 # It never converts a heartbeat to quote observation or an
