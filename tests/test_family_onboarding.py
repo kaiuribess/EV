@@ -572,6 +572,15 @@ def test_conditional_prophetx_first_trade_profile_uses_family_without_future_gam
         validation_pilot=True)
     assert profile.market_ids == () and profile.limits.max_native_order_attempts == 1
     assert profile.digest() == profile.model_copy(update={"evidence": ()}).digest()
+    expanded_scope = TrustedPilotMarketScope.model_validate({**scope.model_dump(),
+        "additional_competitions": (("football", "NFL"),)})
+    expanded_rule = ApprovedNativeFamilyRule.model_validate({**rule.model_dump(),
+        "scope": expanded_scope.model_dump(),
+        "additional_native_settlement_evidence": {
+            "football:NFL": "OFFLINE NFL normal winner fixture"}})
+    with pytest.raises(ValueError, match="Conditional validation pilot"):
+        LaunchProfile.model_validate({**profile.model_dump(),
+            "family_rule": expanded_rule.model_dump()})
     for changed in ({"max_native_order_attempts": None}, {"max_order_stake_usd": Decimal(6)},
                     {"daily_loss_limit_usd": Decimal(6)}):
         with pytest.raises(ValueError):

@@ -275,6 +275,7 @@ class LaunchProfile(StrictRecord):
                 or self.family_rule.scope.league != "NBA"
                 or self.family_rule.scope.market_type != "moneyline"
                 or self.family_rule.scope.period != "FULL"
+                or self.family_rule.scope.additional_competitions
                 or self.min_reference_books < 3):
             raise ValueError("Conditional validation pilot requires a reviewed ProphetX NBA full-game moneyline family")
         return self
