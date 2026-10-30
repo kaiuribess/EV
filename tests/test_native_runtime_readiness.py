@@ -210,6 +210,26 @@ def test_missing_or_wrong_execution_lease_blocks_native_routing(runtime):
     assert not runtime.runtime_facts().native_routing_supported
 
 
+def test_prophetx_order_location_capability_is_separate_from_stale_cash(runtime):
+    profile = runtime.profile.model_copy(update={"venue": "prophetx"})
+    runtime.profile = profile
+    client = SimpleNamespace(venue_id="prophetx",
+        settings=SimpleNamespace(environment="sandbox"),
+        check_current_location=lambda order_id: True,
+        location_valid_for=lambda order_id: False)
+    venue = runtime.engine.registry.records["novig"]
+    runtime.engine.registry.records["prophetx"] = SimpleNamespace(
+        enabled=True, health=venue.health, credential_status=venue.credential_status,
+        plugin=SimpleNamespace(client=client, task=Worker("OFFLINE-prophetx")))
+    runtime.manager.adapters["prophetx"] = SimpleNamespace(client=client)
+    facts = runtime.runtime_facts("prophetx")
+    assert facts.order_bound_location_check_supported
+    assert not facts.account_identity_verified
+    assert not facts.native_routing_supported
+    client.check_current_location = None
+    assert not runtime.runtime_facts("prophetx").order_bound_location_check_supported
+
+
 def test_available_cash_policy_requires_verified_cash_in_readiness(runtime):
     runtime.engine.risk.config.available_cash_only = True
     assert not runtime.runtime_facts().account_identity_verified

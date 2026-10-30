@@ -1870,7 +1870,12 @@ class NativeRuntime:
             account_identity_verified=account_current,
             geographic_attestation_current=bool(p and account_current and
                 current_geographic_attestation(snapshot, p.account_fingerprint, p.environment, now)),
-            order_bound_location_check_supported=bool(venue == "prophetx" and native_bound
+            # This reports whether the official per-order check is available,
+            # not whether a balance snapshot happens to be current. A stale
+            # snapshot still blocks native routing through native_bound.
+            order_bound_location_check_supported=bool(venue == "prophetx" and record and record.enabled
+                and adapter is not None and client is not None
+                and getattr(adapter, "client", None) is client
                 and callable(getattr(client, "check_current_location", None))
                 and callable(getattr(client, "location_valid_for", None))),
             unresolved_unknown_orders=unknown,
