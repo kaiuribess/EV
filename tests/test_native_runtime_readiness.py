@@ -221,7 +221,8 @@ def test_prophetx_order_location_capability_is_separate_from_stale_cash(runtime)
     runtime.engine.registry.records["prophetx"] = SimpleNamespace(
         enabled=True, health=venue.health, credential_status=venue.credential_status,
         plugin=SimpleNamespace(client=client, task=Worker("OFFLINE-prophetx")))
-    runtime.manager.adapters["prophetx"] = SimpleNamespace(client=client)
+    # A dynamic family has no bound adapter until an exact market is found.
+    # Its per-order location method is already available on the venue client.
     facts = runtime.runtime_facts("prophetx")
     assert facts.order_bound_location_check_supported
     assert not facts.account_identity_verified

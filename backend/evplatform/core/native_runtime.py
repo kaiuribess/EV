@@ -1874,8 +1874,7 @@ class NativeRuntime:
             # not whether a balance snapshot happens to be current. A stale
             # snapshot still blocks native routing through native_bound.
             order_bound_location_check_supported=bool(venue == "prophetx" and record and record.enabled
-                and adapter is not None and client is not None
-                and getattr(adapter, "client", None) is client
+                and client is not None
                 and callable(getattr(client, "check_current_location", None))
                 and callable(getattr(client, "location_valid_for", None))),
             unresolved_unknown_orders=unknown,
