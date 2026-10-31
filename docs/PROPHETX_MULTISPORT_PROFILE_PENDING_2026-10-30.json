@@ -1,5 +1,12 @@
 {
   "status": "pending_review_not_loaded",
+  "owner_policy_decision": {
+    "decision": "approved_bounded_risk_and_source_policy_only",
+    "recorded_at_utc": "2026-10-31T00:36:48Z",
+    "source": "owner reply in this Codex conversation",
+    "production_placement_authorized": false,
+    "reason": "The owner explicitly separated the proposed policy from placement authority until exact family, account, location and first-order validation pass"
+  },
   "venue": "prophetx",
   "environment": "production",
   "market_scope": {
@@ -72,7 +79,7 @@
   "unresolved_before_application": [
     "Review each competition's normal-result, void and settlement rule against sportsbook terms",
     "Approve the multi-competition source-quality policy and unknown selection evidence explicitly",
-    "Approve or edit the proposed fixed-stake recurring monetary and source policy",
+    "Apply the owner-reviewed fixed-stake monetary and source policy only after factual family and first-order checks pass",
     "Bind a fresh authenticated account and current build and pricing digests",
     "Issue a new expiring recurring authorization; the previous authorization expired"
   ]
