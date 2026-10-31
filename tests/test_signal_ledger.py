@@ -1,14 +1,91 @@
 import asyncio
+from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from evplatform.core.models import Candidate, FeeSchedule, SettlementResult, utcnow
 from evplatform.core.signals import ResultProvenance, SignalLedger, SignalObservation, SignalResultImport
 from evplatform.core.storage import Storage
+from evplatform.engine import Engine
 
 D = Decimal
+
+
+async def test_signal_worker_keeps_research_running_after_stale_observation():
+    engine = Engine.__new__(Engine)
+    engine.signal_queue = asyncio.Queue()
+    engine.signal_ledger = SimpleNamespace(process=AsyncMock(side_effect=[
+        ValueError("Signal observations must be processed in timestamp order"), None]))
+    engine.risk = SimpleNamespace(halt=Mock())
+    engine.metrics = SimpleNamespace(counters=defaultdict(int))
+    await engine.signal_queue.put(SimpleNamespace(schema_name="signal.observation", payload="old"))
+    await engine.signal_queue.put(SimpleNamespace(schema_name="signal.observation", payload="new"))
+    worker = asyncio.create_task(engine._signal_loop())
+    await asyncio.wait_for(engine.signal_queue.join(), timeout=2)
+    assert not worker.done()
+    assert engine.signal_ledger.process.await_count == 2
+    assert engine.metrics.counters["out_of_order_signal_observations"] == 1
+    engine.risk.halt.assert_called_once()
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+
+async def test_signal_publication_stamps_queue_order_after_concurrent_evaluations(market):
+    engine = Engine.__new__(Engine)
+    engine._signal_publish_lock = asyncio.Lock()
+    published = []
+
+    async def publish(event):
+        if not published:
+            await asyncio.sleep(0.01)
+        published.append(event.payload.evaluated_at)
+
+    engine.bus = SimpleNamespace(publish=publish)
+    item = SignalObservation(market=market, status="NO SIGNAL", reason="fixture")
+    first = asyncio.create_task(engine._publish_signal_observation(item.model_copy(
+        update={"evaluated_at": utcnow()-timedelta(seconds=10)})))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(engine._publish_signal_observation(item.model_copy(
+        update={"evaluated_at": utcnow()-timedelta(seconds=20)})))
+    await asyncio.gather(first, second)
+    assert len(published) == 2 and published[0] <= published[1]
+    assert published[0] > item.evaluated_at-timedelta(seconds=10)
+
+
+async def test_signal_publication_preserves_queue_order_on_small_wall_clock_regression(market, monkeypatch):
+    engine = Engine.__new__(Engine)
+    engine._signal_publish_lock = asyncio.Lock()
+    engine.risk = SimpleNamespace(halt=Mock())
+    published = []
+    engine.bus = SimpleNamespace(publish=AsyncMock(side_effect=lambda event: published.append(event.payload)))
+    first = utcnow()
+    clocks = iter((first, first-timedelta(milliseconds=1)))
+    monkeypatch.setattr("evplatform.engine.utcnow", lambda: next(clocks))
+    item = SignalObservation(market=market, status="NO SIGNAL", reason="fixture")
+    await engine._publish_signal_observation(item)
+    await engine._publish_signal_observation(item)
+    assert published[1].evaluated_at > published[0].evaluated_at
+    assert published[1].reference_quotes == item.reference_quotes
+    engine.risk.halt.assert_not_called()
+
+
+async def test_material_signal_clock_regression_still_halts_execution(market, monkeypatch):
+    engine = Engine.__new__(Engine)
+    engine._signal_publish_lock = asyncio.Lock()
+    engine.risk = SimpleNamespace(halt=Mock())
+    engine.bus = SimpleNamespace(publish=AsyncMock())
+    first = utcnow()
+    clocks = iter((first, first-timedelta(seconds=2)))
+    monkeypatch.setattr("evplatform.engine.utcnow", lambda: next(clocks))
+    item = SignalObservation(market=market, status="NO SIGNAL", reason="fixture")
+    await engine._publish_signal_observation(item)
+    await engine._publish_signal_observation(item)
+    engine.risk.halt.assert_called_once()
 
 
 @pytest.fixture

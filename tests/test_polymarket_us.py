@@ -177,6 +177,27 @@ def test_actual_market_data_required_and_heartbeat_does_not_refresh_book(snake):
     assert client.health_check()["streaming"]
 
 
+def test_duplicate_and_out_of_order_full_books_do_not_replace_newer_depth():
+    client = PolymarketUSClient(settings())
+    request = prepare(client)
+    first = market_frame(request)
+    assert client.observe_frame("markets", first) == "data"
+    stored = client.books["sample-nba-game"]
+    earlier = market_frame(request)
+    earlier["marketData"]["transactTime"] = "2026-10-20T11:59:59Z"
+    earlier["marketData"]["state"] = "MARKET_STATE_OPEN"
+    earlier["marketData"]["bids"] = []
+    assert client.observe_frame("markets", earlier) == "out_of_order"
+    assert client.observe_frame("markets", first) == "out_of_order"
+    assert client.books["sample-nba-game"] == stored
+    assert client.market_messages == 1
+    closed = market_frame(request)
+    closed["marketData"]["transactTime"] = "2026-10-20T12:00:01Z"
+    closed["marketData"]["state"] = "MARKET_STATE_HALTED"
+    assert client.observe_frame("markets", closed) == "data"
+    assert client.books["sample-nba-game"]["state"] == "MARKET_STATE_HALTED"
+
+
 def test_unknown_subscription_does_not_establish_delivery_or_readiness():
     client = PolymarketUSClient(settings())
     request = prepare(client)

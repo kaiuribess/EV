@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import urlencode
 
 from pydantic import Field, model_validator
@@ -19,6 +19,15 @@ from .base import (
     Backoff, ProtocolError, ProviderConfig, ProviderEnvelope, ProviderState,
     RestProvider, UnsupportedOperation, parse_timestamp, provider_manifest, safe_component,
 )
+
+
+_BETONLINE_GAME_SPORTS = {"americanfootball_nfl", "americanfootball_ncaaf", "baseball_mlb"}
+
+
+def _supported_bookmakers(sport: str, requested: list[str], *, game_only: bool) -> list[str]:
+    """Avoid explicitly requesting BetOnline outside its confirmed feed scope."""
+    return [book for book in requested if book.lower() != "betonline"
+            or (game_only and sport in _BETONLINE_GAME_SPORTS)]
 
 
 class ParlayConfig(ProviderConfig):
@@ -32,8 +41,19 @@ class ParlayConfig(ProviderConfig):
     props_max_age_seconds: int | None = Field(default=None, ge=1, le=3600)
     stream_limit: int = Field(default=1000, ge=1, le=1000)
     props_limit: int = Field(default=1000, ge=1, le=10000)
+    focused_novig_nfl_props: bool = False
+    focused_props_interval_seconds: int = Field(default=120, ge=60, le=3600)
+    focused_props_hourly_credit_budget: int = Field(default=36, ge=3, le=300)
+    focused_props_limit: int = Field(default=200, ge=1, le=10000)
+    deduplicate_complete_game_stream: bool = False
+    startup_stream_wait_seconds: int = Field(default=12, ge=0, le=30)
     watchdog_seconds: float = Field(default=90, ge=10, le=180)
     account_tier: Literal["unknown", "free", "starter", "pro", "business", "enterprise", "scale"] = "unknown"
+    # The separate PBP snapshot is billable. It informs research game state;
+    # the slow bounded poll is never an in-play execution freshness certificate.
+    live_points_enabled: bool = False
+    live_points_hourly_budget: int = Field(default=12, ge=1, le=60)
+    live_points_interval_seconds: int = Field(default=90, ge=30, le=600)
 
 
 class ParlayGameBoardConfig(ParlayConfig):
@@ -44,6 +64,10 @@ class ParlayGameBoardConfig(ParlayConfig):
     markets: list[str] = Field(default_factory=lambda: ["h2h", "spreads", "totals"])
     stream_kinds: list[Literal["game", "prop"]] = Field(default_factory=lambda: ["game"])
     include_props: bool = False
+    # A fresh current-board baseline is available only when this socket
+    # connects. Reconnect occasionally so unchanged rows can be assessed
+    # against a new provider snapshot without spending REST credits.
+    baseline_refresh_seconds: int = Field(default=300, ge=60, le=3600)
 
     @model_validator(mode="after")
     def complete_board_filters(self):
@@ -61,6 +85,11 @@ class ParlayRest(RestProvider):
     credential_env = "PARLAY_API_KEY"
     config_class = ParlayConfig
 
+    # Supplied by ProviderBridge only when a separately authenticated game
+    # stream has exactly the same sport/book/market scope. A complete baseline
+    # can replace the metered REST discovery copy; an incomplete one cannot.
+    game_stream_state: Callable[[str], tuple[bool, bool]] | None = None
+
     def auth(self) -> tuple[dict[str, str], dict[str, str]]:
         return {"X-API-Key": self._credential}, {}
 
@@ -69,6 +98,12 @@ class ParlayRest(RestProvider):
 
     async def discover_events(self, sport: str, **filters: Any) -> ProviderEnvelope:
         return await self.request(f"/v1/sports/{safe_component(sport)}/events", params=filters, cost=0)
+
+    async def fetch_live_points(self, sport: str, *, match_id: str | None = None) -> ProviderEnvelope:
+        """One billable PBP state snapshot; never a sportsbook quote observation."""
+        params = {"match_id": safe_component(match_id)} if match_id else None
+        return await self.request(f"/v1/sports/{safe_component(sport)}/live/points",
+                                  params=params, cost=1)
 
     async def discover_markets(self, sport: str | None = None) -> ProviderEnvelope:
         path = f"/v1/sports/{safe_component(sport)}/props/markets" if sport else "/v1/markets"
@@ -100,9 +135,14 @@ class ParlayRest(RestProvider):
             # Links are evidence metadata; they are never order URLs here.
             "includeLinks": True,
         }
-        if self.config.bookmakers:
-            params["bookmakers"] = ",".join(self.config.bookmakers)
         params.update(filters)
+        requested = str(params.get("bookmakers", ",".join(self.config.bookmakers)))
+        if requested:
+            books = _supported_bookmakers(sport, [book.strip() for book in requested.split(",") if book.strip()],
+                                          game_only=True)
+            if not books:
+                raise UnsupportedOperation("No configured Parlay game-line book supports this sport")
+            params["bookmakers"] = ",".join(books)
         # Conservative local estimate; provider usage headers remain authoritative.
         books = [x for x in str(params.get("bookmakers", "")).split(",") if x]
         regions = [x for x in str(params.get("regions", "us")).split(",") if x]
@@ -114,19 +154,114 @@ class ParlayRest(RestProvider):
     async def fetch_props(self, sport: str, **filters: Any) -> ProviderEnvelope:
         # Parlay documents FanDuel per-side links only for stored native OPEN /
         # ACTIVE observations. They are evidence fields, never order URLs here.
-        params: dict[str, Any] = {"limit": self.config.props_limit, "includeLinks": True}
+        params: dict[str, Any] = {"limit": self.config.props_limit, "includeLinks": True,
+                                  "includeSids": True}
         if self.config.props_max_age_seconds is not None:
             params["maxAgeSec"] = self.config.props_max_age_seconds
-        if self.config.bookmakers:
-            params["bookmakers"] = ",".join(self.config.bookmakers)
         params.update(filters)
+        requested = str(params.get("bookmakers", ",".join(self.config.bookmakers)))
+        if requested:
+            books = _supported_bookmakers(sport, [book.strip() for book in requested.split(",") if book.strip()],
+                                          game_only=False)
+            if not books:
+                raise UnsupportedOperation("No configured Parlay prop book supports this sport")
+            params["bookmakers"] = ",".join(books)
         result = await self.request(f"/v1/sports/{safe_component(sport)}/props", params=params, cost=3)
         return replace(result, kind="props_snapshot", metadata={**result.metadata, "sport": sport})
 
+    async def fetch_focused_props(self, *, event_id: str, player: str, market: str,
+                                  line: str, bookmakers: list[str], limit: int = 200,
+                                  max_pages: int = 2) -> tuple[list[ProviderEnvelope], dict[str, Any]]:
+        """Fetch one exact NFL prop scope, retaining every page's own evidence.
+
+        /props/coverage is free but describes serving-window availability, not
+        a live quote. Pages are not atomic snapshots; never merge them to make
+        a complete or current pair. Caller must validate the event against the
+        free /events catalog before invoking this method.
+        """
+        import re
+
+        from .normalization import number_identity
+
+        if (not re.fullmatch(r"[0-9a-f]{32}", event_id) or not player.strip()
+                or market not in {"player_receptions", "player_receiving_yards", "player_reception_yds"}
+                or number_identity(line) is None or not 1 <= limit <= 10000
+                or not 1 <= max_pages <= 3):
+            raise ValueError("Invalid focused NFL prop identity or request bounds")
+        requested = list(dict.fromkeys(_supported_bookmakers("americanfootball_nfl", bookmakers,
+                                                              game_only=False)))
+        if len(requested) < 2:
+            return [], {"reason": "fewer_than_two_supported_books", "credits_reserved": 0}
+        filters = {"eventId": event_id, "player": player, "markets": market,
+                   "bookmakers": ",".join(requested), "limit": limit}
+        coverage = await self.discover_props_coverage("americanfootball_nfl", **filters)
+        sources = coverage.payload.get("sources", ()) if isinstance(coverage.payload, dict) else ()
+        visible = [row.get("bookmaker") for row in sources if isinstance(row, dict)
+                   and row.get("bookmaker") in requested and row.get("status") == "api_visible"
+                   and type(row.get("api_visible_rows")) is int and row["api_visible_rows"] > 0]
+        if len(set(visible)) < 2:
+            return [], {"reason": "coverage_has_fewer_than_two_books", "coverage_books": sorted(set(visible)),
+                        "credits_reserved": 0}
+        filters["bookmakers"] = ",".join(book for book in requested if book in visible)
+        pages: list[ProviderEnvelope] = []
+        seen_offsets = {0}
+        offset = 0
+        for _ in range(max_pages):
+            frame = await self.fetch_props("americanfootball_nfl", **filters, offset=offset)
+            rows = frame.payload if isinstance(frame.payload, list) else None
+            if rows is None or any(not isinstance(row, dict) for row in rows):
+                raise ProtocolError("Focused prop response has no row array")
+            # Parlay has accepted an obsolete eventId while serving a different
+            # event. Fail the complete request instead of relabeling those rows.
+            if any(row.get("event_id", row.get("eventId")) != event_id for row in rows):
+                raise ProtocolError("Focused prop response ignored the exact event filter")
+            selected = [row for row in rows if row.get("player") == player
+                        and row.get("market_key") == market
+                        and number_identity(row.get("line")) == number_identity(line)
+                        and row.get("period") == "FULL"
+                        and row.get("bookmaker") in visible]
+            pages.append(replace(frame, payload=selected, metadata={**frame.metadata,
+                "focused_scope": {"event_id": event_id, "player": player,
+                                  "market": market, "line": number_identity(line)},
+                "original_row_count": len(rows)}))
+            headers = frame.metadata.get("headers", {})
+            if str(headers.get("x-result-has-more", "")).lower() != "true":
+                break
+            try:
+                next_offset = int(headers["x-next-offset"])
+            except (KeyError, TypeError, ValueError):
+                break
+            if next_offset <= offset or next_offset in seen_offsets:
+                break
+            seen_offsets.add(next_offset)
+            offset = next_offset
+        # A later page cannot turn the earlier response into a frozen board.
+        if len(pages) > 1:
+            pages = [replace(frame, metadata={**frame.metadata, "headers": {
+                **frame.metadata.get("headers", {}), "x-result-has-more": "true"}}) for frame in pages]
+        return pages, {"reason": "fetched", "coverage_books": sorted(set(visible)),
+                       "pages": len(pages), "returned_rows": sum(len(page.payload) for page in pages),
+                       "credits_reserved": 3 * len(pages)}
+
     async def _poll_sport(self, sport: str) -> AsyncIterator[ProviderEnvelope]:
-        yield await self.fetch_snapshot(sport)
+        game_complete = (self.config.deduplicate_complete_game_stream
+            and self.game_stream_state is not None and self.game_stream_state(sport)[1])
+        if not game_complete:
+            yield await self.fetch_snapshot(sport)
         if self.config.include_props:
             yield await self.fetch_props(sport)
+
+    async def stream_updates(self) -> AsyncIterator[ProviderEnvelope]:
+        if self.config.deduplicate_complete_game_stream and self.game_stream_state is not None:
+            # Wait briefly for the free stream's first board on startup. REST
+            # remains the fallback if the stream fails, is partial, or is late.
+            deadline = time.monotonic() + self.config.startup_stream_wait_seconds
+            while time.monotonic() < deadline and not all(
+                self.game_stream_state(sport)[0] for sport in self.config.sports
+            ):
+                await asyncio.sleep(0.25)
+        async for envelope in super().stream_updates():
+            yield envelope
 
 
 class ParlayWebSocket(ParlayRest):
@@ -192,7 +327,11 @@ class ParlayWebSocket(ParlayRest):
             "diff": "false",
         }
         if self.config.bookmakers:
-            params["bookmakers"] = ",".join(self.config.bookmakers)
+            books = _supported_bookmakers(sport, self.config.bookmakers,
+                                          game_only=self.config.stream_kinds == ["game"])
+            if not books:
+                raise UnsupportedOperation("No configured Parlay stream book supports this sport and market kind")
+            params["bookmakers"] = ",".join(books)
         if self.config.markets:
             params["markets"] = ",".join(self.config.markets)
         if self.config.stream_kinds:
@@ -277,6 +416,7 @@ class ParlayWebSocket(ParlayRest):
         while not self._closed and sport in self._subscriptions:
             retry = True
             has_snapshot = False
+            planned_refresh = False
             try:
                 async with self._ws_factory(
                     self.stream_url(sport),
@@ -285,8 +425,27 @@ class ParlayWebSocket(ParlayRest):
                     max_size=8 * 1024 * 1024, max_queue=32,
                 ) as socket:
                     self._sockets[sport] = socket
+                    # Only the approved NBA game scope needs this periodic
+                    # replacement baseline. Other sports keep their existing
+                    # stream/recovery cadence without extra reconnects.
+                    refresh_interval = (getattr(self.config, "baseline_refresh_seconds", None)
+                                        if sport == "basketball_nba" else None)
+                    refresh_at = time.monotonic() + refresh_interval if refresh_interval else None
                     while not self._closed:
-                        frame = await asyncio.wait_for(socket.recv(), timeout=self.config.watchdog_seconds)
+                        if refresh_at is not None and time.monotonic() >= refresh_at:
+                            planned_refresh = True
+                            self.state, self.reason = ProviderState.BACKOFF, "Refreshing complete game board baseline"
+                            break
+                        timeout = min(self.config.watchdog_seconds,
+                                      max(0.001, refresh_at-time.monotonic())) if refresh_at else self.config.watchdog_seconds
+                        try:
+                            frame = await asyncio.wait_for(socket.recv(), timeout=timeout)
+                        except TimeoutError:
+                            if refresh_at is None or time.monotonic() < refresh_at:
+                                raise
+                            planned_refresh = True
+                            self.state, self.reason = ProviderState.BACKOFF, "Refreshing complete game board baseline"
+                            break
                         envelope = self.parse_frame(frame, has_snapshot=has_snapshot)
                         self.last_received_at = envelope.received_at
                         if envelope.kind == "connected":
@@ -332,7 +491,8 @@ class ParlayWebSocket(ParlayRest):
             if not retry or self._closed:
                 return
             self.reconnects += 1
-            await asyncio.sleep(backoff.next_delay())
+            if not planned_refresh:
+                await asyncio.sleep(backoff.next_delay())
 
     async def stream_updates(self) -> AsyncIterator[ProviderEnvelope]:
         if not await self.connect():

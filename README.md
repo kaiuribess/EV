@@ -32,6 +32,11 @@ status evidence blocks execution. See [reference profiles](docs/REFERENCE_MODEL.
 and [the source review](docs/BOOK_WEIGHT_RESEARCH.md); these are not fitted or
 proven-profitable weights.
 
+The optional [winner-only binary pricing policy](docs/WINNER_ONLY_BINARY.md)
+estimates EV conditional on a normal WIN/LOSS result while keeping exceptional
+settlement accounting separate. It is disabled by default and does not relax
+source freshness or live authorization.
+
 ## Start on Windows
 
 Prerequisites: Python 3.12+, Node.js 22.12+ or a compatible current LTS, PowerShell,
@@ -282,6 +287,7 @@ documentation. Their exact scope and evidence are in:
 - [Oddize free REST setup and actual validation](docs/ODDIZE.md)
 - [Signal history, grading and safety controls](docs/SIGNAL_TRACKING.md)
 - [Native launch checks and configuration](docs/GO_LIVE.md)
+- [Multi-book consensus research and limitations](docs/MULTI_BOOK_CONSENSUS.md)
 
 Every live provider is disabled by default and independent of the demo. Enabling
 a provider with no credentials reports a blocked state rather than crashing or

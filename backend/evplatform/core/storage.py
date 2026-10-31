@@ -152,9 +152,10 @@ class Storage:
         if future:
             await future
 
-    async def event(self, event: Envelope):
+    async def event(self, event: Envelope, *, durable: bool = False):
         await self.write("INSERT OR IGNORE INTO events VALUES(NULL,?,?,?,?)",
-                         (event.id, event.schema_name, event.emitted_at.isoformat(), _PendingAuditData(event.model_dump_json())))
+                         (event.id, event.schema_name, event.emitted_at.isoformat(), _PendingAuditData(event.model_dump_json())),
+                         durable=durable)
 
     @staticmethod
     async def decode_event_data(data: str | bytes) -> str:

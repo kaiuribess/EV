@@ -148,10 +148,12 @@ class TimedData(Contract):
 
 class Quote(TimedData):
     market_id: str
+    # A stable ID alone cannot prove that a player, line or period was unchanged.
+    market_fingerprint: str | None = None
     provider: str
     bookmaker: str
     decimal_odds: dict[str, Decimal]
-    status: Literal["active", "suspended", "withdrawn"] = "active"
+    status: Literal["active", "unknown", "suspended", "withdrawn"] = "active"
     sequence: int | None = None
     original_market_id: str | None = None
     quality: float = Field(default=1.0, ge=0, le=1)
@@ -159,10 +161,28 @@ class Quote(TimedData):
     observation_verified: bool = False
     observation_complete: bool = False
     market_status_verified: bool = False
+    settlement_equivalence_verified: bool = True
+    # Independent review of the ordinary WIN/LOSS condition. This does not
+    # certify that exceptional sportsbook and venue payouts are equivalent.
+    normal_outcome_verified: bool = False
+    normal_outcome_evidence: str | None = None
     source_price_changed_at: datetime | None = None
+    # Parlay WebSocket price_age_s measures time since a price MOVED; it is
+    # not an observation clock or evidence that the outcome is still open.
+    provider_reported_price_age_s: Decimal | None = Field(default=None, ge=0)
+    # Parlay REST line_changed_at_ms is the oldest stored served row, not a
+    # guaranteed upstream price move or present selection verification.
+    source_stored_at: datetime | None = None
+    source_selection_ids: dict[str, str] = Field(default_factory=dict)
+    source_status_historical_hint: bool = False
     verification_reason: str | None = None
+    # Book/fixture poll evidence is not a selection observation. It is shown
+    # separately and cannot make a quote strictly eligible.
+    source_scope_poll_at: datetime | None = None
+    source_scope_is_current: bool | None = None
 
-    @field_validator("source_observed_at", "source_price_changed_at")
+    @field_validator("source_observed_at", "source_price_changed_at", "source_stored_at",
+                     "source_scope_poll_at")
     @classmethod
     def aware_observation_clock(cls, value):
         if value is not None and value.tzinfo is None:
@@ -216,6 +236,10 @@ class GameState(TimedData):
     status: str
     score: dict[str, int]
     clock: str | None = None
+    period: str | None = None
+    source_match_id: str | None = None
+    identity_verified: bool = False
+    identity_basis: Literal["provider_id", "exact_same_provider_fixture", "unknown"] = "unknown"
 
 
 class PlayerProjection(TimedData):
@@ -232,6 +256,7 @@ class FairValue(Contract):
     probabilities: dict[str, Decimal]
     references: tuple[dict[str, Any], ...]
     model: str
+    normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
     calculated_at: datetime
     disagreement: Decimal
     synthetic: bool
@@ -243,6 +268,7 @@ class FairValue(Contract):
     ineligibility_reasons: tuple[str, ...] = ()
     sensitivity_model: str | None = None
     sensitivity_probabilities: dict[str, Decimal] | None = None
+    trusted_pilot_margin_probability: Decimal | None = None
 
 
 class Candidate(Contract):
@@ -270,6 +296,8 @@ class Candidate(Contract):
     reference_inputs_eligible: bool = True
     ineligibility_reasons: tuple[str, ...] = ()
     primary_model: str | None = None
+    normal_outcome_policy: Literal["strict_settlement_equivalence", "winner_only_binary"] = "strict_settlement_equivalence"
+    estimate_label: str = "Estimated EV"
     sensitivity_model: str | None = None
     sensitivity_fair_probability: Decimal | None = None
     sensitivity_ev_per_contract: Decimal | None = None

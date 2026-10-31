@@ -62,6 +62,10 @@ class EventBus:
         self.subscribers.append(subscription)
         return subscription.queue
 
+    def unsubscribe(self, queue: asyncio.Queue):
+        """Detach a stopped consumer before another producer can fill its queue."""
+        self.subscribers = [sub for sub in self.subscribers if sub.queue is not queue]
+
     async def publish(self, event: Envelope):
         validated = self.schemas.validate(event.schema_name, event.schema_version, event.payload)
         event = event.model_copy(update={"payload": validated})

@@ -1,17 +1,19 @@
-"""Full-history, funded-cash ProphetX inventory verification (read-only)."""
+"""Authenticated ProphetX wallet cash and separate full-inventory verification."""
+import asyncio
 from datetime import timedelta
 from decimal import Decimal
+import math
 
 from ..core.models import OrderStatus, utcnow
 from .prophetx_financial import (
     ProphetXAccountReview, authenticated_identity, complete_order_history,
-    source_time,
+    reporting_pages, source_time,
 )
 from .reconciliation import ReconciliationError, _number, _object, _text
 from .common import decimal_value
 
 
-def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10)):
+def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10), funded_cash_only=False):
     data = _object(_object(raw, "balance").get("data"), "balance data")
     if data.get("unmatched_order_balance_status") != "succeed":
         raise ReconciliationError("ProphetX unmatched balance has not synchronized")
@@ -24,19 +26,18 @@ def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10)):
     cash = _number(data.get("balance"), "available balance")
     matched = _number(data.get("matched_order_balance"), "matched balance")
     unmatched = _number(data.get("unmatched_order_balance"), "unmatched balance")
-    if _number(data.get("gec_balance"), "global exposure credit") != 0:
+    # The documented `balance` is available cash, distinct from GEC. Never
+    # add credit to it; funded-cash-only inventory review still excludes GEC.
+    credit = _number(data.get("gec_balance"), "global exposure credit")
+    if funded_cash_only and credit != 0:
         raise ReconciliationError("ProphetX exposure-credit accounting is outside funded-cash scope")
     return cash, matched, unmatched
 
 
 async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids=frozenset(),
-                                review: ProphetXAccountReview | None = None, observed_at=None):
-    """A complete scan is account-scoped and never creates authorization.
-
-    No short lookback is called complete. Missing inception/funding evidence
-    returns an actionable unreconciled snapshot. Resting and filled inventory
-    must agree with both durable orders and authenticated wallet aggregates.
-    """
+                                review: ProphetXAccountReview | None = None, observed_at=None,
+                                external_positions=()):
+    """Verify current cash independently; complete inventory never comes from a balance alone."""
     # Local import permits the shared dispatcher to import this adapter.
     from .account_probe import NativeAccountSnapshot
     now = observed_at or utcnow()
@@ -45,11 +46,123 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 account_fingerprint=fingerprint, identity_verified=True, observed_at=now)
     private = getattr(client, "private", None)
     captured_fence = private.begin_probe(client=client) if private is not None else None
-    before = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow())
+    raw_before = await client.fetch_balance()
+    before = balance_facts(raw_before, observed_at=observed_at or utcnow(),
+                           funded_cash_only=review is not None)
+    if any(row.venue == "prophetx" and row.environment == client.settings.environment
+           for row in external_positions) and review is not None:
+        raise ReconciliationError("ProphetX external fills need an account-specific inventory review")
     if review is None:
-        return NativeAccountSnapshot(**base, balance_usd=before[0], reason=
-            "Account inception and funded-cash-only review is required for complete ProphetX inventory")
-    history = await complete_order_history(client, review, observed_at=observed_at)
+        venue_external = [row for row in external_positions if row.venue == "prophetx"
+            and row.environment == client.settings.environment]
+        scoped_external = [row for row in venue_external if row.account_fingerprint == fingerprint]
+        cash_verified = (authenticated_identity(client) == (user, fingerprint)
+                         and (private is None or private.fence(client=client) == captured_fence))
+        external_cost = sum((row.cost_usd for row in scoped_external), Decimal(0))
+        if len(venue_external) != len(scoped_external):
+            cash_verified = False
+        current = None
+        blockers = []
+        # A complete, current *empty* inventory can be established without
+        # reconstructing lifetime history. This never converts a nonempty or
+        # lagging account into a zero-exposure account.
+        no_credit = _number(_object(raw_before.get("data"), "balance data").get("gec_balance"),
+                            "global exposure credit") == 0
+        relevant_managed = [row for row in managed_orders if row.venue == "prophetx"
+            and row.mode == client.settings.environment and row.id not in settled_order_ids
+            and row.status != OrderStatus.REJECTED]
+        if relevant_managed:
+            blockers.append("Managed ProphetX orders still require reconciliation")
+        if scoped_external:
+            blockers.append("Tracked ProphetX external positions still require release evidence")
+        if not no_credit:
+            blockers.append("ProphetX exposure credit is present outside funded-cash scope")
+        if before[1:] != (Decimal(0), Decimal(0)):
+            blockers.append("ProphetX wallet reports matched or unmatched exposure")
+        if private is None or captured_fence is None:
+            blockers.append("Current ProphetX private order heartbeat is unavailable")
+        if (cash_verified and not relevant_managed and not scoped_external and no_credit
+                and before[1:] == (Decimal(0), Decimal(0)) and private is not None
+                and captured_fence is not None):
+            try:
+                # The Trading API enforces a 60-day created-at window. This
+                # current-active check is paired with zero matched/unmatched
+                # wallet exposure and the live private-stream fence; it does
+                # not assert that the account has no older settled history.
+                query_to = math.ceil(now.timestamp())
+                query_from = query_to - 60 * 86400 + 1
+                for attempt in range(2):
+                    try:
+                        histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+                            params={"status": status, "from": query_from, "to": query_to},
+                            observed_at=observed_at)
+                            for status in ("open", "inactive")]
+                    except ReconciliationError as exc:
+                        if attempt == 0 and str(exc) == "Reporting watermark is stale or in the future":
+                            # A lagging report may catch up during the existing
+                            # bounded retry. Never accept the stale page or
+                            # extend its ten-second source-age requirement.
+                            await asyncio.sleep(5)
+                            query_to = math.ceil(utcnow().timestamp())
+                            query_from = query_to - 60 * 86400 + 1
+                            continue
+                        raise
+                    after = balance_facts(await client.fetch_balance(),
+                        observed_at=observed_at or utcnow(), funded_cash_only=True)
+                    if before != after:
+                        blockers.append("ProphetX wallet changed during active-order reads")
+                        break
+                    if any(history.rows for history in histories):
+                        blockers.append("ProphetX active-order history is not empty")
+                        break
+                    watermark = min(history.last_synced_at for history in histories)
+                    if watermark < now and attempt == 0:
+                        # Reporting replicates behind the private order stream.
+                        # One paced retry lets its watermark cover this probe;
+                        # the unchanged wallet and private fence remain required.
+                        await asyncio.sleep(5)
+                        query_to = math.ceil(utcnow().timestamp())
+                        query_from = query_to - 60 * 86400 + 1
+                        continue
+                    current = private.reconcile_current_empty(started_at=now,
+                        reporting_watermark=watermark, captured_fence=captured_fence,
+                        client=client, observed_at=observed_at or utcnow())
+                    break
+            except ReconciliationError as exc:
+                blockers.append(str(exc))
+                current = None
+            except (ValueError, TypeError, AttributeError):
+                blockers.append("ProphetX active-order report is invalid")
+                current = None
+        # The unchanged second wallet read, reporting watermark and private
+        # fence establish the completed snapshot. Do not age it from the
+        # beginning of a potentially long paginated inventory probe.
+        base["observed_at"] = observed_at or utcnow()
+        return NativeAccountSnapshot(**base, balance_usd=before[0], cash_available_verified=cash_verified,
+            open_order_count=0 if current is not None else None,
+            position_count=0 if current is not None else None,
+            reconciled=current is not None,
+            private_connection_generation=captured_fence[0] if current is not None else None,
+            private_revision=captured_fence[1] if current is not None else None,
+            private_as_of=current,
+            external_position_count=len(scoped_external), external_cost_usd=external_cost,
+            reason="" if current is not None else
+                ("; ".join(dict.fromkeys(blockers)) if cash_verified else
+                 "ProphetX account identity changed during wallet read"))
+    if review.current_inventory_reviewed_at is not None:
+        baseline = review.current_inventory_reviewed_at
+        if (review.account_fingerprint != fingerprint or review.valid_until <= now
+                or not review.funded_cash_only or baseline >= now
+                or now-baseline > timedelta(days=2)):
+            raise ReconciliationError("Current ProphetX inventory review is stale or belongs to another account")
+        # The documented updated-at query spans at most two days. This route
+        # is valid only when the reviewed baseline attests empty funded-cash
+        # inventory *and* the separate funding evidence excludes LEC.
+        history = await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+            params={"updated_at_from": math.floor(baseline.timestamp()),
+                    "updated_at_to": math.ceil(now.timestamp())}, observed_at=observed_at)
+    else:
+        history = await complete_order_history(client, review, observed_at=observed_at)
     relevant = [o for o in managed_orders if o.venue == "prophetx" and o.mode == client.settings.environment
                 and o.id not in settled_order_ids and o.status != OrderStatus.REJECTED]
     owned = {o.venue_order_id: o for o in relevant if o.venue_order_id}
@@ -59,6 +172,8 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
         reasons.append("Managed ProphetX order identity/financial reconciliation is incomplete")
     resting, positions, seen_owned = {}, {}, set()
     matched_stake, unmatched_stake = Decimal(0), Decimal(0)
+    if review.current_inventory_reviewed_at is not None and before[1:] != (Decimal(0), Decimal(0)):
+        reasons.append("Current-empty-inventory review conflicts with wallet exposure")
     for row in history.rows:
         if row.get("user_id") != user:
             raise ReconciliationError("ProphetX history contains a different participant")
@@ -105,11 +220,13 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
     expected_resting = {oid for oid, o in owned.items() if o.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}}
     if set(resting) != expected_resting:
         reasons.append("ProphetX resting order inventory differs")
-    after = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow())
+    after = balance_facts(await client.fetch_balance(), observed_at=observed_at or utcnow(),
+                          funded_cash_only=True)
     if before != after or before[1:] != (matched_stake, unmatched_stake):
         reasons.append("ProphetX wallet exposure differs or changed during inventory reads")
-    if (authenticated_identity(client) != (user, fingerprint) or
-            (private is not None and private.fence(client=client) != captured_fence)):
+    identity_stable = (authenticated_identity(client) == (user, fingerprint) and
+                       (private is None or private.fence(client=client) == captured_fence))
+    if not identity_stable:
         reasons.append("ProphetX private account changed during inventory reads")
     private_as_of = None
     if private is None or captured_fence is None:
@@ -122,7 +239,7 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
             reasons.append("ProphetX private history watermark, order facts, or account fence did not reconcile")
     return NativeAccountSnapshot(**{**base, "observed_at": observed_at or utcnow()}, balance_usd=after[0],
         open_order_count=len(resting), position_count=len(positions), reconciled=not reasons,
-        cash_available_verified=not reasons,
+        cash_available_verified=identity_stable and before == after,
         private_connection_generation=captured_fence[0] if private_as_of is not None else None,
         private_revision=captured_fence[1] if private_as_of is not None else None,
         private_as_of=private_as_of,

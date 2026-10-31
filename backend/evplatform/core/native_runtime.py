@@ -10,16 +10,18 @@ import asyncio
 import hashlib
 import time
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from pydantic import Field
 
 from .conflicts import UNRESOLVED, reviewed_correlations, risk_family
 from .models import Contract, Envelope, OrderStatus, utcnow
 from .native_oms import NativeOrder, NativeOrderManager
-from .pricing import NoSignal, fair_value
+from .pricing import NoSignal, fair_value, market_config
 from .readiness import (
     FeedReadiness, LaunchProfile, LiveLimits, MarketReadiness,
     ReadinessBlocker, ReadinessReport, RuntimeReadiness, digest_json, evaluate_readiness,
+    family_market_ready,
 )
 from .portfolio import LaunchPortfolio
 from .risk import RiskRejected
@@ -41,18 +43,40 @@ def pilot_prior_attempts(orders) -> int:
                for order in orders)
 
 
+def current_geographic_attestation(snapshot, account_fingerprint: str,
+                                   environment: str, now: datetime) -> bool:
+    """Require an account-bound, unexpired native location result at dispatch.
+
+    An authenticated wallet, a production host, or a prior launch certificate
+    does not establish the account's present trading location. Venues without
+    a read-only attestation remain unable to submit automatically.
+    """
+    expiry = getattr(snapshot, "geographic_attestation_expires_at", None)
+    return bool(snapshot is not None and getattr(snapshot, "identity_verified", False)
+                and getattr(snapshot, "account_fingerprint", None) == account_fingerprint
+                and getattr(snapshot, "environment", None) == environment
+                and isinstance(expiry, datetime) and expiry.tzinfo is not None
+                and expiry.utcoffset() is not None and now < expiry)
+
+
 class NativeRuntime:
     def __init__(self, engine):
         self.engine = engine
         self.profile = None
         self.portfolio = None
         self.profile_error = ""
+        self.structural_review = None
         self.build_id = ""
         self.mapper = None
         self.books = {}
+        self.invalidated_family_markets: set[tuple[str, str]] = set()
         self.candidates = {}
         self.signals = {}
         self.account_snapshots = {}
+        self.external_positions = ()
+        self.pending_external_orders = ()
+        self.resolved_external_orders = ()
+        self.unresolved_external_accounts = ()
         # Pre-profile diagnostics are never consulted by risk, sizing or the
         # release gate. They let an operator identify an account before writing
         # the reviewed launch profile that enables normal account probing.
@@ -62,11 +86,16 @@ class NativeRuntime:
         self.dirty_venues = set()
         self.last_account_probe = 0.0
         self._last_account_probes = {}
+        self._account_exchange_indexes = {}
+        self._kalshi_index_cache = None
         self.last_settlement_probe = 0.0
         self.execution_lease = None
         self._account_generations = {}
         self._account_snapshot_fences = {}
         self._account_probes = set()
+        # A real ProphetX location check is bound to one order attempt and is
+        # never inferred from merely running in the production environment.
+        self._prophetx_location = None
         self._account_probe_lock = asyncio.Lock()
         self._settlement_probe_lock = asyncio.Lock()
         self.manager = NativeOrderManager(engine.risk, engine.storage, engine.bus, engine.metrics,
@@ -74,8 +103,33 @@ class NativeRuntime:
 
     async def start(self):
         self.build_id = await asyncio.to_thread(build_fingerprint)
-        profile_path = Path("data/launch_profile.json")
-        portfolio_path = Path("data/launch_portfolio.json")
+        from .paths import runtime_data_file
+        from .external_inventory import load_external_inventory_review
+        from .structural_review import StructuralPilotReview
+
+        external_inventory_error = ""
+        if self.engine.settings.mode == "production":
+            external_path = runtime_data_file("external_native_positions.json", self.engine.settings.data_dir)
+            try:
+                review = await asyncio.to_thread(load_external_inventory_review, external_path)
+                self.external_positions = review.positions
+                self.pending_external_orders = review.pending_orders
+                self.resolved_external_orders = review.resolved_orders
+                self.unresolved_external_accounts = review.unresolved_accounts
+                self.engine.risk.external_positions = self.external_positions
+                self.engine.risk.pending_external_orders = self.pending_external_orders
+                self.engine.risk.unresolved_external_accounts = self.unresolved_external_accounts
+            except (OSError, ValueError, KeyError, TypeError):
+                external_inventory_error = "External native inventory review is invalid; native execution is blocked"
+        review_path = runtime_data_file("nba_pilot_structural_review.json", self.engine.settings.data_dir)
+        if review_path.exists():
+            try:
+                self.structural_review = await asyncio.to_thread(
+                    lambda: StructuralPilotReview.model_validate_json(review_path.read_text(encoding="utf-8")))
+            except (ValueError, OSError):
+                self.profile_error = "Structural pilot review is invalid; no pilot execution is permitted"
+        profile_path = runtime_data_file("launch_profile.json", self.engine.settings.data_dir)
+        portfolio_path = runtime_data_file("launch_portfolio.json", self.engine.settings.data_dir)
         if profile_path.exists() and portfolio_path.exists():
             self.profile_error = "Choose a portfolio or a legacy profile; conflicting launch files are blocked"
         elif portfolio_path.exists():
@@ -91,6 +145,12 @@ class NativeRuntime:
         profiles = self.profiles_by_venue()
         primary = next(iter(profiles.values()), None)
         if primary and primary.environment == self.engine.settings.mode:
+            if primary.limits.external_exposure_scope == "profile_account":
+                if len(profiles) != 1:
+                    self.profile_error = "Account-scoped external exposure requires one launch account"
+                else:
+                    self.engine.risk.native_exposure_scope = (
+                        primary.venue, primary.account_fingerprint)
             from .execution_lease import ExecutionLease
             self.execution_lease = ExecutionLease("portfolio" if self.portfolio else primary.venue, primary.environment,
                                                   ledger_path=Path(self.engine.settings.database_path))
@@ -102,7 +162,7 @@ class NativeRuntime:
                 self.profile_error = "Native execution is owned by another local workspace/ledger, or its lock is unavailable"
             # Native money limits have no implicit defaults: only an explicitly
             # written profile selects them. This does not grant write access.
-            values = primary.limits.model_dump()
+            values = primary.limits.model_dump(exclude={"external_exposure_scope"})
             limits = {key if key == "unit_size_usd" else key.removesuffix("_usd"): value for key,value in values.items()}
             limits["live_max_order_stake"] = limits["max_order_stake"]
             limits["live_stake_authorized"] = True
@@ -111,9 +171,12 @@ class NativeRuntime:
             self.engine.settings.risk = self.engine.risk.config
         from ..venues.book_normalization import NativeBookMapper
         try:
-            self.mapper = await asyncio.to_thread(NativeBookMapper.from_file, "data/native_mappings.json")
+            self.mapper = await asyncio.to_thread(NativeBookMapper.from_file,
+                runtime_data_file("native_mappings.json", self.engine.settings.data_dir))
         except (ValueError, OSError):
             self.profile_error = "Native mappings are invalid; review the exact market and fee evidence"
+        if external_inventory_error:
+            self.profile_error = (self.profile_error + "; " if self.profile_error else "") + external_inventory_error
         await self.manager.start()
 
     def close(self):
@@ -135,13 +198,783 @@ class NativeRuntime:
         profiles = self.profiles_by_venue()
         return profiles.get(venue) if venue is not None else next(iter(profiles.values()), None)
 
+    def profile_permits_market(self, profile, market_id, outcome) -> bool:
+        if profile is None:
+            return False
+        if market_id in profile.market_ids:
+            return True
+        rule = profile.family_rule
+        market = self.engine.markets.get(market_id)
+        if (rule is None or market is None or not rule.matches(market) or self.mapper is None
+                or (profile.venue, market_id) in getattr(self, "invalidated_family_markets", set())):
+            return False
+        key = (profile.venue, market_id, outcome)
+        covered = {item.instrument.outcome for item in self.mapper.mappings
+            if item.instrument.venue == profile.venue and item.market.id == market_id
+            and self.mapper.dynamic_rule_digests.get((profile.venue, market_id,
+                item.instrument.outcome)) == rule.digest()}
+        return (covered == set(market.outcomes)
+            and self.mapper.dynamic_rule_digests.get(key) == rule.digest()
+            and any(item.market.id == market_id and item.instrument.venue == profile.venue
+                    and item.instrument.outcome == outcome
+                    and item.market.identity() == market.identity()
+                    for item in self.mapper.mappings))
+
+    def onboard_family_matches(self, venue, market, matches, monitor, *, now=None) -> int:
+        """Resolve a discovered two-winner fixture under one expiring family rule.
+
+        No source clock, native status, fee, rule text or instrument ID is
+        synthesized. This runs on existing catalog refreshes, before native
+        subscription; it does not arm trading or submit an order.
+        """
+        from .native_accounting import NativeInstrument, NativePriceBand
+        from .inplay import inplay_state_identity_ok
+        from .native_pricing import NativeFeeBound, instrument_fingerprint
+        from ..venues.book_normalization import NativeBookMapper, NativeMarketMapping
+        from ..venues.kalshi_fees import kalshi_taker_fee_bound
+        from ..integrations.kalshi_event_crosswalk import _listed_winner
+
+        now = now or utcnow()
+        profile = self.profile_for(venue)
+        rule = profile.family_rule if profile else None
+        source_policy = self.engine.settings.pricing.trusted_pilot_policy
+        if (rule is None or rule.scope.venue != venue or not rule.matches(market)
+                or not rule.approved_at <= now < rule.expires_at
+                or source_policy.market_scope != rule.scope
+                or not source_policy.enabled or not source_policy.owner_approved
+                or self.mapper is None
+                or (rule.scope.phase == "pregame" and market.start_time <= now)
+                or (rule.scope.phase == "inplay" and (market.start_time > now
+                    or (state := self.engine.game_states.get(market.event_id)) is None
+                    or not inplay_state_identity_ok(
+                        state, allow_exact_fixture=rule.inplay_event_identity_basis == "exact_same_provider_fixture")
+                    or state.status != "live"
+                    or state.source_time is None
+                    or not 0 <= (now-state.source_time).total_seconds()*1000
+                        <= rule.inplay_state_max_age_ms))
+                or monitor.research_catalog_at is None
+                or not 0 <= (now-monitor.research_catalog_at).total_seconds() <= 60):
+            return 0
+        selected = [item for item in matches if item.venue == venue and
+            (item.side == "yes" if venue == "kalshi" else item.side == "take")]
+        # A catalog without a period can be promoted only when this exact
+        # league's normal full-game settlement has its own reviewed token.
+        # Retain the original NBA token for already signed NBA rules.
+        default_token = ("moneyline|moneyline|default_full_game"
+            if market.league == "NBA" else
+            f"{market.league}|moneyline|moneyline|default_full_game")
+        default_full_game = (venue == "prophetx" and market.market_type == "moneyline"
+            and default_token in rule.allowed_native_rule_texts
+            and bool(rule.settlement_evidence_for(market)))
+        if (len(selected) != 2 or {item.outcome for item in selected} != set(market.outcomes)
+                or any((item.identity_limitations and not (default_full_game and
+                            item.identity_limitations == ("Native period is not explicit in the catalog",)))
+                        or item.source_market_fingerprint != market.identity()
+                       or item.source_start != market.start_time or item.native_start is None
+                       or abs((item.native_start-market.start_time).total_seconds()) > rule.max_start_delta_seconds
+                       for item in selected)):
+            return 0
+        new_mappings = []
+        rows = getattr(monitor, "research_catalog_rows", ())
+        for match in selected:
+            native_inplay_source = None
+            if venue == "kalshi":
+                row = next((item for item in rows if item.get("ticker") == match.native_market_id), None)
+                metadata = monitor.research_fee_metadata.get(match.native_event_id)
+                if (not isinstance(row, dict) or row.get("status") not in {"active", "open"}
+                        or row.get("exchange_index") != rule.kalshi_exchange_index
+                        or _listed_winner(row) != match.outcome
+                        or row.get("rules_secondary") not in rule.allowed_native_rule_texts
+                        or not isinstance(metadata, dict) or not isinstance(row.get("price_ranges"), list)
+                        or not row["price_ranges"]):
+                    return 0
+                if rule.scope.phase == "inplay":
+                    from .native_research import _aware
+                    close = _aware(row.get("close_time"))
+                    if close is None or close <= now:
+                        return 0
+                    native_inplay_source = f"Kalshi open market {match.native_market_id} with close_time after current PBP state"
+                try:
+                    bands = tuple(NativePriceBand(minimum=item["start"], maximum=item["end"],
+                        step=item["step"]) for item in row["price_ranges"])
+                    instrument = NativeInstrument(venue=venue, instrument_id=match.native_market_id,
+                        exchange_index=match.exchange_index, canonical_market_id=market.id,
+                        outcome=match.outcome, native_outcome="yes", quantity_unit="contracts",
+                        price_format="probability", payout_per_unit_usd="1",
+                        quantity_step=rule.quantity_step, minimum_quantity=rule.minimum_quantity,
+                        minimum_order_cost_usd=rule.minimum_order_cost_usd,
+                        order_minimum_verified=True, order_minimum_source=rule.order_minimum_source,
+                        cash_quantum_usd=rule.cash_quantum_usd, price_bands=bands,
+                        settlement_rules_fingerprint=market.identity(), verified=True,
+                        source=f"family:{rule.digest()}:{match.rules_sha256}")
+                    fee = kalshi_taker_fee_bound(instrument, metadata["series"],
+                        metadata["series_changes"], market_response={"market": row},
+                        event_response=metadata["event"],
+                        event_changes_response=metadata["event_changes"],
+                        market_series_ticker=match.native_event_id.split("-", 1)[0],
+                        market_event_ticker=match.native_event_id,
+                        observed_at=metadata["observed_at"], ttl_seconds=300)
+                except (KeyError, ValueError, TypeError):
+                    return 0
+                mapping = NativeMarketMapping(market=market, instrument=instrument, fee_bound=fee,
+                    source_event_id=match.native_event_id,
+                    source_market_id=match.native_market_id)
+            elif venue == "prophetx":
+                native = monitor.client.public_market_data.catalog.get(
+                    (match.native_event_id, match.native_market_id))
+                event = monitor.research_events.get(match.native_event_id)
+                # The unqualified main Moneyline shape needs a reviewed
+                # competition-specific default rule when period is omitted.
+                native_period_rule = (default_token
+                    if native.get("period") is None and native.get("name") == "Moneyline"
+                    and native.get("type") == "moneyline" and native.get("sub_type") == "moneyline"
+                    and default_full_game else
+                    f"{native.get('type')}|{native.get('sub_type')}|{native.get('period')}") if isinstance(native, dict) else None
+                try:
+                    native_line = Decimal(str(native.get("line"))) if isinstance(native, dict) else None
+                except (ValueError, TypeError, ArithmeticError):
+                    native_line = None
+                exact_prop = (isinstance(native, dict) and market.market_type == "player_prop"
+                    and native.get("player_id") == market.player_id
+                    and native.get("statistic") == market.statistic
+                    and native.get("period") in {"FULL", "full", "full_game"}
+                    and native_line is not None and native_line.is_finite()
+                    and native_line == market.line)
+                exact_moneyline = (isinstance(native, dict) and market.market_type == "moneyline"
+                    and native.get("type") in {None, "moneyline"}
+                    and native.get("sub_type") == "moneyline"
+                    and (native.get("period") in {"FULL", "full", "full_game"}
+                         or native_period_rule == default_token and default_full_game))
+                if (not isinstance(native, dict) or not isinstance(event, dict)
+                        or native.get("status") != "active"
+                        or not (exact_moneyline or exact_prop)
+                         or native_period_rule not in rule.allowed_native_rule_texts
+                        or match.native_strike_id is None
+                        or native.get("strikes", {}).get(match.native_strike_id, {}).get("outcome_id")
+                            != match.native_outcome_id):
+                    return 0
+                if rule.scope.phase == "inplay":
+                    if event.get("status") not in {"in_play", "live"}:
+                        return 0
+                    native_inplay_source = f"ProphetX active market {match.native_market_id} in live event {match.native_event_id}"
+                try:
+                    instrument = NativeInstrument(venue=venue, instrument_id=match.native_strike_id,
+                        canonical_market_id=market.id, outcome=match.outcome,
+                        native_outcome=match.native_outcome_id, quantity_unit="usd_stake",
+                        price_format="american", quantity_step=rule.quantity_step,
+                        minimum_quantity=rule.minimum_quantity,
+                        minimum_order_cost_usd=rule.minimum_order_cost_usd,
+                        order_minimum_verified=True, order_minimum_source=rule.order_minimum_source,
+                        cash_quantum_usd=rule.cash_quantum_usd,
+                        settlement_rules_fingerprint=market.identity(), verified=True,
+                        source=f"family:{rule.digest()}:{match.rules_sha256}")
+                    assumed = rule.prophetx_fee_evidence_kind == "owner_approved_assumption"
+                    fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
+                        per_unit_usd="0" if assumed else rule.prophetx_winnings_fee_upper_per_stake,
+                        per_fill_usd="0", fixed_order_usd="0",
+                        fee_payment_timing="winnings_only", verified=not assumed,
+                        evidence_kind=rule.prophetx_fee_evidence_kind,
+                        assumed_winnings_profit_rate=rule.prophetx_assumed_winnings_profit_rate if assumed else None,
+                        assumption_approval_evidence=rule.approval_evidence if assumed else None,
+                        source=rule.prophetx_fee_source, observed_at=rule.approved_at,
+                        valid_until=rule.expires_at)
+                except (ValueError, TypeError):
+                    return 0
+                mapping = NativeMarketMapping(market=market, instrument=instrument, fee_bound=fee,
+                    source_event_id=match.native_event_id,
+                    source_market_id=match.native_market_id,
+                    prop_sub_type=native.get("sub_type"),
+                    source_timestamp_unit=rule.prophetx_source_timestamp_unit,
+                    timestamp_unit_evidence=rule.prophetx_timestamp_unit_evidence)
+            else:
+                return 0
+            new_mappings.append(mapping)
+        try:
+            # Validate both outcomes and evidence as one transaction before
+            # touching the active index. A partial family is never executable.
+            shadow = NativeBookMapper(self.mapper.mappings)
+            shadow.dynamic_rule_digests = dict(self.mapper.dynamic_rule_digests)
+            shadow.dynamic_evidence = dict(self.mapper.dynamic_evidence)
+            prepared = []
+            for item in new_mappings:
+                match = next(row for row in selected if row.outcome == item.instrument.outcome)
+                evidence = {
+                    "source_event_id": match.source_event_id,
+                    "source_identity": market.identity(),
+                    "approved_family_version": rule.rule_version,
+                    "approved_family_digest": rule.digest(),
+                    "native_event_id": match.native_event_id,
+                    "native_market_id": match.native_market_id,
+                    "native_outcome_id": match.native_outcome_id,
+                    "native_instrument_id": item.instrument.instrument_id,
+                    "native_rule_sha256": match.rules_sha256,
+                    "native_inplay_permission": rule.scope.phase == "inplay" and bool(native_inplay_source),
+                    "native_inplay_permission_source": native_inplay_source,
+                    "native_rule_excerpt": match.rules_excerpt,
+                    "native_settlement_provenance": (rule.settlement_evidence_for(market)
+                        if venue == "prophetx" else match.rules_excerpt),
+                    "fee_schedule_source": item.fee_bound.source,
+                    "fee_schedule_bound": item.fee_bound.model_dump(mode="json"),
+                    "catalog_observed_at": match.catalog_observed_at.isoformat(),
+                    "fee_observed_at": item.fee_bound.observed_at.isoformat(),
+                }
+                shadow.register_family_mapping(item, rule_digest=rule.digest(), evidence=evidence)
+                prepared.append((item, evidence))
+            for item, evidence in prepared:
+                self.mapper.register_family_mapping(item, rule_digest=rule.digest(), evidence=evidence)
+        except ValueError:
+            return 0
+        return len(new_mappings)
+
+    def reconcile_family_catalog(self, venue, market, matches, monitor) -> int:
+        """A contradictory refreshed catalog revokes this fixture, not its audit trail."""
+        key = (venue, market.id)
+        had_mapping = bool(self.mapper and any(
+            name == venue and market_id == market.id
+            for name, market_id, _ in self.mapper.dynamic_rule_digests))
+        accepted = NativeRuntime.onboard_family_matches(self, venue, market, matches, monitor)
+        invalidated = getattr(self, "invalidated_family_markets", None)
+        if invalidated is None:
+            self.invalidated_family_markets = invalidated = set()
+        if accepted == 2:
+            invalidated.discard(key)
+        elif had_mapping:
+            invalidated.add(key)
+        return accepted
+
+    def research_discovery_status(self, market, comparisons):
+        """Explain the first observed research-stage stop without asserting unseen depth."""
+        from decimal import Decimal
+        from .native_research import expected_kalshi_mlb_event
+
+        if comparisons:
+            priced = [item for item in comparisons if item.get("net_estimated_profit_usd") is not None]
+            if any(Decimal(item["net_estimated_profit_usd"]) > 0 for item in priced):
+                return "provisional_positive", "Current native depth has a positive research estimate after fees and the configured uncertainty allowance; mapping and execution remain unapproved"
+            if len(priced) == len(comparisons):
+                return "nonpositive_net_ev", "Valid simultaneous references and native depth were compared; no direction has positive net estimated EV after fees and the configured uncertainty allowance"
+            if all(item.get("fee_adjusted_estimated_profit_usd") is not None and
+                   Decimal(item["fee_adjusted_estimated_profit_usd"]) <= 0 for item in comparisons):
+                return "nonpositive_net_ev", "Every fee-adjusted estimate is nonpositive; any nonnegative source-uncertainty allowance can only reduce it further (allowance is not configured)"
+            if any(item.get("rejection") == "No synchronized executable opposing bid depth" for item in comparisons):
+                return "matched_no_depth", "An exact native discovery lead exists, but its monitored book has no synchronized executable opposing bid depth"
+            if any(item.get("price") is not None for item in comparisons):
+                return "economics_unavailable", "An exact native discovery lead has depth, but fees or the source-uncertainty allowance are unavailable"
+            return "matched_no_depth", "An exact native discovery lead exists, but current executable depth or fee evidence is unavailable"
+
+        kalshi_record = self.engine.registry.records.get("kalshi")
+        kalshi = kalshi_record.plugin if kalshi_record and kalshi_record.enabled else None
+        if kalshi is not None:
+            if getattr(kalshi, "research_matches", {}).get(market.id):
+                return "matched_no_depth", "An exact Kalshi discovery lead exists, but the native stream or executable depth is unavailable"
+            expected = expected_kalshi_mlb_event(market)
+            if expected:
+                series = expected.split("-", 1)[0]
+                configured = kalshi.context.config.get("discovery_series", [])
+                if series not in configured:
+                    return "not_discovered", f"Kalshi {series} is outside the configured discovery series; public existence does not imply monitored depth"
+                if any(row.get("event_ticker") == expected for row in getattr(kalshi, "research_catalog_rows", [])):
+                    return "discovered_unmatched", "The exact Kalshi event is in the catalog, but its outcome, threshold, timing or rule identity did not pass exact research matching"
+                return "not_discovered", "The expected Kalshi event is absent from the current monitored catalog; no native depth was tested"
+        reasons = self.research_identity_rejections(market)
+        if reasons:
+            return "discovered_unmatched", reasons[0]["reason"]
+        return "not_discovered", "No exact native market was found in the currently monitored catalogs; public existence and executable depth are separate checks"
+
+    def research_identity_rejections(self, market):
+        """Expose observed schedule/rule conflicts without broadening matches."""
+        if market is None or market.market_type != "moneyline":
+            return []
+        from ..integrations.polymarket_us_research import _clock, _rule_start
+        from .native_research import _aware
+        reasons = []
+        for venue in ("novig", "prophetx", "polymarket_us"):
+            record = self.engine.registry.records.get(venue)
+            monitor = record.plugin if record and record.enabled else None
+            if monitor is None:
+                continue
+            if venue == "prophetx":
+                for event in monitor.research_events.values():
+                    if event.get("name") != f"{market.participants[1]} at {market.participants[0]}":
+                        continue
+                    native_start = _clock(event.get("scheduled"))
+                    if native_start is not None:
+                        delta = abs((native_start-market.start_time).total_seconds())
+                        if delta > 120:
+                            reasons.append({"venue": venue, "reason":
+                                f"ProphetX catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
+            elif venue == "polymarket_us":
+                for row in monitor.research_catalog_rows:
+                    if (row.get("league") != market.league or
+                            {team.get("name") for team in row.get("teams", [])} != set(market.participants)):
+                        continue
+                    native_start = _clock(row.get("market_start"))
+                    rule_start = _rule_start(row.get("rules"))
+                    if native_start is not None and rule_start is not None and native_start != rule_start:
+                        reasons.append({"venue": venue, "reason":
+                            "Polymarket US written-rule time conflicts with its catalog start; market remains unmatched"})
+                    elif native_start is not None:
+                        delta = abs((native_start-market.start_time).total_seconds())
+                        if delta > 120:
+                            reasons.append({"venue": venue, "reason":
+                                f"Polymarket US catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
+            else:
+                for event in monitor.research_events.values():
+                    label = event.get("description", "")
+                    if not isinstance(label, str) or " @ " not in label:
+                        continue
+                    away, home = label.split(" @ ", 1)
+                    if (home, away) != market.participants:
+                        continue
+                    native_start = _aware(event.get("startsTs"))
+                    if native_start is not None:
+                        delta = abs((native_start-market.start_time).total_seconds())
+                        if delta > 120:
+                            reasons.append({"venue": venue, "reason":
+                                f"Novig catalog start differs from sportsbook by {int(delta)} seconds; event identity needs review"})
+        return reasons
+
+    def research_venue_funnel(self, market, comparisons):
+        """Explain each read-only venue's first observed stop, without new API calls."""
+        from .native_research import NOVIG_PROP_TYPES
+
+        by_venue = {}
+        for item in comparisons:
+            by_venue.setdefault(item["venue"], []).append(item)
+        conflicts = self.research_identity_rejections(market)
+        result = {}
+        for venue in ("kalshi", "novig", "prophetx", "polymarket_us"):
+            record = self.engine.registry.records.get(venue)
+            monitor = record.plugin if record and record.enabled else None
+            if monitor is None:
+                result[venue] = {"stage": "disconnected", "reason": "Native monitor is disabled"}
+                continue
+            if venue == "kalshi":
+                supported = (market.league == "NBA" and market.market_type == "moneyline"
+                    or market.league == "MLB" and market.market_type in {"moneyline", "total"})
+            elif venue == "novig":
+                supported = (market.market_type == "moneyline"
+                    or market.market_type == "player_prop" and market.statistic in NOVIG_PROP_TYPES)
+            elif venue == "prophetx":
+                supported = market.market_type in {"moneyline", "player_prop"}
+            else:
+                supported = market.market_type == "moneyline"
+            if not supported:
+                result[venue] = {"stage": "unsupported_family",
+                    "reason": f"The reviewed {venue} research matcher does not support this sport/market family"}
+                continue
+            catalog_at = getattr(monitor, "research_catalog_at", None)
+            if catalog_at is None or getattr(monitor, "discovery_status", None) in {"read_failed", "disabled"}:
+                result[venue] = {"stage": "catalog_unavailable",
+                    "reason": f"Native catalog unavailable ({getattr(monitor, 'discovery_status', 'unknown')})"}
+                continue
+            now = utcnow()
+            catalog_limit = 2 * monitor.context.config.get("discovery_interval_seconds", 300)
+            if (now-catalog_at).total_seconds() > catalog_limit:
+                result[venue] = {"stage": "catalog_expired",
+                    "reason": "Native catalog is older than its bounded discovery interval",
+                    "catalog_observed_at": catalog_at.isoformat()}
+                continue
+            matches = getattr(monitor, "research_matches", {}).get(market.id, ())
+            if not matches:
+                conflict = next((item["reason"] for item in conflicts if item["venue"] == venue), None)
+                catalog_reason = self._research_catalog_identity_reason(market, venue, monitor)
+                result[venue] = {"stage": "identity_rejected" if conflict or catalog_reason else "not_discovered",
+                    "reason": conflict or catalog_reason or
+                        "No exact event/outcome/period/threshold identity in the bounded native catalog",
+                    "catalog_observed_at": catalog_at.isoformat()}
+                continue
+            subscribed = getattr(monitor, "_subscribed_event_ids", ()) if venue == "prophetx" else (
+                getattr(monitor, "_subscribed_market_ids", ()))
+            def is_subscribed(match):
+                if venue != "prophetx":
+                    return match.native_market_id in subscribed
+                if match.native_event_id not in subscribed:
+                    return False
+                if market.market_type != "player_prop":
+                    return True
+                catalog = getattr(monitor.client.public_market_data, "catalog", {})
+                native = catalog.get((match.native_event_id, match.native_market_id), {})
+                return native.get("sub_type") in getattr(monitor, "_subscribed_prop_subtypes", {}).get(
+                    match.native_event_id, ())
+            in_scope = any(is_subscribed(match) for match in matches)
+            offers = by_venue.get(venue, ())
+            client = getattr(monitor, "client", None)
+            stream_ok = bool(client and getattr(monitor, "task", None)
+                and not monitor.task.done() and client.health_check().get("streaming"))
+            public_poly = venue == "polymarket_us" and client is not None and bool(
+                getattr(client, "rest_books", {}))
+            if not (stream_ok or public_poly):
+                stage, reason = "stream_unavailable", "Native market-data connection is unavailable"
+            elif not in_scope:
+                stage, reason = "not_subscribed", "Exact native market exists but is outside the current subscription slots"
+            elif not offers:
+                stage, reason = "book_unavailable", "Subscribed exact market has no current comparison; check book, catalog and fee clocks"
+            elif not any(offer.get("price") is not None for offer in offers):
+                stage, reason = "depth_or_fee_rejected", next((offer.get("rejection") for offer in offers
+                    if offer.get("rejection")), "No executable depth or verified fee at the comparison size")
+            else:
+                stage, reason = "priced_research", "Executable native offer compared; inspect fees and uncertainty separately"
+            result[venue] = {"stage": stage, "reason": reason,
+                "catalog_observed_at": catalog_at.isoformat(),
+                "exact_native_matches": len(matches), "subscribed": in_scope,
+                "comparison_directions": len(offers)}
+        return result
+
+    @staticmethod
+    def _research_catalog_identity_reason(market, venue, monitor):
+        """Diagnose already-cached catalog rows; this grants no mapping."""
+        if venue == "polymarket_us" and market.market_type == "moneyline":
+            from ..integrations.polymarket_us_research import _clock, _rule_start
+            rows = [row for row in getattr(monitor, "research_catalog_rows", ())
+                if row.get("league") == market.league and row.get("market_type") ==
+                    "SPORTS_MARKET_TYPE_MONEYLINE" and
+                    {team.get("name") for team in (row.get("teams") or ())} == set(market.participants)]
+            if not rows:
+                return None
+            if len(rows) != 1:
+                return "Multiple native moneylines name the same teams; exact question is ambiguous"
+            row = rows[0]
+            event_start, native_start = _clock(row.get("event_start")), _clock(row.get("market_start"))
+            if event_start is None or native_start is None:
+                return "Native event or market start time is missing"
+            if event_start != native_start:
+                return "Native event and market start times conflict"
+            if abs((native_start-market.start_time).total_seconds()) > 120:
+                return "Native start differs from sportsbook start beyond the exact-match window"
+            if (rule_start := _rule_start(row.get("rules"))) is not None and rule_start != native_start:
+                return "Native written-rule start conflicts with the catalog"
+            if row.get("status") != "MARKET_STATUS_OPEN" or not row.get("active"):
+                return "Native market is not affirmatively open"
+            sides = row.get("sides") or ()
+            if (len(sides) != 2 or {side.get("long") for side in sides} != {True, False}
+                    or not all(side.get("tradable") for side in sides)):
+                return "Native LONG/SHORT side identities or tradability are incomplete"
+            return "Native question, written rules, or team-side identity failed exact matching"
+        if venue == "prophetx":
+            events = [event for event in getattr(monitor, "research_events", {}).values()
+                if event.get("name") == market.event_name]
+            if not events:
+                return None
+            if market.market_type == "player_prop":
+                return "Event is discovered, but no active two-strike prop has the exact player, statistic, threshold and explicit period"
+            return "Event is discovered, but no active two-strike market has the exact normal winner identity"
+        if venue == "novig" and market.market_type == "player_prop":
+            from .native_research import NOVIG_PROP_TYPES
+            expected = NOVIG_PROP_TYPES.get(market.statistic)
+            rows = [row for row in getattr(monitor, "research_catalog_rows", ())
+                if row.get("marketType") == expected and type(row.get("startsTs")) is int
+                and abs(row["startsTs"]-int(market.start_time.timestamp()*1000)) <= 120000]
+            if rows and not getattr(monitor, "research_events", {}):
+                return "Plausible prop catalog rows exist, but authoritative native event details are unavailable"
+            if rows:
+                return "Plausible prop catalog rows exist, but player, statistic, threshold, period or opposing sides do not match exactly"
+        return None
+
+    def research_comparisons(self, market, fair, *, pricing_config=None):
+        """Compare research fair values with existing read-only native streams.
+
+        This path constructs dictionaries for display only. It never creates a
+        NativeBook, execution mapping, candidate, intent, or account authority.
+        """
+        from decimal import Decimal, ROUND_FLOOR
+        from .native_research import (compare_minimum_lot, compare_prophetx_stake_lot,
+            kalshi_research_taker_fee, novig_taker_fee)
+        from .pricing import NoSignal, market_config, validate_fair_references
+
+        now = utcnow()
+        pricing_config = pricing_config or self.engine.settings.pricing
+        scoped = market_config(pricing_config, market)
+        try:
+            validate_fair_references(market, fair, pricing_config, now)
+        except NoSignal:
+            return []
+        market_margins = scoped.trusted_research_market_margins
+        margin = market_margins.get(market.id, scoped.trusted_research_margin_probability)
+        output = []
+        for venue in ("kalshi", "novig", "prophetx", "polymarket_us"):
+            record = self.engine.registry.records.get(venue)
+            monitor = record.plugin if record else None
+            client = getattr(monitor, "client", None)
+            stream_ok = bool(getattr(monitor, "task", None) and not monitor.task.done()
+                             and client is not None and client.health_check().get("streaming"))
+            public_poly = (venue == "polymarket_us" and client is not None
+                           and bool(getattr(client, "rest_books", {})))
+            if (not record or not record.enabled or client is None
+                    or client.settings.environment != self.engine.settings.mode
+                    or not (stream_ok or public_poly)
+                    or getattr(monitor, "research_catalog_at", None) is None
+                    or (now-monitor.research_catalog_at).total_seconds() > 2 * monitor.context.config.get(
+                        "discovery_interval_seconds", 300)):
+                continue
+            matches = getattr(monitor, "research_matches", {}).get(market.id, ())
+            if not matches:
+                continue
+            for match in matches:
+                if match.outcome not in fair.probabilities:
+                    continue
+                if venue == "kalshi":
+                    current = getattr(monitor, "research_book_current", None)
+                    levels = (client.book.asks(match.native_market_id, match.side)
+                        if current is None or current(match.native_market_id, now=now) else [])
+                    metadata = monitor.research_fee_metadata.get(match.native_event_id)
+                    series_response = metadata.get("series") if metadata else None
+                    event_response = metadata.get("event") if metadata else None
+                    series = series_response.get("series", {}) if isinstance(series_response, dict) else {}
+                    native_event = event_response.get("event", {}) if isinstance(event_response, dict) else {}
+                    series = series if isinstance(series, dict) else {}
+                    native_event = native_event if isinstance(native_event, dict) else {}
+                    fee_evidence = {"source": "Kalshi series/event fee metadata",
+                        "observed_at": metadata["observed_at"].isoformat() if metadata else None,
+                        "series_fee_type": series.get("fee_type"),
+                        "series_fee_multiplier": str(series["fee_multiplier"]) if series.get("fee_multiplier") is not None else None,
+                        "event_fee_type_override": native_event.get("fee_type_override"),
+                        "event_fee_multiplier_override": str(native_event["fee_multiplier_override"])
+                            if native_event.get("fee_multiplier_override") is not None else None}
+                    if metadata and (now-metadata["observed_at"]).total_seconds() <= 360:
+                        fee_for = lambda price, qty, match=match, metadata=metadata: kalshi_research_taker_fee(
+                            match, metadata["series"], metadata["event"], metadata["series_changes"],
+                            metadata["event_changes"], price, qty, now=now)
+                    else:
+                        fee_for = lambda price, qty: (_ for _ in ()).throw(ValueError("Kalshi fee metadata missing"))
+                elif venue == "prophetx":
+                    view = client.public_market_data.snapshot(now=now, connected=stream_ok, limit=10000)
+                    rows = [row for row in view["levels"] if row["stream_current"]
+                        and row["event_id"] == match.native_event_id
+                        and row["market_id"] == match.native_market_id
+                        and row["strike_id"] == match.native_strike_id
+                        and row["outcome_id"] == match.native_outcome_id
+                        and Decimal(row["executable_stake_usd"]) > 0]
+                    levels = sorted(((Decimal(row["american_price"]),
+                        Decimal(row["executable_stake_usd"])) for row in rows), reverse=True)
+                    fee_evidence = {"source": "ProphetX published 2% fee on net winnings",
+                        "url": "https://www.prophetx.co/lobby/",
+                        "rate_on_winnings": "0.02", "rounding_verified": False,
+                        "book_source": "scoped Talaria v2.market_selections",
+                        "book_receipt_at": max((row["local_receipt_at"] for row in rows), default=None)}
+                elif venue == "polymarket_us":
+                    from ..integrations.polymarket_us_research import current_book, direction_levels, taker_fee
+                    native = next((row for row in monitor.research_catalog_rows
+                                   if row.get("slug") == match.native_market_id), None)
+                    if native is None:
+                        continue
+                    book = current_book(native, client, now=now,
+                                        stream_connected=client.health_check().get("market_streaming") is True)
+                    levels = direction_levels(book, match.side)
+                    fee_evidence = {"source": "Polymarket US market feeCoefficient and current fee schedule",
+                        "observed_at": monitor.research_catalog_at.isoformat(),
+                        "coefficient": native.get("fee_coefficient"), "book_source": book.get("source"),
+                        "book_source_time": book.get("source_time"),
+                        "book_rejection": book.get("rejection"),
+                        "fee_rounding": "nearest cent, half even; one-fill research estimate"}
+                    fee_for = lambda price, qty, native=native: taker_fee(native, price, qty)
+                else:
+                    current = getattr(monitor, "research_book_current", None)
+                    book_current = current is None or current(match.native_market_id, now=now)
+                    levels = (client.book.asks(match.native_market_id, match.opposing_outcome_id)
+                        if book_current else [])
+                    depth_reason = None
+                    if not book_current:
+                        stamp = getattr(monitor, "_book_at", {}).get(match.native_market_id)
+                        depth_reason = ("Native book observation exceeded 30 seconds"
+                            if stamp is not None else "No native book snapshot for this subscription")
+                    elif not levels:
+                        depth_reason = ("Novig market is not open or book sequence is invalid"
+                            if client.book.statuses.get(match.native_market_id) != "OPEN"
+                            or f"{match.native_market_id}:book" in client.book.sequences.invalid
+                            else "No executable opposing bids in the current Novig book")
+                    native = next((row for row in monitor.research_catalog_rows
+                                   if row.get("marketId") == match.native_market_id), None)
+                    event = monitor.research_events.get(match.native_event_id)
+                    raw_fee = native.get("fee") if isinstance(native, dict) else None
+                    native_fee = raw_fee if isinstance(raw_fee, dict) else {}
+                    fee_evidence = {"source": "Novig market fee and event phase",
+                        "observed_at": monitor.research_catalog_at.isoformat(),
+                        "charged": native_fee.get("charged"),
+                        "coefficient": str(native_fee["coefficient"])
+                            if native_fee.get("coefficient") is not None else None,
+                        "event_phase": event.get("status") if isinstance(event, dict) else None}
+                    fee_for = lambda price, qty, native=native, event=event: novig_taker_fee(
+                        native, event, price, qty)
+                if venue == "prophetx":
+                    result = compare_prophetx_stake_lot(match, fair.probabilities[match.outcome], levels,
+                        fee_rate_on_winnings=Decimal("0.02"),
+                        uncertainty_margin_probability=margin, now=now)
+                    result["native_order_direction"] = "TAKE_STRIKE"
+                    result["fee_estimate_only"] = True
+                else:
+                    result = compare_minimum_lot(match, fair.probabilities[match.outcome], levels,
+                        fee_for=fee_for, uncertainty_margin_probability=margin, now=now)
+                    if venue == "novig" and depth_reason is not None:
+                        result["rejection"] = depth_reason
+                if venue == "polymarket_us":
+                    result["native_order_direction"] = "BUY_LONG" if match.side == "long" else "SELL_SHORT"
+                    result["instrument_outcome"] = next((s["description"] for s in native["sides"]
+                        if s["long"]), None)
+                    result["short_collateral_note"] = ("Short posts $1 margin per contract; YES sale proceeds offset "
+                        "buying-power use. No separate NO instrument or book exists.") if match.side == "short" else None
+                    if result.get("comparison_quantity") and result.get("cash_cost_usd"):
+                        quantity = Decimal(result["comparison_quantity"])
+                        result["margin_locked_usd"] = str(quantity) if match.side == "short" else "0"
+                        result["sale_proceeds_usd"] = str(quantity-Decimal(result["cash_cost_usd"])) if match.side == "short" else "0"
+                        result["buying_power_required_usd"] = str(Decimal(result["cash_cost_usd"])
+                            + Decimal(result["taker_fee_usd"]))
+                    try:
+                        if Decimal(native["minimum_quantity"]) > Decimal(1):
+                            result["positive_after_costs"] = False
+                            result["net_estimated_profit_usd"] = None
+                            result["rejection"] = "Native minimum quantity exceeds the one-contract research lot"
+                    except (ValueError, TypeError, ArithmeticError):
+                        result["positive_after_costs"] = False
+                        result["net_estimated_profit_usd"] = None
+                        result["rejection"] = "Native minimum quantity is unknown"
+                result["fee_evidence"] = fee_evidence
+                if venue == "novig":
+                    # Per-market book evidence is distinct from connection
+                    # heartbeats and from repeated /api/state reads. Retain it
+                    # with each research comparison for later edge-duration
+                    # and price/quantity-change analysis.
+                    subject = f"{match.native_market_id}:book"
+                    result["native_book_sequence"] = client.book.sequences.values.get(subject)
+                    book_at = getattr(monitor, "_book_at", {}).get(match.native_market_id)
+                    result["native_book_update_at"] = book_at.isoformat() if book_at else None
+                    result["native_market_status"] = client.book.statuses.get(match.native_market_id)
+                result["fair_probability"] = str(fair.probabilities[match.outcome])
+                result["reference_profile_id"] = fair.reference_profile_id
+                result["reference_books"] = [ref.get("bookmaker") for ref in fair.references]
+                result["catalog_age_ms"] = (now-match.catalog_observed_at).total_seconds()*1000
+                result["source_quality_mode"] = scoped.reference_quality_mode
+                result["reference_strategy"] = (
+                    "multi_book_consensus" if fair.reference_profile_id == "multi_book_consensus"
+                    else "sharp_books")
+                result["independent_book_count"] = len(fair.references)
+                result["uncertainty_allowance_policy"] = (
+                    "exact_market_research_scenario" if market.id in market_margins else
+                    "global_research_assumption" if margin is not None else "unconfigured")
+                result["uncertainty_allowance_probability"] = str(margin) if margin is not None else None
+                if fair.reference_profile_id == "multi_book_consensus" and result.get(
+                        "fee_adjusted_estimated_profit_usd") is not None:
+                    # Illustrations only. None of these authorizes execution or
+                    # supplies a default live allowance.
+                    after_fee = Decimal(result["fee_adjusted_estimated_profit_usd"])
+                    payout = Decimal(result["normal_payout_usd"])
+                    result["research_uncertainty_scenarios"] = [
+                        {"allowance_probability": str(example),
+                         "net_estimated_profit_usd": str(after_fee - example*payout),
+                         "approved": False} for example in
+                        (Decimal(0), Decimal("0.005"), Decimal("0.01"), Decimal("0.02"))]
+                snapshot = self.account_snapshots.get(venue)
+                cash = (snapshot.balance_usd if snapshot and snapshot.cash_available_verified
+                        and (venue != "kalshi" or snapshot.exchange_index == match.exchange_index)
+                        else None)
+                result["spendable_cash_usd"] = str(cash) if cash is not None else None
+                result["quarter_kelly_budget_usd"] = None
+                result["quarter_kelly_quantity"] = None
+                if (venue == "prophetx" and cash is not None and Decimal(cash) > 0
+                        and result.get("positive_after_costs") and margin is not None):
+                    p = Decimal(fair.probabilities[match.outcome]) - Decimal(margin)
+                    win_profit = (Decimal(result["normal_payout_usd"])-Decimal(1))*Decimal("0.98")
+                    fraction = max(Decimal(0), (p*win_profit-(Decimal(1)-p))/win_profit) if win_profit > 0 else Decimal(0)
+                    profile = self.profile_for(venue) if hasattr(self, "profile_for") else None
+                    approved_cap = (profile.limits.max_order_stake_usd if profile else None)
+                    budget = min(Decimal(cash)*Decimal("0.25")*fraction,
+                        Decimal(result["available_stake_usd"]),
+                        approved_cap if approved_cap is not None else Decimal(cash))
+                    result["quarter_kelly_budget_usd"] = str(budget)
+                    result["quarter_kelly_stake_usd"] = str(budget)
+                    result["reasons"].append("Informational USD-stake sizing; no ProphetX execution mapping or approval")
+                elif (venue != "prophetx" and cash is not None and Decimal(cash) > 0 and result.get("positive_after_costs")
+                        and result.get("normal_payout_usd") and result.get("price") is not None):
+                    # Informational only: the production calculator rechecks
+                    # split-fill fee bounds, minimums, cash, exposure and risk.
+                    p = Decimal(fair.probabilities[match.outcome]) - Decimal(margin)
+                    payout = Decimal(result["normal_payout_usd"])
+                    debit = Decimal(result["cash_cost_usd"]) + Decimal(result["taker_fee_usd"])
+                    full = max(Decimal(0), (p*payout-debit)/(payout-debit)) if payout > debit else Decimal(0)
+                    profile = self.profile_for(venue) if hasattr(self, "profile_for") else None
+                    approved_cap = (profile.limits.max_order_stake_usd if profile else None)
+                    budget = min(Decimal(cash)*Decimal("0.25")*full,
+                        approved_cap if approved_cap is not None else Decimal(cash))
+                    minimum = Decimal(result["comparison_quantity"])
+                    quantity = (budget/debit).to_integral_value(rounding=ROUND_FLOOR)*minimum
+                    result["quarter_kelly_budget_usd"] = str(budget)
+                    result["quarter_kelly_quantity"] = str(quantity if quantity >= minimum else Decimal(0))
+                    if quantity < minimum:
+                        result["reasons"].append("Quarter-Kelly budget is below the comparison lot; no upward rounding")
+                # Research comparisons are never promoted by their own price
+                # arithmetic. The separately reviewed native candidate path
+                # below is the only path that can publish an OMS intent.
+                blockers = list(result.get("reasons") or ())
+                if result.get("rejection"):
+                    blockers.insert(0, result["rejection"])
+                if match.identity_limitations:
+                    blockers.extend(match.identity_limitations)
+                if market.extensions.get("research_only") or not market.extensions.get("normal_outcome_reviewed"):
+                    blockers.append("Sportsbook normal-outcome identity has no reviewed execution rule")
+                profile = self.profile_for(venue) if hasattr(self, "profile_for") else None
+                if not NativeRuntime.profile_permits_market(self, profile, market.id, match.outcome):
+                    blockers.append("No account-bound recurring launch scope selects this exact market")
+                if margin is None:
+                    blockers.append("No approved source-uncertainty allowance is available")
+                result["execution_status"] = "RESEARCH_ONLY"
+                result["execution_blockers"] = list(dict.fromkeys(blockers))
+                output.append(result)
+        return sorted(output, key=lambda item: Decimal(item["net_estimated_roi"])
+                      if item.get("net_estimated_roi") is not None else Decimal("-Infinity"), reverse=True)
+
     def invalidate_account(self, venue):
         """Fence every in-flight read before removing an obsolete account view."""
         self._account_generations[venue] = self._account_generations.get(venue, 0)+1
         self.account_snapshots.pop(venue, None)
         self._account_snapshot_fences.pop(venue, None)
+        self._account_exchange_indexes.pop(venue, None)
         self.last_account_probe = 0.0
         self._last_account_probes.pop(venue, None)
+
+    async def _kalshi_account_exchange_index(self, client, profile):
+        """Resolve the exact pilot shard from current public native listings."""
+        review = self.structural_review
+        if getattr(profile, "family_rule", None) is not None:
+            rule = profile.family_rule
+            mappings = [item for item in self.mapper.mappings if
+                item.instrument.venue == "kalshi" and
+                self.mapper.dynamic_rule_digests.get(("kalshi", item.market.id,
+                    item.instrument.outcome)) == rule.digest()]
+            if not mappings or any(item.instrument.exchange_index != rule.kalshi_exchange_index
+                                   for item in mappings):
+                raise ValueError("No current family mapping on the approved Kalshi shard")
+            from ..venues.reconciliation import _object
+            from urllib.parse import quote as urlquote
+            ticker = mappings[0].instrument.instrument_id
+            response = await client.request("GET", f"/markets/{urlquote(ticker, safe='')}", authenticated=False)
+            listing = _object(_object(response, "Kalshi market listing").get("market"), "Kalshi market")
+            if (listing.get("ticker") != ticker or listing.get("exchange_index") != rule.kalshi_exchange_index
+                    or listing.get("event_ticker") != mappings[0].source_event_id):
+                raise ValueError("Kalshi family market shard or event changed")
+            return rule.kalshi_exchange_index
+        if (review is None or review.native_venue != "kalshi"
+                or review.canonical_market_id not in profile.market_ids):
+            raise ValueError("No reviewed Kalshi market for account index lookup")
+        from ..venues.reconciliation import ReconciliationError, _object
+        from urllib.parse import quote as urlquote
+        cache_key = (id(client), review.native_event_id, tuple(sorted(review.native_outcomes.values())))
+        cache = self._kalshi_index_cache
+        if cache is not None and cache[0] == cache_key and time.monotonic()-cache[2] < 60:
+            return cache[1]
+        indexes = set()
+        for ticker in sorted(set(review.native_outcomes.values())):
+            response = await client.request("GET", f"/markets/{urlquote(ticker, safe='')}", authenticated=False)
+            market = _object(_object(response, "Kalshi market listing").get("market"), "Kalshi market")
+            index = market.get("exchange_index")
+            if (market.get("ticker") != ticker or market.get("event_ticker") != review.native_event_id
+                    or type(index) is not int or index < 0):
+                raise ReconciliationError("Reviewed Kalshi ticker/event/exchange index changed")
+            indexes.add(index)
+        if len(indexes) != 1:
+            raise ReconciliationError("Reviewed Kalshi outcomes have different exchange indexes")
+        index = indexes.pop()
+        self._kalshi_index_cache = (cache_key, index, time.monotonic())
+        return index
 
     def diagnostic_account(self, venue):
         """Return a short-lived, non-authorizing monitor inventory summary."""
@@ -166,10 +999,12 @@ class NativeRuntime:
             "observed_at": snapshot.observed_at.isoformat(),
             "balance_usd": str(snapshot.balance_usd) if snapshot.cash_available_verified
                 and snapshot.balance_usd is not None else None,
+            "exchange_index": snapshot.exchange_index,
             "cash_available_verified": snapshot.cash_available_verified,
             "open_order_count": snapshot.open_order_count,
             "position_count": snapshot.position_count,
             "inventory_reconciled": snapshot.reconciled,
+            "reason": snapshot.reason,
             "trading_permission_verified": snapshot.trading_permission_verified,
             "geographic_attestation_expires_at": snapshot.geographic_attestation_expires_at.isoformat()
                 if snapshot.geographic_attestation_expires_at else None,
@@ -180,6 +1015,8 @@ class NativeRuntime:
         """Read an authenticated monitor account without binding an executor."""
         from ..plugins.external import NativeMonitor
         from ..venues.account_probe import probe_native_account
+        from ..venues.common import VenueHTTPError
+        from ..venues.reconciliation import ReconciliationError
 
         record = self.engine.registry.records.get(venue)
         if (not record or not isinstance(record.plugin, NativeMonitor)
@@ -195,15 +1032,29 @@ class NativeRuntime:
             self.diagnostic_snapshots.pop(venue, None)
             self._diagnostic_bindings.pop(venue, None)
             try:
+                from ..venues.kalshi import KalshiClient
+                p = self.profile_for(venue)
+                exchange_index = (await self._kalshi_account_exchange_index(client, p)
+                    if isinstance(client, KalshiClient) and p is not None else None)
                 snapshot = await asyncio.wait_for(probe_native_account(
                     client, managed_orders=tuple(self.engine.risk.native_orders.values()),
                     settled_order_ids=frozenset(self.engine.risk.settled),
+                    external_positions=tuple(row for row in self.external_positions
+                        if row.venue == venue),
+                    **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
+                    **({"adapter": self.manager.adapters.get(venue)} if venue == "polymarket_us"
+                       and getattr(self.manager.adapters.get(venue), "client", None) is client else {}),
                     **({"management_client": record.plugin.management_client}
-                       if venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
+                       if venue == "novig" and getattr(record.plugin, "management_client", None) else {})),
+                    timeout=30 if venue == "prophetx" else 20)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                raise ValueError("Authenticated account inventory diagnostic failed") from None
+            except VenueHTTPError as exc:
+                raise ValueError(f"Authenticated account read failed (HTTP {exc.status_code})") from None
+            except ReconciliationError as exc:
+                raise ValueError(f"Authenticated account reconciliation failed: {exc}") from None
+            except Exception as exc:
+                raise ValueError(f"Authenticated account inventory diagnostic failed ({type(exc).__name__})") from None
             current = self.engine.registry.records.get(venue)
             if (current is not record or not record.enabled or record.plugin.client is not client
                     or record.health.get("authenticated") is not True
@@ -227,18 +1078,80 @@ class NativeRuntime:
                                      and not order.venue_order_id and order.filled_quantity == 0))),
                 frozenset(risk.settled), frozenset(self.manager.invalidated_settlements))
 
-    def require_preflight(self, order):
-        report = self.report()
+    def require_preflight(self, order, *, preview_only=False):
+        report = self.report(getattr(order, "venue", None))
         manual = order.execution_origin == "manual" and self.engine.risk.manual_order_active(order.id)
-        if not ((report.live_trading_ready or report.sandbox_trading_ready) or
+        dry_run = (preview_only and order.execution_origin == "manual"
+                   and report.safe_to_arm and self.engine.settings.live_enabled)
+        if not (dry_run or (not preview_only and (
+                report.live_trading_ready or report.sandbox_trading_ready or
                 (manual and report.safe_to_arm and self.engine.settings.live_enabled
-                 and not self.engine.risk.kill_switch)):
+                 and not self.engine.risk.kill_switch)))):
             raise RiskRejected("Native release gate has unresolved checks")
         p = self.profile_for(order.venue)
         if (p is None or order.venue != p.venue or order.mode != p.environment or
-                order.account_fingerprint != p.account_fingerprint or order.market_id not in p.market_ids or
+                order.account_fingerprint != p.account_fingerprint or
+                not NativeRuntime.profile_permits_market(self, p, order.market_id,
+                    getattr(order, "outcome", None)) or
                 order.strategy not in p.strategy_ids):
             raise RiskRejected("Native order is outside the authorized launch scope")
+        reviewed_order_cap = getattr(getattr(p, "limits", None), "max_order_stake_usd", None)
+        if reviewed_order_cap is not None and order.reserved_cost > reviewed_order_cap:
+            raise RiskRejected("Native order exceeds the reviewed per-order debit limit")
+        market = getattr(self.engine, "markets", {}).get(order.market_id)
+        if hasattr(self.engine, "markets") and market is None:
+            raise RiskRejected("Native canonical market is unavailable")
+        if market is not None:
+            if getattr(p, "family_rule", None) is not None:
+                rule = p.family_rule
+                source_policy = self.engine.settings.pricing.trusted_pilot_policy
+                if (not rule.approved_at <= utcnow() < rule.expires_at
+                        or source_policy.market_scope != rule.scope
+                        or not source_policy.enabled or not source_policy.owner_approved):
+                    raise RiskRejected("Recurring family and source approval changed or expired")
+                facts = self.runtime_facts(order.venue)
+                checked = next((item for item in facts.markets if item.market_id == market.id), None)
+                if checked is None or not family_market_ready(checked, p):
+                    raise RiskRejected("This family market has no current exact references, fees or native depth")
+            source_config = market_config(self.engine.settings.pricing, market)
+            if source_config.reference_quality_mode == "trusted_provider":
+                pilot = source_config.trusted_pilot_policy
+                automatic = (order.execution_origin == "automatic"
+                             and self.engine.risk.auto_trade and not self.engine.risk.kill_switch)
+                one_shot_scope = (p.validation_pilot and p.limits.max_native_order_attempts == 1
+                    and pilot.maximum_native_attempts == 1 and not pilot.recurring_authorization
+                    and not pilot.automatic_followups)
+                conditional_family_pilot = (p.validation_pilot and getattr(p, "family_rule", None) is not None
+                    and p.venue == "prophetx" and p.limits.max_native_order_attempts == 1
+                    and pilot.recurring_authorization and pilot.automatic_followups
+                    and pilot.maximum_native_attempts is None
+                    and pilot.market_scope == p.family_rule.scope
+                    and p.limits.max_order_stake_usd <= Decimal("5")
+                    and p.limits.max_total_exposure_usd <= Decimal("5")
+                    and order.reserved_cost <= p.limits.max_order_stake_usd)
+                recurring_scope = (not p.validation_pilot and pilot.recurring_authorization
+                    and pilot.automatic_followups and pilot.maximum_native_attempts is None
+                    and p.limits.max_native_order_attempts is None
+                    and (p.limits.available_cash_only and p.limits.stake_sizing == "quarter_kelly"
+                         and getattr(p.limits, "cash_policy", "verified_current") == "verified_current"
+                         or p.venue == "prophetx" and not p.limits.available_cash_only
+                         and p.limits.stake_sizing == "capped"
+                         and getattr(p.limits, "cash_policy", "verified_current") == "prophetx_exchange_rejection"))
+                if (not (manual or automatic or (preview_only and order.execution_origin == "manual"))
+                        or not (one_shot_scope or conditional_family_pilot or recurring_scope)
+                        or not pilot.enabled or not pilot.owner_approved
+                        or not pilot.permits_market(market)
+                        or (pilot.market_scope is not None and pilot.market_scope.venue != order.venue)
+                        or ((ceiling := pilot.cost_ceiling()) is not None
+                            and order.reserved_cost > ceiling)):
+                    raise RiskRejected("Trusted-provider pilot permits one scoped authorized attempt only"
+                        if not pilot.recurring_authorization else
+                        "Recurring trusted-provider source policy does not authorize this launch scope")
+                if any(previous.id != order.id and previous.market_id == order.market_id
+                       and previous.venue == order.venue and previous.mode == order.mode
+                       and previous.account_fingerprint == order.account_fingerprint
+                       for previous in self.engine.risk.native_orders.values()):
+                    raise RiskRejected("Trusted-provider pilot attempt already exists in the durable ledger")
         if p.settlement_policy in {"novig_ioc_win_loss_halt_on_exception", "kalshi_ioc_binary_halt_on_exception",
                                    "prophetx_funded_cash_win_loss_halt_on_exception"} and any(
                 previous.id != order.id and previous.venue == order.venue and previous.mode == order.mode
@@ -247,6 +1160,14 @@ class NativeRuntime:
                 for previous in self.engine.risk.native_orders.values()):
             raise RiskRejected(f"Scoped {p.venue.capitalize()} settlement permits only one managed order per native market")
         snapshot = self.account_snapshots.get(order.venue)
+        fixed_exchange_cash = (p.venue == "prophetx"
+            and getattr(p.limits, "cash_policy", "verified_current") == "prophetx_exchange_rejection"
+            and self.engine.risk.config.cash_policy == "prophetx_exchange_rejection"
+            and not self.engine.risk.config.available_cash_only
+            and self.engine.risk.config.stake_sizing == "capped")
+        if fixed_exchange_cash and (snapshot is None or not snapshot.identity_verified
+                or not snapshot.reconciled or snapshot.account_fingerprint != p.account_fingerprint):
+            raise RiskRejected("Authenticated account identity and initial inventory are required")
         if self.engine.risk.config.available_cash_only and not getattr(snapshot, "cash_available_verified", False):
             raise RiskRejected("Verified spendable account cash is required for the selected exposure policy")
         # Filled costs are already debited from a reconciled available balance.
@@ -256,13 +1177,52 @@ class NativeRuntime:
                         if o.venue == order.venue and o.mode == order.mode
                         and o.account_fingerprint == order.account_fingerprint and o.status in UNRESOLVED), 0)
         required = reserved + (0 if order.id in self.engine.risk.native_orders else order.reserved_cost)
-        if snapshot is None or snapshot.balance_usd is None or snapshot.balance_usd < required:
+        if not fixed_exchange_cash and (snapshot is None or snapshot.balance_usd is None
+                or snapshot.balance_usd < required):
             raise RiskRejected("Authenticated native cash balance cannot cover reserved exposure")
+        if order.venue == "kalshi" and (
+                order.intent.instrument.exchange_index is None
+                or snapshot.exchange_index != order.intent.instrument.exchange_index
+                or self._account_exchange_indexes.get("kalshi") != order.intent.instrument.exchange_index):
+            raise RiskRejected("Kalshi order and spendable cash must share the reviewed exchange shard")
         from ..venues.bridge import NativePreflight
-        adapter = self.manager.adapters[order.venue]
-        adapter.preflight = NativePreflight(environment=p.environment, account_authorized=True,
-            geographic_eligibility_verified=p.environment == "production", native_trading_enabled=True,
-            evidence=p.digest(), valid_until=min(time.time()+5, *(e.expires_at.timestamp() for e in p.evidence)))
+        if not preview_only:
+            adapter = self.manager.adapters[order.venue]
+            location_verified = (p.environment == "production" and
+                (self._prophetx_location_valid(order, adapter.client) if order.venue == "prophetx"
+                 else current_geographic_attestation(snapshot, order.account_fingerprint,
+                                                     order.mode, utcnow())))
+            if p.environment == "production" and not location_verified:
+                raise RiskRejected("Current account-bound native geographic eligibility is unavailable")
+            adapter.preflight = NativePreflight(environment=p.environment, account_authorized=True,
+                geographic_eligibility_verified=location_verified, native_trading_enabled=True,
+                evidence=p.digest(), valid_until=min(time.time()+5, *(e.expires_at.timestamp() for e in p.evidence)))
+
+    def _prophetx_location_valid(self, order, client):
+        proof = self._prophetx_location
+        return bool(proof and proof[0] == order.id and proof[1] is client
+                    and time.monotonic() < proof[2]
+                    and client.location_valid_for(order.intent.client_order_id))
+
+    async def verify_prophetx_location(self, order):
+        """Bind one fresh, actual owner-machine check to this exact attempt."""
+        if order.venue != "prophetx" or order.mode != "production":
+            return
+        adapter = self.manager.adapters.get("prophetx")
+        self._prophetx_location = None
+        if adapter is None or not await adapter.client.check_current_location(order.intent.client_order_id):
+            raise RiskRejected("ProphetX current location check failed or is unavailable")
+        self._prophetx_location = (order.id, adapter.client, time.monotonic() + 10)
+
+    def preview_check(self, order):
+        """Run the placement economics and risk checks without issuing authority."""
+        if not self.manager.recovered or order.venue not in self.manager.adapters:
+            raise RiskRejected("Native recovery or execution adapter is unavailable")
+        if not self.owns_execution_lease():
+            raise RiskRejected("Native execution lease is unavailable")
+        self.require_preflight(order, preview_only=True)
+        self.revalidate_order(order)
+        self.engine.risk.check_native_reservation(order, preview_only=True)
 
     def revalidate_order(self, order):
         from .native_pricing import native_revalidate_intent
@@ -273,22 +1233,61 @@ class NativeRuntime:
         book = self.books.get((order.market_id, order.venue, order.outcome))
         if book is None:
             raise RiskRejected("Native executable book is missing")
+        if market.status == "live":
+            from .inplay import inplay_execution_rejections
+            profile = self.profile_for(order.venue)
+            rule = profile.family_rule if profile else None
+            evidence = self.mapper.dynamic_evidence.get(
+                (order.venue, order.market_id, order.outcome), {}) if self.mapper else {}
+            if rule is None or rule.scope.phase != "inplay":
+                raise RiskRejected("No separately approved in-play market-family rule")
+            reasons = inplay_execution_rejections(market,
+                self.engine.game_states.get(market.event_id), book, now=utcnow(),
+                max_state_age_ms=rule.inplay_state_max_age_ms,
+                max_book_age_ms=min(profile.max_orderbook_age_ms, rule.inplay_state_max_age_ms),
+                allow_exact_fixture_identity=rule.inplay_event_identity_basis == "exact_same_provider_fixture",
+                native_permission=evidence.get("native_inplay_permission") is True,
+                native_permission_source=evidence.get("native_inplay_permission_source"))
+            if reasons:
+                raise RiskRejected("; ".join(reasons))
         try:
-            fair = fair_value(market, list(self.engine.quotes.get(market.id, {}).values()), self.engine.settings.pricing)
+            from .multi_book_consensus import native_live_pricing
+            quotes = list(self.engine.quotes.get(market.id, {}).values())
+            pricing = native_live_pricing(market, quotes, self.engine.settings.pricing)
+            fair = fair_value(market, quotes, pricing)
             if self.engine.settings.mode == "production" and not fair.live_execution_allowed:
                 raise NoSignal("Reference profile has not been validated for live execution")
-            native_revalidate_intent(order.intent, market, fair, book, self.engine.settings.pricing,
+            if market.status == "live":
+                profile = self.profile_for(order.venue)
+                if profile is None or profile.family_rule is None or profile.family_rule.scope.phase != "inplay":
+                    raise NoSignal("In-play references need a separate approved family and latency policy")
+                for reference in fair.references:
+                    receipt = datetime.fromisoformat(reference["local_receipt_at"])
+                    row_clock = datetime.fromisoformat(reference["source_time"]) if reference.get("source_time") else None
+                    if (row_clock is None or row_clock < market.start_time
+                            or any(not 0 <= (utcnow()-stamp).total_seconds()*1000
+                                   <= profile.max_reference_age_ms for stamp in (receipt, row_clock))):
+                        raise NoSignal("In-play sportsbook row or delivery exceeds the approved live latency limit")
+            native_revalidate_intent(order.intent, market, fair, book, pricing,
                                      remaining_quantity=order.quantity-order.filled_quantity,
                                      fees_already_paid_usd=order.fees)
             risk = self.engine.risk.config
             if risk.stake_sizing == "quarter_kelly":
                 from .native_pricing import _settlement_bounds
                 from .stake_sizing import quarter_kelly_budget
-                probabilities = [fair.probabilities[order.outcome]]
+                margin = fair.trusted_pilot_margin_probability or 0
+                probabilities = [fair.probabilities[order.outcome] - margin]
                 if fair.sensitivity_probabilities:
-                    probabilities.append(fair.sensitivity_probabilities[order.outcome])
+                    probabilities.append(fair.sensitivity_probabilities[order.outcome] - margin)
+                if min(probabilities) <= 0:
+                    raise NoSignal("Pilot uncertainty allowance eliminates the modeled winning chance")
                 caps = [v for v in (risk.max_order_stake, risk.live_max_order_stake) if v is not None]
-                sizing = quarter_kelly_budget(book, min(probabilities), _settlement_bounds(market),
+                if market_config(self.engine.settings.pricing, market).reference_quality_mode == "trusted_provider":
+                    pilot = market_config(self.engine.settings.pricing, market).trusted_pilot_policy
+                    caps.extend(value for value in (pilot.max_debit_usd, pilot.max_loss_usd)
+                                if value is not None)
+                sizing = quarter_kelly_budget(book, min(probabilities),
+                    _settlement_bounds(market, winner_only=fair.normal_outcome_policy == "winner_only_binary"),
                     available_cash_usd=self.sizing_cash(order.venue, exclude_order_id=order.id),
                     unit_size_usd=risk.unit_size_usd, max_stake_usd=min(caps) if caps else None,
                     price=order.intent.limit_price, now=utcnow())
@@ -312,6 +1311,9 @@ class NativeRuntime:
                 or venue in getattr(self, "_account_probes", ())
                 or self._account_snapshot_fences.get(venue) != self._ledger_fence()):
             raise NoSignal("Quarter Kelly requires current reconciled cash for this account")
+        if venue == "kalshi" and (snapshot.exchange_index is None
+                or snapshot.exchange_index != self._account_exchange_indexes.get(venue)):
+            raise NoSignal("Quarter Kelly requires cash scoped to the reviewed Kalshi exchange index")
         reserved = sum((o.reserved_cost for o in self.engine.risk.native_orders.values()
             if o.id != exclude_order_id and o.venue == venue and o.mode == profile.environment
             and o.account_fingerprint == profile.account_fingerprint and o.status in UNRESOLVED), Decimal(0))
@@ -359,13 +1361,64 @@ class NativeRuntime:
             raise RiskRejected("Native candidate or order book changed")
         order = self.build_order(candidate, execution_origin=execution_origin)
         try:
+            # Manual review checks location before entering this method. The
+            # automatic path must bind the same short-lived check to this
+            # exact order before the OMS's first preflight and durable intent.
+            if execution_origin == "automatic" and order.venue == "prophetx" and order.mode == "production":
+                await self.verify_prophetx_location(order)
             return await self.manager.execute(order)
         finally:
+            if self._prophetx_location and self._prophetx_location[0] == order.id:
+                self._prophetx_location = None
             if order.id in self.engine.risk.native_orders:
                 # Even an ordinary acknowledgement changes account inventory.
                 # Block new orders until the durable ledger and account agree.
                 self.dirty_venues.add(order.venue)
                 self.invalidate_account(order.venue)
+
+    def candidate_disposition(self, candidate):
+        """Report current OMS routing eligibility without submitting an order.
+
+        This advisory check can expire stale authorization through the risk
+        engine. The OMS repeats every dynamic check under its durable lock.
+        """
+        reasons = list(candidate.ineligibility_reasons)
+        now = utcnow()
+        market = self.engine.markets.get(candidate.market_id)
+        book = self.books.get((candidate.market_id, candidate.venue, candidate.outcome))
+        age_ms = (now-candidate.calculated_at).total_seconds()*1000
+        if not candidate.qualified or not candidate.execution_eligible or not candidate.live_execution_allowed:
+            reasons.append("Candidate does not meet the approved source, EV, sizing or fee policy")
+        if (market is None or book is None or book.revision != candidate.book_revision
+                or not book.synchronized or book.status != "active"
+                or not 0 <= age_ms <= self.engine.risk.config.max_candidate_age_ms):
+            reasons.append("Current canonical market or synchronized executable book changed")
+        profile = self.profile_for(candidate.venue)
+        if not NativeRuntime.profile_permits_market(self, profile, candidate.market_id, candidate.outcome):
+            reasons.append("No account-bound launch scope selects this exact market")
+        else:
+            try:
+                report = self.report(candidate.venue)
+            except (ValueError, RuntimeError, AttributeError):
+                reasons.append("Current venue readiness could not be verified")
+            else:
+                if not report.live_trading_ready:
+                    reasons.extend(blocker.message for blocker in report.blockers)
+        if (not self.engine.risk.auto_trade or self.engine.risk.kill_switch
+                or candidate.venue not in self.engine.risk.native_enabled_venues):
+            reasons.append("Recurring native authorization is not armed for this venue")
+        if not reasons and market is not None:
+            try:
+                order = self.build_order(candidate)
+                # Use the same complete reservation check as the OMS. This
+                # read is advisory; the OMS repeats it under its durable lock.
+                self.engine.risk.check_native_reservation(order)
+            except (RiskRejected, ValueError, KeyError, TypeError) as exc:
+                reasons.append(str(exc))
+        reasons = list(dict.fromkeys(reasons))
+        return {"execution_status": "RESEARCH_ONLY" if reasons else "EXECUTABLE",
+                "execution_blockers": reasons,
+                "final_oms_revalidation_required": True}
 
     async def recalculate(self, market_id, event=None):
         record = self.engine.registry.records.get("native_positive_ev")
@@ -406,12 +1459,16 @@ class NativeRuntime:
             candidates=tuple(c.model_dump(mode="json") for c in candidates),
             market=self.engine.markets[market_id].model_dump(mode="json"),
             reference_quotes=tuple(q.model_dump(mode="json") for q in self.engine.quotes.get(market_id, {}).values()),
-            pricing_policy=self.engine.settings.pricing.model_dump(mode="json"))
+            pricing_policy=self.engine.settings.pricing.model_dump(mode="json"),
+            mapping_evidence=tuple(self.mapper.dynamic_evidence.get((book.instrument.venue,
+                market_id, book.instrument.outcome), {}) for book in books)
+                if getattr(self, "mapper", None) else ())
         self.signals[market_id] = observation
         await self.engine.bus.publish(Envelope(schema_name="native.signal", source="native_positive_ev", payload=observation))
         for candidate in candidates:
             self.candidates[(candidate.market_id, candidate.venue, candidate.outcome)] = candidate
-            if candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch:
+            if (candidate.qualified and self.engine.risk.auto_trade and not self.engine.risk.kill_switch
+                    and candidate.venue in self.engine.risk.native_enabled_venues):
                 await self.engine.bus.publish(Envelope(schema_name="trade.native_candidate", source=candidate.strategy, payload=candidate))
 
     def bind_client(self, venue, client):
@@ -425,8 +1482,10 @@ class NativeRuntime:
         if adapter is None:
             mappings = [VerifiedVenueMapping(canonical_market_id=m.market.id, canonical_outcome=m.instrument.outcome,
                 native_instrument_id=m.instrument.instrument_id, native_outcome=m.instrument.native_outcome,
+                native_exchange_index=m.instrument.exchange_index,
                 settlement_fingerprint=m.market.identity(), mapping_evidence=m.instrument.source,
                 verified=True, fee_schedule_verified=m.fee_bound.verified,
+                fee_assumption_approved=m.fee_bound.evidence_kind == "owner_approved_assumption",
                 native_payout_usd=m.instrument.payout_per_unit_usd, native_quantity_unit=m.instrument.quantity_unit)
                 for m in self.mapper.mappings if m.instrument.venue == p.venue]
             if not mappings: return None
@@ -442,6 +1501,27 @@ class NativeRuntime:
                     if venue == "polymarket_us":
                         adapter.seed_fills(order.venue_order_id, order.intent, self.manager.recovered_fills(order.id))
             self.manager.register(p.venue, adapter)
+        if adapter is not None and getattr(p, "family_rule", None) is not None:
+            from ..venues.bridge import VerifiedVenueMapping
+            for mapping in self.mapper.mappings:
+                i = mapping.instrument
+                if i.venue != venue or not self.profile_permits_market(p, mapping.market.id, i.outcome):
+                    continue
+                key = (mapping.market.id, i.outcome)
+                verified = VerifiedVenueMapping(canonical_market_id=mapping.market.id,
+                    canonical_outcome=i.outcome, native_instrument_id=i.instrument_id,
+                    native_outcome=i.native_outcome, native_exchange_index=i.exchange_index,
+                    settlement_fingerprint=mapping.market.identity(),
+                    mapping_evidence=i.source, verified=True,
+                    fee_schedule_verified=mapping.fee_bound.verified,
+                    fee_assumption_approved=mapping.fee_bound.evidence_kind == "owner_approved_assumption",
+                    native_payout_usd=i.payout_per_unit_usd,
+                    native_quantity_unit=i.quantity_unit)
+                prior = adapter.mappings.get(key)
+                if prior is not None and prior != verified:
+                    self.engine.risk.halt("Dynamic native mapping changed after adapter binding")
+                    return None
+                adapter.mappings[key] = verified
         if adapter.client is not client:
             self.engine.risk.halt("Native account connection changed; restart recovery required")
             return None
@@ -452,6 +1532,12 @@ class NativeRuntime:
         return adapter
 
     async def on_frame(self, venue, client, frame):
+        if venue == "prophetx" and hasattr(client, "public_market_data"):
+            if frame.get("type") in {"transport_invalidated", "snapshot_required"}:
+                client.public_market_data.invalidate(
+                    catalog_uncertain=frame.get("type") == "transport_invalidated")
+            else:
+                client.public_market_data.apply(frame, received_at=utcnow())
         adapter = self.bind_client(venue, client)
         if adapter and hasattr(adapter, "observe_private_frame"):
             adapter.observe_private_frame(frame)
@@ -494,6 +1580,83 @@ class NativeRuntime:
                 await self.engine.bus.publish(Envelope(schema_name="sports.market", source=venue, payload=market))
                 await self.engine.bus.publish(Envelope(schema_name="exchange.native_book", source=venue, payload=book))
 
+    def prophetx_research_books(self, *, limit: int = 20, event_id: str | None = None,
+                                market_id: str | None = None, strike_id: str | None = None) -> dict:
+        """Read-only native research view; no canonical or execution mapping."""
+        record = self.engine.registry.records.get("prophetx")
+        monitor = record.plugin if record and record.enabled else None
+        client = getattr(monitor, "client", None)
+        if client is None or not hasattr(client, "public_market_data"):
+            return {"available": False, "reason": "ProphetX Trading/MM monitor unavailable",
+                    "levels": [], "read_only": True}
+        connected = (getattr(monitor, "task", None) is not None and not monitor.task.done()
+                     and client.health_check().get("streaming") is True)
+        return {"available": True, "environment": client.settings.environment,
+                "streaming": connected,
+                **client.public_market_data.snapshot(
+                    now=utcnow(), connected=connected, limit=limit, event_id=event_id,
+                    market_id=market_id, strike_id=strike_id)}
+
+    def polymarket_us_research_books(self, *, limit: int = 20) -> dict:
+        """Current public/streamed US instrument depth, before mapping approval."""
+        from ..integrations.polymarket_us_research import current_book, direction_levels, taker_fee
+        from decimal import Decimal
+
+        record = self.engine.registry.records.get("polymarket_us")
+        monitor = record.plugin if record and record.enabled else None
+        client = getattr(monitor, "client", None)
+        if client is None:
+            return {"available": False, "markets": [], "read_only": True,
+                    "reason": "Polymarket US public discovery is not enabled"}
+        now = utcnow()
+        catalog_at = getattr(monitor, "research_catalog_at", None)
+        catalog_current = bool(catalog_at and 0 <= (now-catalog_at).total_seconds()
+                               <= 2*monitor.context.config.get("discovery_interval_seconds", 300))
+        stream_connected = client.health_check().get("market_streaming") is True
+        rows = []
+        for native in getattr(monitor, "research_catalog_rows", [])[:limit]:
+            book = current_book(native, client, now=now, stream_connected=stream_connected)
+            if not catalog_current:
+                book = {**book, "current": False, "bids": [], "offers": [],
+                        "rejection": "Native catalog has expired"}
+            directions = []
+            for direction in ("long", "short"):
+                levels = direction_levels(book, direction)
+                first_price, first_qty = levels[0] if levels else (None, None)
+                fee = None
+                if first_price is not None:
+                    try:
+                        fee = str(taker_fee(native, first_price, min(Decimal(1), first_qty)))
+                    except (ValueError, TypeError, ArithmeticError):
+                        pass
+                directions.append({"direction": direction, "outcome": next((s["description"] for s in native["sides"]
+                    if s["long"] == (direction == "long")), None),
+                    "native_price": str(first_price if direction == "long" else 1-first_price) if first_price is not None else None,
+                    "effective_win_cost_usd": str(first_price) if first_price is not None else None,
+                    "available_contracts": str(first_qty) if first_qty is not None else "0",
+                    "one_contract_taker_fee_usd": fee,
+                    "margin_locked_per_contract_usd": "1" if direction == "short" else "0",
+                    "sale_proceeds_per_contract_usd": str(1-first_price) if direction == "short" and first_price is not None else None})
+            rows.append({"slug": native["slug"], "event_slug": native["event_slug"],
+                         "league": native["league"], "event": native["event_title"],
+                         "question": native["question"], "market_type": native["market_type"],
+                         "market_status": native["status"], "book_state": book.get("state"),
+                         "book_source": book.get("source"), "source_time": book.get("source_time"),
+                         "source_age_seconds": book.get("source_age_seconds"),
+                         "current": book.get("current", False), "rejection": book.get("rejection"),
+                         "fee_coefficient": native.get("fee_coefficient"),
+                         "minimum_quantity": native.get("minimum_quantity"),
+                         "bid_levels": book.get("bids", [])[:5], "offer_levels": book.get("offers", [])[:5],
+                         "directions": directions, "mapping_reviewed": False,
+                         "execution_eligible": False})
+        return {"available": True, "environment": client.settings.environment,
+                "authenticated": client.authenticated, "market_streaming": stream_connected,
+                "catalog_at": catalog_at.isoformat() if catalog_at else None,
+                "catalog_current": catalog_current, "discovered_count": len(getattr(monitor, "research_catalog_rows", [])),
+                "subscribed_count": len(client.market_slugs),
+                "current_market_count": sum(row["current"] for row in rows),
+                "markets": rows, "read_only": True, "execution_eligible": False}
+
     def runtime_facts(self, venue=None):
         from decimal import Decimal
         from .native_pricing import instrument_fingerprint
@@ -535,15 +1698,25 @@ class NativeRuntime:
         account_age = None
         if snapshot and isinstance(snapshot.observed_at, datetime) and snapshot.observed_at.tzinfo is not None:
             account_age = (now-snapshot.observed_at).total_seconds()
+        fixed_exchange_cash = bool(p and p.venue == "prophetx"
+            and p.limits.cash_policy == "prophetx_exchange_rejection"
+            and engine.risk.config.cash_policy == "prophetx_exchange_rejection")
+        # The fixed-stake mode paces authenticated inventory checks, but a
+        # long-disconnected private channel or old account binding cannot
+        # authorize fresh orders indefinitely.
         account_current = bool(p and snapshot and snapshot.identity_verified and account_age is not None
-            and 0 <= account_age < 30 and snapshot.venue == venue and snapshot.environment == p.environment
+            and 0 <= account_age < (600 if fixed_exchange_cash else 30)
+            and snapshot.venue == venue and snapshot.environment == p.environment
             and snapshot.account_fingerprint == p.account_fingerprint
             and client is not None and client.settings.environment == p.environment
             and venue not in getattr(self, "_account_probes", ())
             and (not engine.risk.config.available_cash_only or getattr(snapshot, "cash_available_verified", False)))
+        if venue == "kalshi" and account_current:
+            account_current = (snapshot.exchange_index is not None
+                and snapshot.exchange_index == self._account_exchange_indexes.get(venue))
         # Every installed snapshot must describe the exact durable ledger.
         fences = getattr(self, "_account_snapshot_fences", {})
-        if account_current:
+        if account_current and not fixed_exchange_cash:
             account_current = venue in fences and fences[venue] == self._ledger_fence()
         risk = engine.risk.config
         limits = None
@@ -556,6 +1729,7 @@ class NativeRuntime:
                     max_venue_exposure_usd=risk.max_venue_exposure, max_correlated_exposure_usd=risk.max_correlated_exposure,
                     max_total_exposure_usd=risk.max_total_exposure, daily_loss_limit_usd=risk.daily_loss_limit,
                     available_cash_only=risk.available_cash_only,
+                    cash_policy=risk.cash_policy,
                     block_overlapping_events=risk.block_overlapping_events,
                     block_overlapping_players=risk.block_overlapping_players,
                     stake_sizing=risk.stake_sizing, unit_size_usd=risk.unit_size_usd,
@@ -564,7 +1738,13 @@ class NativeRuntime:
                     # count. Preserve their prior comparison while a pilot
                     # binds and rechecks its explicit one-attempt limit.
                     max_native_order_attempts=(risk.max_native_order_attempts
-                        if p and p.limits.max_native_order_attempts is not None else None))
+                        if p and p.limits.max_native_order_attempts is not None else None),
+                    max_native_daily_attempts=risk.max_native_daily_attempts,
+                    max_native_daily_debit_usd=risk.max_native_daily_debit,
+                    external_exposure_scope=("profile_account" if p and
+                        p.limits.external_exposure_scope == "profile_account" and
+                        self.engine.risk.native_exposure_scope == (p.venue, p.account_fingerprint)
+                        else "global"))
         except (ValueError, TypeError):
             # Contradictory runtime limits are a missing authorization, not a
             # dashboard exception and never a reason to weaken the limits.
@@ -602,13 +1782,20 @@ class NativeRuntime:
                 circuit_open=not connected, transport=transport,
                 synchronization_ready=synchronized))
         markets = []
-        for market_id in p.market_ids if p else ():
+        family_ids = ({market_id for venue_name, market_id, outcome in self.mapper.dynamic_rule_digests
+                       if p and venue_name == p.venue
+                       and self.mapper.dynamic_rule_digests[(venue_name, market_id, outcome)]
+                       == p.family_rule.digest()} if p and p.family_rule and self.mapper else set())
+        for market_id in (*p.market_ids, *sorted(family_ids)) if p else ():
             market = engine.markets.get(market_id)
             books = [b for key, b in self.books.items() if key[0] == market_id and key[1] == venue]
             refs, fair = (), None
             if market:
                 try:
-                    fair = fair_value(market, list(engine.quotes.get(market_id, {}).values()), engine.settings.pricing, now=now)
+                    from .multi_book_consensus import native_live_pricing
+                    quotes = list(engine.quotes.get(market_id, {}).values())
+                    pricing = native_live_pricing(market, quotes, engine.settings.pricing, now)
+                    fair = fair_value(market, quotes, pricing, now=now)
                     refs = fair.references
                 except NoSignal: pass
             ages = [b.age_ms(now) for b in books]
@@ -616,15 +1803,47 @@ class NativeRuntime:
             reference_ages = [r.get("age_ms") for r in refs]
             oldest_reference_age = (max(reference_ages) if reference_ages and all(
                 isinstance(age, (int, float)) and age >= 0 for age in reference_ages) else None)
-            exact_mapping = bool(market and books and all(b.market_fingerprint == market.identity()
+            age_basis = "selection_observation"
+            if (market and fair and fair.live_execution_allowed
+                    and market_config(engine.settings.pricing, market).reference_quality_mode == "trusted_provider"):
+                delivery_ages = [r.get("delivery_age_ms") for r in refs]
+                oldest_reference_age = (max(delivery_ages) if delivery_ages and all(
+                    isinstance(age, (int, float)) and age >= 0 for age in delivery_ages) else None)
+                age_basis = "provider_delivery"
+                if market.status == "live":
+                    row_ages = [((now-datetime.fromisoformat(r["source_time"])).total_seconds()*1000
+                        if r.get("source_time") else None) for r in refs]
+                    oldest_reference_age = (max([*delivery_ages, *row_ages])
+                        if all(isinstance(age, (int, float)) and age >= 0
+                               for age in [*delivery_ages, *row_ages]) else None)
+                    age_basis = "provider_delivery"
+            exact_mapping = bool(market and books and (venue, market_id) not in self.invalidated_family_markets
+                and all(b.market_fingerprint == market.identity()
                 and b.instrument.settlement_rules_fingerprint == market.identity() and b.instrument.verified
                 and b.instrument.canonical_market_id == market_id and b.instrument.venue == venue
                 and b.instrument.outcome in market.outcomes for b in books))
+            inplay_ready = True
+            if market and market.status == "live":
+                from .inplay import inplay_execution_rejections
+                rule = p.family_rule if p else None
+                inplay_ready = bool(rule and rule.scope.phase == "inplay" and books and all(
+                    not inplay_execution_rejections(market, engine.game_states.get(market.event_id),
+                        book, now=now, max_state_age_ms=rule.inplay_state_max_age_ms,
+                        max_book_age_ms=min(p.max_orderbook_age_ms, rule.inplay_state_max_age_ms),
+                        allow_exact_fixture_identity=rule.inplay_event_identity_basis == "exact_same_provider_fixture",
+                        native_permission=(evidence := self.mapper.dynamic_evidence.get(
+                            (venue, market_id, book.instrument.outcome), {})).get("native_inplay_permission") is True,
+                        native_permission_source=evidence.get("native_inplay_permission_source"))
+                    for book in books))
             markets.append(MarketReadiness(market_id=market_id,
                 identity_verified=exact_mapping,
                 provider_mapping_verified=bool(refs) and all(r.get("provider") in p.provider_ids for r in refs),
                 venue_mapping_verified=exact_mapping,
                 fee_schedule_verified=bool(books) and all(b.fee_bound.verified
+                    and b.fee_bound.instrument_fingerprint == instrument_fingerprint(b.instrument)
+                    and b.fee_bound.observed_at <= now < b.fee_bound.valid_until for b in books),
+                fee_assumption_approved=bool(books) and all(
+                    b.fee_bound.evidence_kind == "owner_approved_assumption"
                     and b.fee_bound.instrument_fingerprint == instrument_fingerprint(b.instrument)
                     and b.fee_bound.observed_at <= now < b.fee_bound.valid_until for b in books),
                 native_units_supported=bool(books), order_minimum_verified=bool(books) and all(
@@ -633,9 +1852,11 @@ class NativeRuntime:
                 required_books_present=bool(fair and fair.execution_eligible and
                     (engine.settings.mode != "production" or fair.live_execution_allowed)),
                 oldest_reference_age_ms=oldest_reference_age,
+                reference_age_basis=age_basis,
                 orderbook_age_ms=max(ages) if valid_ages else None,
                 orderbook_synchronized=bool(books) and all(b.synchronized for b in books),
-                market_active=bool(market and market.status not in {"closed", "suspended"} and books and all(b.status == "active" for b in books)),
+                market_active=bool(market and market.status not in {"closed", "suspended"}
+                    and inplay_ready and books and all(b.status == "active" for b in books)),
                 executable_liquidity=any(b.asks for b in books),
                 synthetic=fair is None or fair.synthetic or any(b.synthetic for b in books)))
         unknown = sum(o.status == OrderStatus.UNKNOWN for o in engine.risk.native_orders.values())
@@ -660,6 +1881,7 @@ class NativeRuntime:
             configured_limits=limits, enabled_strategy_ids=tuple(name for name,r in engine.registry.records.items()
                 if r.enabled and name == "native_positive_ev"),
             central_risk_enforced=execution_workers and available_queue("risk_queue"), opposing_position_guards=True,
+            external_exposure_bounded=self.engine.risk.external_exposure_bounded(venue),
             durable_intents=storage_healthy and execution_workers,
             persistence_healthy=storage_healthy and worker("audit-enqueue") and available_queue("audit_queue"),
             signal_ledger_healthy=engine.signal_ledger.started and storage_healthy and worker("signal-ledger") and available_queue("signal_queue"),
@@ -674,11 +1896,22 @@ class NativeRuntime:
             settlement_reconciliation_supported=native_bound and supports_settlement_scope(
                 p, adapter, self.mapper.mappings if self.mapper else (), tuple(engine.risk.native_orders.values())),
             native_credentials_present=bool(record and record.credential_status != "missing"),
-            account_identity_verified=account_current, unresolved_unknown_orders=unknown,
+            account_identity_verified=account_current,
+            geographic_attestation_current=bool(p and account_current and
+                current_geographic_attestation(snapshot, p.account_fingerprint, p.environment, now)),
+            # This reports whether the official per-order check is available,
+            # not whether a balance snapshot happens to be current. A stale
+            # snapshot still blocks native routing through native_bound.
+            order_bound_location_check_supported=bool(venue == "prophetx" and record and record.enabled
+                and client is not None
+                and callable(getattr(client, "check_current_location", None))
+                and callable(getattr(client, "location_valid_for", None))),
+            unresolved_unknown_orders=unknown,
             reconciliation_discrepancies=(1 if snapshot and not snapshot.reconciled else 0) + len(self.manager.invalidated_settlements),
             native_pilot_prior_attempts=prior_attempts,
             feeds=tuple(feeds), markets=tuple(markets), live_enabled=engine.settings.live_enabled,
-            auto_trade=engine.risk.auto_trade, kill_switch=engine.risk.kill_switch)
+            auto_trade=engine.risk.auto_trade and venue in engine.risk.native_enabled_venues,
+            kill_switch=engine.risk.kill_switch)
 
     def reports(self):
         return {venue: evaluate_readiness(p, self.runtime_facts(venue))
@@ -687,8 +1920,34 @@ class NativeRuntime:
     def runtime_facts_by_venue(self):
         return {venue: self.runtime_facts(venue) for venue in self.profiles_by_venue()}
 
-    def report(self, venue=None):
-        if not getattr(self, "portfolio", None) or venue is not None:
+    def scope_digest(self, venues):
+        profiles = self.profiles_by_venue()
+        selected = set(venues)
+        if not selected or not selected <= profiles.keys():
+            raise ValueError("Select reviewed native execution venues")
+        if len(selected) == 1:
+            return profiles[next(iter(selected))].digest()
+        return digest_json({venue: profiles[venue].digest() for venue in sorted(selected)})
+
+    def report(self, venue=None, *, venues=None):
+        if venues is not None:
+            selected = set(venues)
+            if not selected or not selected <= self.profiles_by_venue().keys():
+                raise ValueError("Select reviewed native execution venues")
+            if len(selected) == 1:
+                return self.report(next(iter(selected)))
+            reports = {name: self.report(name) for name in selected}
+            report = ReadinessReport(evaluated_at=utcnow(), environment=self.engine.settings.mode,
+                venue="portfolio", profile_digest=self.scope_digest(selected),
+                technical_ready=all(r.technical_ready for r in reports.values()),
+                authorization_ready=all(r.authorization_ready for r in reports.values()),
+                safe_to_arm=all(r.safe_to_arm for r in reports.values()),
+                live_trading_ready=all(r.live_trading_ready for r in reports.values()),
+                sandbox_trading_ready=all(r.sandbox_trading_ready for r in reports.values()),
+                blockers=tuple(b.model_copy(update={"scope": f"{v}/{b.scope}"})
+                    for v, r in reports.items() for b in r.blockers),
+                performance=next(iter(reports.values())).performance)
+        elif not getattr(self, "portfolio", None) or venue is not None:
             report = evaluate_readiness(self.profile_for(venue), self.runtime_facts(venue))
         else:
             reports = self.reports()
@@ -847,7 +2106,7 @@ class NativeRuntime:
     async def refresh_account(self):
         # Only one read owns installation. Neither a concurrent private frame
         # nor a newer ledger may be overwritten by an earlier in-flight probe.
-        if self._account_probe_lock.locked() or not self.profiles_by_venue() or not self.mapper:
+        if self._account_probe_lock.locked() or not self.profiles_by_venue():
             return
         async with self._account_probe_lock:
             if self.portfolio:
@@ -862,13 +2121,18 @@ class NativeRuntime:
         if client is None or client.settings.environment != p.environment:
             return
         adapter = self.bind_client(p.venue, client)
-        if adapter is None:
-            return
         last_probe = self._last_account_probes.get(p.venue, 0) if self.portfolio else self.last_account_probe
-        if time.monotonic()-last_probe < 5:
+        fixed_exchange_cash = (p.venue == "prophetx"
+            and getattr(getattr(p, "limits", None), "cash_policy", "verified_current") == "prophetx_exchange_rejection"
+            and self.engine.risk.config.cash_policy == "prophetx_exchange_rejection")
+        interval = 300 if fixed_exchange_cash and p.venue in self.account_snapshots else (5 if adapter is not None else 20)
+        if time.monotonic()-last_probe < interval:
             return
         from ..venues.account_probe import probe_native_account
         async def read_account():
+            from ..venues.kalshi import KalshiClient
+            exchange_index = (await self._kalshi_account_exchange_index(client, p)
+                if isinstance(client, KalshiClient) else None)
             async with self.manager.lock:
                 self.invalidate_account(p.venue)
                 self.last_account_probe = time.monotonic()
@@ -878,10 +2142,15 @@ class NativeRuntime:
                 settled = frozenset(self.engine.risk.settled)
             snapshot = await asyncio.wait_for(probe_native_account(client,
                 managed_orders=inventory, settled_order_ids=settled,
+                **({"external_positions": tuple(row for row in self.external_positions
+                     if row.venue == p.venue)} if any(row.venue == p.venue
+                     for row in self.external_positions) else {}),
+                **({"exchange_index": exchange_index} if isinstance(client, KalshiClient) else {}),
                 **({"adapter": adapter} if p.venue == "polymarket_us" else {}),
                 **({"management_client": record.plugin.management_client}
-                   if p.venue == "novig" and getattr(record.plugin, "management_client", None) else {})), timeout=20)
-            return snapshot, token
+                   if p.venue == "novig" and getattr(record.plugin, "management_client", None) else {})),
+                timeout=35 if p.venue == "prophetx" else 20)
+            return snapshot, token, exchange_index
 
         def unchanged(token):
             current = self.engine.registry.records.get(p.venue)
@@ -891,7 +2160,7 @@ class NativeRuntime:
 
         self._account_probes.add(p.venue)
         try:
-            snapshot, token = await read_account()
+            snapshot, token, exchange_index = await read_account()
             async with self.manager.lock:
                 if not unchanged(token):
                     self.last_account_probe = 0.0
@@ -919,15 +2188,25 @@ class NativeRuntime:
                     # neither old cash nor the incomplete probe can authorize.
                     self.invalidate_account(p.venue)
                     return
-                snapshot, token = await read_account()
+                snapshot, token, exchange_index = await read_account()
             async with self.manager.lock:
                 if not unchanged(token):
                     self.last_account_probe = 0.0
                     self._last_account_probes.pop(p.venue, None)
                     return
                 self.account_snapshots[p.venue] = snapshot
+                # Start the next paced account read after this one finishes.
+                # ProphetX's two-sided REST inventory check can take longer
+                # than the former start-to-start interval.
+                self.last_account_probe = time.monotonic()
+                self._last_account_probes[p.venue] = self.last_account_probe
+                if exchange_index is not None:
+                    self._account_exchange_indexes[p.venue] = exchange_index
                 self._account_snapshot_fences[p.venue] = token[1]
-                adapter.bound_account_fingerprint = snapshot.account_fingerprint if snapshot.identity_verified else ""
+                if adapter is not None:
+                    adapter.bound_account_fingerprint = snapshot.account_fingerprint if snapshot.identity_verified else ""
+                    if p.venue == "kalshi":
+                        adapter.bound_exchange_index = snapshot.exchange_index if snapshot.identity_verified else None
                 pending = any(o.venue == p.venue and (not o.reconciliation_complete or o.status == OrderStatus.UNKNOWN)
                               for o in self.engine.risk.native_orders.values())
                 if self.engine.risk.auto_trade and (not snapshot.identity_verified or (not snapshot.reconciled and not pending)):
@@ -951,6 +2230,7 @@ class NativeSignalObservation(Contract):
     market: dict = Field(default_factory=dict)
     reference_quotes: tuple[dict, ...] = ()
     pricing_policy: dict = Field(default_factory=dict)
+    mapping_evidence: tuple[dict, ...] = ()
     # source observations and quantity-specific cash calculations stay nested;
     # no conversion into legacy one-dollar signal/fill records.
     evaluated_at: datetime = Field(default_factory=utcnow)

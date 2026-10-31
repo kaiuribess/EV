@@ -1,7 +1,10 @@
 import asyncio
+import httpx
 from contextlib import asynccontextmanager
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -14,8 +17,12 @@ from .core.models import Envelope, Market, SettlementResult
 from .core.market_review import ContractReview, compare_contracts, pending_market_reviews
 from .core.native_accounting import ExactDecimal
 from .core.settlement_bridge import ExceptionalSettlementBound, estimate_bridge
-from .core.launch_setup import launch_setup, operator_limits_draft
+from .core.launch_setup import launch_setup, operator_limits_draft, save_operator_limits_draft
+from .core.readiness import LiveLimits
+from .core.paths import runtime_data_file
 from .core.manual_native import ManualNativeService
+from .core.paths import runtime_data_dir
+from .core.research_review import read_reviews, review_payload, save_review
 from .core.risk import RiskRejected
 from .core.signals import SignalResultImport
 from .engine import Engine
@@ -26,6 +33,14 @@ class ControlBody(BaseModel):
     auto_trade: bool | None = None
     kill_switch: bool | None = None
     expected_launch_digest: str | None = None
+    authorization_expires_at: datetime | None = None
+    native_venues: list[Literal["kalshi", "novig", "prophetx", "polymarket_us"]] | None = None
+
+
+class RecurringActivationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    venue: Literal["prophetx"]
+    expected_launch_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ToggleBody(BaseModel):
@@ -83,6 +98,18 @@ class ManualPreviewBody(BaseModel):
 class ManualSubmitBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_token: str
+    terms_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    proposal_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_max_cost_usd: Decimal = Field(gt=0, allow_inf_nan=False)
+
+
+class NativeResearchReviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_market_id: str = Field(min_length=1)
+    venue: str = Field(pattern="^(kalshi|novig)$")
+    native_market_id: str = Field(min_length=1)
+    native_outcome_id: str = Field(min_length=1)
+    strategy: Literal["multi_book_consensus", "sharp_books"] | None = None
 
 
 def local_origin(value, port=8000):
@@ -157,11 +184,29 @@ def create_app(settings=None):
 
     @app.get("/api/health")
     async def health():
-        return {"status": "running", "mode": engine.settings.mode, "kill_switch": engine.risk.kill_switch}
+        stopped = engine.stopped_workers()
+        return {"status": "degraded" if stopped else "running",
+                "mode": engine.settings.mode, "kill_switch": engine.risk.kill_switch,
+                "critical_workers_stopped": stopped,
+                "plugin_workers_stopped": engine.stopped_plugin_workers()}
 
     @app.get("/api/state")
     async def state():
         return engine.state()
+
+    @app.get("/api/native/market-data/prophetx")
+    async def prophetx_market_data(
+        limit: int = Query(20, ge=1, le=100),
+        event_id: str | None = Query(None, pattern=r"^[0-9]{1,20}$"),
+        market_id: str | None = Query(None, pattern=r"^[0-9]{1,20}$"),
+        strike_id: str | None = Query(None, pattern=r"^[a-f0-9]{32}$"),
+    ):
+        return engine.native.prophetx_research_books(
+            limit=limit, event_id=event_id, market_id=market_id, strike_id=strike_id)
+
+    @app.get("/api/native/market-data/polymarket-us")
+    async def polymarket_us_market_data(limit: int = Query(20, ge=1, le=50)):
+        return engine.native.polymarket_us_research_books(limit=limit)
 
     @app.get("/api/signals")
     async def signal_history(limit: int = Query(25, ge=1, le=200),
@@ -209,8 +254,21 @@ def create_app(settings=None):
 
     @app.get("/api/launch/setup")
     async def launch_preparation():
-        limits, error = await asyncio.to_thread(operator_limits_draft)
+        limits, error = await asyncio.to_thread(operator_limits_draft,
+            runtime_data_file("operator_launch_limits.json", engine.settings.data_dir))
         return launch_setup(engine, limits_draft=limits, limits_error=error)
+
+    @app.post("/api/launch/limits-draft")
+    async def save_launch_limits(body: LiveLimits):
+        if engine.settings.mode != "production" or engine.risk.auto_trade or not engine.risk.kill_switch:
+            raise HTTPException(409, "Pause automation and engage the emergency stop before editing launch limits")
+        try:
+            await asyncio.to_thread(save_operator_limits_draft, body,
+                runtime_data_file("operator_launch_limits.json", engine.settings.data_dir))
+        except OSError:
+            raise HTTPException(503, "Operator limits draft could not be saved") from None
+        return {"limits": body.model_dump(mode="json"), "applied": False,
+                "note": "Draft only. Current launch profile and trading authorization are unchanged."}
 
     @app.post("/api/launch/probe")
     async def launch_account_probe(body: LaunchProbeBody):
@@ -256,6 +314,29 @@ def create_app(settings=None):
             raise HTTPException(502, {"provider_status": exc.status_code, "provider_code": exc.code}) from None
         except (ValueError, RuntimeError, asyncio.TimeoutError):
             raise HTTPException(502, "ProphetX catalog read or schema validation failed") from None
+
+    @app.get("/api/native/discovery/prophetx/tournaments")
+    async def prophetx_active_tournaments():
+        """Bounded public identity summary using the monitor's existing session."""
+        from .integrations.prophetx_discovery import summarize_tournaments
+        from .plugins.external import NativeMonitor
+        from .venues.common import VenueHTTPError
+
+        record = engine.registry.records.get("prophetx")
+        plugin = record.plugin if record else None
+        client = getattr(plugin, "client", None)
+        if (not record or not record.enabled or not isinstance(plugin, NativeMonitor)
+                or client is None or plugin.task is None or plugin.task.done()
+                or record.health.get("authenticated") is not True):
+            raise HTTPException(409, "A connected ProphetX native monitor is required")
+        try:
+            payload = await asyncio.wait_for(client.discover_sports(active_events_only=True), 15)
+            return summarize_tournaments(payload)
+        except VenueHTTPError as exc:
+            raise HTTPException(502, {"provider_status": exc.status_code,
+                                      "provider_code": exc.code}) from None
+        except (ValueError, RuntimeError, asyncio.TimeoutError):
+            raise HTTPException(502, "ProphetX tournament read or schema validation failed") from None
 
     @app.get("/api/accounts/cash")
     async def reported_cash():
@@ -306,10 +387,28 @@ def create_app(settings=None):
         except (RiskRejected, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @app.get("/api/native/research-review/drafts")
+    async def native_research_drafts():
+        destination = runtime_data_dir(engine.settings.data_dir) / "native_review_drafts"
+        return {"items": await asyncio.to_thread(read_reviews, destination),
+                "execution_authorized": False}
+
+    @app.post("/api/native/research-review/drafts")
+    async def native_research_draft(body: NativeResearchReviewBody):
+        try:
+            payload = review_payload(engine.state(), **body.model_dump())
+            destination = runtime_data_dir(engine.settings.data_dir) / "native_review_drafts"
+            target = await asyncio.to_thread(save_review, payload, destination)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {"draft_id": target.stem, "status": payload["status"],
+                "execution_authorized": False, "model_approved": False}
+
     @app.post("/api/native/manual/submit")
     async def native_manual_submit(body: ManualSubmitBody):
         try:
-            return await manual_native.submit(body.review_token)
+            return await manual_native.submit(body.review_token, body.terms_digest,
+                                               body.approved_max_cost_usd, body.proposal_digest)
         except (RiskRejected, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -349,6 +448,32 @@ def create_app(settings=None):
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         return engine.state()
+
+    @app.post("/api/launch/recurring/activate")
+    async def activate_recurring(body: RecurringActivationBody):
+        """Use the supervised recurring gate, including its saved authorization.
+
+        This cannot create or renew an authorization and never calls a venue
+        order API. The controller's durable status and normal OMS remain the
+        sole activation and execution paths.
+        """
+        if engine.settings.mode != "production":
+            raise HTTPException(409, "Recurring activation requires production")
+        profile = engine.native.profile_for(body.venue)
+        if profile is None or profile.validation_pilot:
+            raise HTTPException(409, "No reviewed recurring ProphetX launch profile is loaded")
+        if body.expected_launch_digest != engine.native.report(body.venue).profile_digest:
+            raise HTTPException(409, "The reviewed launch scope changed")
+        try:
+            from scripts import watch_native_recurring
+            phase = await asyncio.to_thread(watch_native_recurring.tick,
+                f"http://127.0.0.1:{engine.settings.port}")
+        except (ImportError, OSError, ValueError, httpx.HTTPError) as exc:
+            raise HTTPException(409, f"Recurring controller unavailable: {type(exc).__name__}") from exc
+        if phase != "armed" or not engine.risk.auto_trade or engine.risk.kill_switch:
+            raise HTTPException(409, f"Recurring activation remains {phase}")
+        return {"phase": phase, "venue": body.venue,
+                "authorization_expires_at": engine.risk.native_authorization_expires_at}
 
     @app.post("/api/orders/{order_id}/cancel")
     async def cancel(order_id: str):
@@ -415,6 +540,16 @@ def create_app(settings=None):
         engine.registry.configure("positive_ev", pricing.model_dump(mode="json"))
         await engine.storage.save_config("pricing", pricing.model_dump(mode="json"))
         await engine.storage.save_config("risk", risk.model_dump(mode="json"))
+        if set(body) & allowed_pricing:
+            # A new research display window must refresh existing source-only
+            # markets immediately. This pure path never evaluates a native
+            # strategy, publishes a candidate, or arms an execution venue.
+            for index, (market_id, market) in enumerate(list(engine.markets.items())):
+                if market.extensions.get("research_only"):
+                    engine.refresh_reference_estimate(market_id)
+                    engine.schedule_expiration(market_id)
+                    if index % 64 == 63:
+                        await asyncio.sleep(0)
         return engine.state()
 
     @app.websocket("/ws")

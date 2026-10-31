@@ -67,7 +67,7 @@ Configure-Input 'parlay_ws' @{
 Configure-Input 'parlay_game_ws' @{
     sports = $sports; bookmakers = $books; stream_kinds = @('game');
     markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000; max_age_seconds = 600;
-    include_props = $false; account_tier = 'unknown'
+    baseline_refresh_seconds = 300; include_props = $false; account_tier = 'unknown'
 }
 if ($isPaper) {
     Configure-Input 'parlay_paper_input' @{
@@ -98,18 +98,31 @@ Configure-Input 'oddize_rest' @{
 Configure-Input 'parlay_rest' @{
     sports = $sports; bookmakers = $books; markets = @('h2h', 'spreads', 'totals');
     include_props = $true; props_limit = 5000;
+    deduplicate_complete_game_stream = $true; startup_stream_wait_seconds = 12;
     poll_interval_seconds = [double]900; session_request_budget = 80000;
+    focused_novig_nfl_props = ($isNative -and $state.mode -eq 'production');
+    focused_props_interval_seconds = 120; focused_props_hourly_credit_budget = 36;
+    focused_props_limit = 200;
+    live_points_enabled = ($isNative -and $state.mode -eq 'production');
+    live_points_hourly_budget = 12; live_points_interval_seconds = 90;
     account_tier = 'unknown'
 }
 
 # The free OddsPapi account is pregame-only and has a small shared monthly
-# allowance. Collect at most two upcoming NBA fixtures per day, stopping while
+# allowance. A native one-market pilot with explicitly selected fixture IDs
+# spends its limited fixture requests on those IDs before broad discovery;
+# otherwise collect at most two upcoming NBA fixtures per day. Stop while
 # 150 provider requests remain. These quotes are research inputs until exact
 # market/settlement mappings and source freshness are independently verified.
 $oddspapiKeyConfigured = [bool]$env:ODDSPAPI_API_KEY -or
     ((Test-Path -LiteralPath '.env') -and
      (Select-String -LiteralPath '.env' -Pattern '^ODDSPAPI_API_KEY=\S+' -Quiet))
 if ($oddspapiKeyConfigured) {
+    $oddspapiPlugin = @($state.plugins | Where-Object { $_.manifest.name -eq 'oddspapi_rest' })
+    $targetedFixtureCount = if ($isNative -and $oddspapiPlugin.Count -eq 1) {
+        @($oddspapiPlugin[0].config.fixture_ids | Where-Object { $_ }).Count
+    } else { 0 }
+    $fixtureRequestCap = if ($targetedFixtureCount -gt 0) { $targetedFixtureCount } else { 2 }
     Configure-Input 'oddspapi_rest' @{
         sports = @('11'); bookmakers = @('pinnacle', 'fanduel', 'draftkings', 'circasports');
         tournament_id = 132;
@@ -117,10 +130,37 @@ if ($oddspapiKeyConfigured) {
         poll_interval_seconds = [double]86400;
         discovery_interval_seconds = [double]86400;
         discovery_window_hours = 24;
-        max_fixture_requests_per_cycle = 2;
+        max_fixture_requests_per_cycle = $fixtureRequestCap;
         provider_remaining_floor = 150;
         session_request_budget = 100;
         max_requests_per_minute = 10
+    }
+}
+
+# Read-only native catalogs and books are useful before any execution review.
+# Keep the bounded subscriptions separate from source/research and never add a
+# reviewed mapping or authorization here. The same source setup runs on paper,
+# so native monitors are changed only in the stopped production workspace.
+if ($isNative -and $state.mode -eq 'production') {
+    Configure-Input 'kalshi' @{
+        discovery_series = @('KXNBAGAME', 'KXNFLGAME', 'KXMLBGAME', 'KXNHLGAME', 'KXMLBTOTAL');
+        max_discovered_markets = 16
+    }
+    Configure-Input 'novig' @{
+        discovery_leagues = @('NBA', 'NFL', 'MLB', 'NHL');
+        discovery_market_types = @('MONEY', 'POINTS', 'REBOUNDS', 'ASSISTS',
+            'THREE_POINTERS_MADE', 'POINTS_REBOUNDS_ASSISTS', 'PASSING_YARDS',
+            'RUSHING_YARDS', 'RECEIVING_YARDS', 'RECEPTIONS', 'PITCHER_STRIKEOUTS',
+            'HITS', 'TOTAL_BASES', 'RBIS', 'RUNS', 'SHOTS_ON_GOAL');
+        discovery_page_size = 2000; max_discovered_markets = 16
+    }
+    # Keep the reviewed NBA tournament while ranking current tournaments
+    # across supported two-way research sports. Discovery still selects at
+    # most four actual tournament IDs and does not approve execution.
+    Configure-Input 'prophetx' @{
+        discovery_leagues = @('NFL', 'NBA', 'MLB', 'NHL', 'NCAAF', 'NCAABM',
+            'UFC', 'ATP', 'WTA')
+        discovery_lookahead_hours = 96
     }
 }
 
@@ -152,13 +192,15 @@ if (@($pricing.enabled_reference_profiles).Count -ne $enabled.Count -or $current
 
 # The shared overlap and unit preferences apply to both workspaces. Paper has
 # no authenticated account cash, so its simulated stake stays capped at $5.
-# Native stores the requested quarter-Kelly/cash-only policy, but its separate
-# account and launch gates must still verify cash and authorize any real stake.
+# Native launch profiles own their reviewed sizing and cash policy. Feed setup
+# must preserve that policy across a restart.
 $riskChanges = @{ block_overlapping_events = $true; block_overlapping_players = $true;
-    unit_size_usd = '5'; daily_loss_limit = $null }
+    unit_size_usd = '5' }
+$fixedNativeCash = $isNative -and $current.risk.cash_policy -eq 'prophetx_exchange_rejection'
 if ($isPaper) {
     $riskChanges.max_order_stake = '5'
-} else {
+    $riskChanges.daily_loss_limit = $null
+} elseif (-not $fixedNativeCash) {
     $riskChanges.available_cash_only = $true
     $riskChanges.stake_sizing = 'quarter_kelly'
     # This script configures shared input feeds. Preserve any stricter native
@@ -166,8 +208,29 @@ if ($isPaper) {
     # operator; a restart must not silently remove the pilot's risk cap.
 }
 $riskBody = $riskChanges | ConvertTo-Json -Compress
-Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
-    -ContentType 'application/json' -Body $riskBody -TimeoutSec 30 | Out-Null
+try {
+    Invoke-RestMethod -Uri "$baseUrl/api/settings" -Method Post -Headers $headers `
+        -ContentType 'application/json' -Body $riskBody -TimeoutSec 30 | Out-Null
+} catch {
+    # A busy live scanner can complete an idempotent settings write after the
+    # HTTP client times out. Verify persisted state instead of blindly retrying.
+    if (-not $isNative) { throw }
+    $after = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 30
+    $cashModeMatches = if ($fixedNativeCash) {
+        $after.risk.cash_policy -eq 'prophetx_exchange_rejection' -and
+        $after.risk.available_cash_only -eq $false -and
+        $after.risk.stake_sizing -eq 'capped'
+    } else {
+        $after.risk.available_cash_only -eq $true -and
+        $after.risk.stake_sizing -eq 'quarter_kelly'
+    }
+    if ($after.auto_trade -ne $false -or $after.kill_switch -ne $true -or
+        $after.risk.block_overlapping_events -ne $true -or
+        $after.risk.block_overlapping_players -ne $true -or
+        -not $cashModeMatches -or
+        [decimal]$after.risk.unit_size_usd -ne [decimal]5) { throw }
+    Write-Host 'Verified persisted native risk settings after delayed control response.'
+}
 
 if ($isPaper) {
     # A newly started consumer may have missed the game's initial snapshot.
@@ -217,6 +280,10 @@ Write-Host 'Source feeds may need several seconds to authenticate and publish a 
 if ($isPaper) {
     Write-Host 'Paper comparison: Parlay targets plus matched Oddize NBA references; hypothetical offers, capacity and fills; $5 simulated stake cap.'
 } else {
-    Write-Host 'Native risk draft: quarter-Kelly, $5 reporting unit, verified available cash required; real stake authorization remains off.'
+    if ($fixedNativeCash) {
+        Write-Host 'Native risk: reviewed ProphetX fixed-stake exchange-rejection cash policy preserved; $5 reporting unit.'
+    } else {
+        Write-Host 'Native risk: quarter-Kelly, verified available cash, $5 reporting unit.'
+    }
 }
-Write-Host 'Quote active status and settlement equivalence remain unverified. Automatic native orders remain paused.'
+Write-Host "Automatic native orders: $($result.auto_trade). Current source, market and launch checks remain mandatory."

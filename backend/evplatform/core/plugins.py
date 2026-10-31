@@ -239,10 +239,22 @@ class PluginRegistry:
             record.health = {"status": "disabled", "message": "Disabled by operator"}
 
     def public(self):
+        def visible_health(record):
+            if record.enabled:
+                snapshot = getattr(record.plugin, "health_snapshot", None)
+                if callable(snapshot):
+                    try:
+                        return snapshot()
+                    except Exception as exc:
+                        return {"status": "error", "message": f"Health snapshot failed: {type(exc).__name__}"}
+            return record.health
+
         def credential_status(record):
             if record.health.get("authenticated") is True:
                 return "authenticated"
             if record.health.get("state") == "unauthorized":
+                return "rejected"
+            if record.health.get("private_auth_failure") in {"unauthorized", "access_denied"}:
                 return "rejected"
             names_for_config = getattr(record.plugin, "credential_names", None)
             if callable(names_for_config):
@@ -255,7 +267,7 @@ class PluginRegistry:
 
         return [{
             "manifest": r.plugin.manifest.model_dump(mode="json"),
-            "enabled": r.enabled, "health": r.health,
+            "enabled": r.enabled, "health": visible_health(r),
             "credential_status": credential_status(r),
             "config": r.config,
         } for r in self.records.values()]

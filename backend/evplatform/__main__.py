@@ -4,10 +4,11 @@ from dotenv import load_dotenv
 
 from .api import create_app
 from .core.config import Settings
+from .core.paths import PROJECT_ROOT
 
 
 def main():
-    load_dotenv(".env", override=False)
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
     parser = argparse.ArgumentParser(description="Local EV platform")
     parser.add_argument("--mode", choices=["demo", "paper", "sandbox", "production"], default=None)
     parser.add_argument("--auto-trade", action="store_true", help="Explicitly enable simulated execution")

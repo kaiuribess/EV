@@ -67,7 +67,7 @@ def test_sequence_gap_requires_new_snapshot():
 def kalshi_snapshot(ticker="A", seq=1):
     return {"type": "orderbook_snapshot", "sid": 4, "seq": seq,
             "msg": {"market_ticker": ticker, "yes_dollars_fp": [["0.48", "5.00"]],
-                    "no_dollars_fp": [["0.46", "9.00"]]}}
+                    "no_dollars_fp": [["0.54", "9.00"]]}}
 
 
 def test_kalshi_executable_asks_and_subscription_sequence():
@@ -76,7 +76,7 @@ def test_kalshi_executable_asks_and_subscription_sequence():
     book.apply(kalshi_snapshot("B", 2))
     assert book.asks("A", "yes") == [(Decimal(".54"), Decimal("9"))]
     book.apply({"type": "orderbook_delta", "sid": 4, "seq": 3,
-                "msg": {"market_ticker": "A", "side": "no", "price_dollars": ".46", "delta_fp": "-3"}})
+                "msg": {"market_ticker": "A", "side": "no", "price_dollars": ".54", "delta_fp": "-3"}})
     assert book.asks("A", "yes") == [(Decimal(".54"), Decimal("6"))]
     with pytest.raises(SequenceGap):
         book.apply({"type": "orderbook_delta", "sid": 4, "seq": 5,
@@ -91,6 +91,9 @@ def test_kalshi_no_buy_maps_to_yes_ask():
     assert body["price"] == "0.5800"
     assert body["count"] == "3.00"
     assert body["cancel_order_on_pause"] is True
+    # V2 auto-routes by ticker when exchange_index is omitted; NBA is not shard 0.
+    assert "exchange_index" not in body
+    assert body["time_in_force"] == "immediate_or_cancel"
 
 
 @pytest.mark.parametrize("price", [".667", "0", "1", ".0001", "NaN"])
@@ -103,6 +106,8 @@ def test_novig_contract_value_is_one_cent():
     body = NovigClient.order_body("3f2504e0-4f89-11d3-9a0c-0305e82c3301", Decimal(".665"), 110,
                                  "7c9e6679-7425-40de-944b-e07fc1f90ae7")
     assert Decimal(body["price"]) * body["qty"] * Decimal(".01") == Decimal(".73150")
+    assert Decimal(body["qty"]) * Decimal(".01") == Decimal("1.10000")
+    assert body["tif"] == "IOC"
     assert NovigClient.get_manifest()["capabilities"]["payout_usd"] == "0.01"
     assert NovigClient.get_manifest()["capabilities"]["client_id_deduplicated_by_exchange"] is False
 
@@ -349,7 +354,7 @@ async def test_kalshi_stream_reconnect_invalidates_then_resnapshots(monkeypatch)
     sent = []
     sessions = [
         [kalshi_snapshot(), {"type": "orderbook_delta", "sid": 4, "seq": 3,
-                             "msg": {"market_ticker": "A", "side": "no", "price_dollars": ".46", "delta_fp": "1"}}],
+                             "msg": {"market_ticker": "A", "side": "no", "price_dollars": ".54", "delta_fp": "1"}}],
         [kalshi_snapshot(seq=1)],
     ]
     class Socket:

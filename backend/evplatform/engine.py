@@ -4,7 +4,7 @@ import asyncio
 import heapq
 import time
 from collections import OrderedDict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from .core.bus import EventBus, SchemaRegistry
@@ -20,8 +20,8 @@ from .core.native_oms import NativeOrder, NativeSettlement
 from .core.native_pricing import NativeBook, NativeCandidate
 from .core.native_runtime import NativeRuntime, NativeSignalObservation
 from .core.plugins import ExecutionVenue, InputPlugin, PluginContext, PluginRegistry, StrategyPlugin
-from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, resolved_reference_policy, worst_fee
-from .core.reference_profiles import freshness_rule, quote_eligibility
+from .core.pricing import NoSignal, expected_fee, fair_value, market_config, opportunity, resolved_reference_policy, validate_fair_references, worst_fee
+from .core.reference_profiles import freshness_rule, quote_eligibility, trusted_quote_research_eligibility
 from .core.risk import RiskEngine, RiskRejected
 from .core.signals import ResultProvenance, SignalLedger, SignalObservation, SignalResultImport
 from .core.storage import Storage
@@ -31,6 +31,7 @@ from .plugins.positive_ev import PositiveEV
 from .plugins.native_positive_ev import NativePositiveEV
 from .plugins.parlay_paper import ParlayPaperEV, ParlayPaperInput
 from .plugins.oddize_paper import OddizePaperInput
+from .plugins.oddize_research import OddizeResearchInput
 
 
 class Notice(Contract):
@@ -58,6 +59,8 @@ class Engine:
             self.schemas.register(name, 1, model)
         self.bus = EventBus(self.schemas, self.risk.halt)
         self.metrics = Metrics()
+        from .core.paths import runtime_database_path
+        self.settings.database_path = str(runtime_database_path(self.settings.database_path))
         self.storage = Storage(self.settings.database_path)
         self.storage.on_failure = self.risk.halt
         self.signal_ledger = SignalLedger(self.storage)
@@ -68,14 +71,25 @@ class Engine:
         self.quote_verification_latches = {}
         self.books: dict[str, dict[tuple[str, str], OrderBook]] = {}
         self.opportunities = {}
+        self.reference_estimates = {}
+        self.reference_fairs = {}
+        self.consensus_estimates = {}
+        self.consensus_fairs = {}
+        self.research_history = deque(maxlen=100)
+        self._last_current_research = {}
+        self._last_current_consensus = {}
         self.signals = {}
         # Full raw inputs stay in the audit log. Repeating an unchanged
         # no-candidate evaluation for the same market every feed tick otherwise
         # writes the entire pricing policy and quote universe thousands of
         # times without creating a new signal episode.
         self._signal_audit_state = OrderedDict()
+        self._signal_audit_estimate_fingerprints = {}
+        self._signal_publish_lock = asyncio.Lock()
+        self._last_signal_publication_at = None
         self.history = {}
         self.latest_typed = {}
+        self.game_states: dict[str, GameState] = {}
         self.expirations = []
         self.expiration_revisions = {}
         self.events = deque(maxlen=100)
@@ -84,11 +98,16 @@ class Engine:
         self.registry.register(DemoInput(), enabled=(self.settings.mode in {"demo", "paper"}
                                                   and self.settings.sample_feed_enabled))
         self.registry.register(PositiveEV(), enabled=True)
-        self.registry.register(NativePositiveEV(), enabled=False)
+        # The native pricing strategy only emits signals. Starting an explicitly
+        # requested native workspace must not leave its reviewed strategy absent
+        # from readiness; the separate risk controls still veto all orders.
+        self.registry.register(NativePositiveEV(), enabled=(self.settings.mode in {"sandbox", "production"}
+            and self.settings.live_enabled))
         self.registry.register(ParlayPaperEV(), enabled=(self.settings.mode == "paper"
             and not self.settings.sample_feed_enabled))
         self.registry.register(ParlayPaperInput(self), enabled=False)
         self.registry.register(OddizePaperInput(self), enabled=False)
+        self.registry.register(OddizeResearchInput(self), enabled=(self.settings.mode == "production"))
         self.registry.register(self.paper, enabled=True)
         self.registry.configure("synthetic_schedule", {"interval": self.settings.demo_interval, "seed": self.settings.demo_seed})
         self.registry.configure("positive_ev", self.settings.pricing.model_dump(mode="json"))
@@ -171,6 +190,8 @@ class Engine:
         await self.native.start()
         if saved.get("kill_switch", False) or saved.get("unclean_shutdown", False):
             self.risk.halt("Persisted emergency stop; reset explicitly")
+        if self.settings.mode in {"sandbox", "production"} and not self.risk.kill_switch:
+            self.risk.halt("Native trading authorization never survives restart")
         await self.storage.save_config("unclean_shutdown", True)
         self.risk.auto_trade = self.settings.auto_trade and not self.risk.kill_switch and self.settings.mode in {"demo", "paper"}
         from .plugins.external import register_external
@@ -188,6 +209,7 @@ class Engine:
             asyncio.create_task(self._audit(), name="audit-enqueue"),
             asyncio.create_task(self._dashboard_events(), name="dashboard-observer"),
             asyncio.create_task(self._maintenance(), name="freshness-fill-maintenance"),
+            asyncio.create_task(self._health_loop(), name="plugin-health-refresh"),
             asyncio.create_task(self._storage_maintenance(), name="storage-retention"),
             asyncio.create_task(self._settlement_loop(), name="settlement-accounting"),
             asyncio.create_task(self._signal_loop(), name="signal-ledger"),
@@ -262,6 +284,22 @@ class Engine:
             exception = task.exception()
             self.risk.halt(f"Critical worker stopped: {task.get_name()} ({type(exception).__name__})")
 
+    def stopped_workers(self):
+        """Expose failed core tasks to the local process supervisor."""
+        if self.stopping:
+            return []
+        return [task.get_name() for task in self.tasks if task.done()]
+
+    def stopped_plugin_workers(self):
+        """A failed input worker or startup can recover without disturbing other feeds."""
+        if self.stopping:
+            return []
+        return [name for name, record in self.registry.records.items()
+                if (((record.enabled or self._plugin_enable_preferences.get(name))
+                     and (task := getattr(record.plugin, "task", None)) is not None and task.done())
+                    or (self._plugin_enable_preferences.get(name)
+                        and record.health.get("status") == "error"))]
+
     async def notice(self, level, message, component):
         await self.bus.publish(Envelope(schema_name="system.notice", source=component,
                                        payload=Notice(level=level, message=message, component=component)))
@@ -287,6 +325,14 @@ class Engine:
                         refund_fees_returned=payload.refund_fees_returned)
                 else:
                     await self.signal_ledger.process(event.payload)
+            except ValueError as exc:
+                if str(exc) != "Signal observations must be processed in timestamp order":
+                    raise
+                # A delayed historical observation cannot replace a newer
+                # episode. Keep the read-only scanner alive, but halt execution
+                # until the discarded audit observation is reviewed.
+                self.metrics.counters["out_of_order_signal_observations"] += 1
+                self.risk.halt("Out-of-order signal observation rejected; review signal provenance")
             finally:
                 self.signal_queue.task_done()
 
@@ -294,19 +340,27 @@ class Engine:
         identity = market.identity()
         now_monotonic = time.monotonic()
         input_presence = (bool(self.quotes.get(market.id)), bool(self.books.get(market.id)))
+        sharp = self.reference_estimates.get(market.id)
+        consensus = self.consensus_estimates.get(market.id)
+        estimate_fingerprint = (
+            tuple(sorted(sharp["probabilities"].items())) if sharp else None,
+            tuple(sorted(consensus["probabilities"].items())) if consensus else None)
         previous = self._signal_audit_state.get(market.id)
-        if (status == "NO SIGNAL" and previous is not None
-                and previous[0] == identity and previous[1] == "NO SIGNAL"
+        if (status in {"NO SIGNAL", "RESEARCH ONLY"} and previous is not None
+                and previous[0] == identity and previous[1] == status
                 and now_monotonic - previous[2] < 60
                 and previous[3] == input_presence
-                and previous[4] is self.settings.pricing):
+                and previous[4] is self.settings.pricing
+                and self._signal_audit_estimate_fingerprints.get(market.id) == estimate_fingerprint):
             self.metrics.counters["coalesced_no_signal_evaluations"] += 1
             return
         self._signal_audit_state[market.id] = (identity, status, now_monotonic, input_presence,
                                                self.settings.pricing)
+        self._signal_audit_estimate_fingerprints[market.id] = estimate_fingerprint
         self._signal_audit_state.move_to_end(market.id)
         while len(self._signal_audit_state) > 10000:
-            self._signal_audit_state.popitem(last=False)
+            old_market_id, _ = self._signal_audit_state.popitem(last=False)
+            self._signal_audit_estimate_fingerprints.pop(old_market_id, None)
         config = market_config(self.settings.pricing, market)
         eligible = tuple(c.id for c in candidates
                          if c.execution_eligible and c.ev_per_contract >= config.min_ev and c.roi >= config.min_roi)
@@ -330,7 +384,27 @@ class Engine:
             strategies=tuple(name for name, record in self.registry.records.items()
                              if isinstance(record.plugin, StrategyPlugin)),
         )
-        await self.bus.publish(Envelope(schema_name="signal.observation", source="strategy-engine", payload=observation))
+        await self._publish_signal_observation(observation)
+
+    async def _publish_signal_observation(self, observation):
+        # Expiration and feed workers can finish evaluations concurrently.
+        # Stamp under one publish lock so queue order and the durable signal
+        # cursor agree; source quote clocks in the payload remain unchanged.
+        async with self._signal_publish_lock:
+            now = utcnow()
+            previous = getattr(self, "_last_signal_publication_at", None)
+            if previous is not None and now <= previous:
+                # evaluated_at is the local processing order, not a sportsbook
+                # observation clock. Windows wall-clock adjustments can move it
+                # backwards while the event queue remains correctly ordered.
+                # A material clock regression still halts execution.
+                if previous - now > timedelta(seconds=1):
+                    self.risk.halt("Local signal processing clock regressed; review system time")
+                now = previous + timedelta(microseconds=1)
+            self._last_signal_publication_at = now
+            ordered = observation.model_copy(update={"evaluated_at": now})
+            await self.bus.publish(Envelope(schema_name="signal.observation",
+                                            source="strategy-engine", payload=ordered))
 
     async def record_signal_result(self, payload: SignalResultImport):
         # Complete all earlier observations before matching a supplied result.
@@ -369,6 +443,12 @@ class Engine:
         payload = event.payload
         self.latest_typed[event.schema_name] = payload
         market_id = getattr(payload, "market_id", None)
+        if isinstance(payload, GameState):
+            old = self.game_states.get(payload.event_id)
+            if (old is None or old.source_time is None or
+                    payload.source_time is not None and payload.source_time >= old.source_time):
+                self.game_states[payload.event_id] = payload
+            return
         if isinstance(payload, Market):
             market_id = payload.id
             self.matcher.register(payload)
@@ -385,7 +465,14 @@ class Engine:
             # Only a documented outcome observation may replace the legacy
             # source clock. Transport receipt never promotes an old quote.
             old_clock = (old.source_observed_at if old.observation_verified else old.source_time) if old else None
-            strict = self.settings.pricing.reference_profile_mode == "strict"
+            # Source-only trusted estimates have no quote-bound observation
+            # clock. Their carried oldest-side price-change time is not a
+            # same-observation watermark for a later one-sided stream delta.
+            # Keep these latches unchanged for reviewed production markets.
+            market = self.markets[market_id]
+            trusted_research = (market.extensions.get("research_only") is True
+                and market_config(self.settings.pricing, market).reference_quality_mode == "trusted_provider")
+            strict = self.settings.pricing.reference_profile_mode == "strict" and not trusted_research
             source_key = (market_id, *key)
             watermark = self.quote_observation_watermarks.get(source_key)
             if strict and watermark is not None:
@@ -465,6 +552,165 @@ class Engine:
                                      (calculated_at - received).total_seconds() * 1000)
         # Non-odds strategies can also subscribe independently to typed bus events in start().
 
+    def refresh_reference_estimate(self, market_id):
+        """Refresh the read-only fair-price display without routing an order."""
+        market = self.markets[market_id]
+        if market.extensions.get("paper_only"):
+            return
+        quotes = list(self.quotes.get(market_id, {}).values())
+        try:
+            fair = fair_value(market, quotes, self.settings.pricing)
+            from .core.native_pricing import research_native_estimate
+            native_research, native_rejections = [], []
+            matching_native = [book for key, book in self.native.books.items() if key[0] == market_id]
+            for native_book in matching_native:
+                try:
+                    native_research.append(research_native_estimate(
+                        market, fair, native_book, self.settings.pricing))
+                except NoSignal as exc:
+                    native_rejections.append(str(exc))
+            self.reference_fairs[market_id] = fair
+            self.reference_estimates[market_id] = {
+                "market_id": market_id, "strategy": "sharp_books", "event_name": market.event_name,
+                "sport": market.sport, "league": market.league,
+                "market_type": market.market_type, "player": market.player,
+                "statistic": market.statistic,
+                "line": str(market.line) if market.line is not None else None,
+                "start_time": market.start_time.isoformat(),
+                "probabilities": {k: str(v) for k, v in fair.probabilities.items()},
+                "references": list(fair.references),
+                "model": fair.model, "reference_profile_id": fair.reference_profile_id,
+                "reference_disagreement_probability": str(fair.disagreement),
+                "quality_mode": market_config(self.settings.pricing, market).reference_quality_mode,
+                "execution_eligible": fair.execution_eligible and not market.extensions.get("research_only"),
+                "native_market_matched": not market.extensions.get("research_only") and bool(matching_native),
+                "native_research_estimates": native_research,
+                "limitations": list(fair.ineligibility_reasons) + ([
+                    "Source identity only; no reviewed native market mapping"] if market.extensions.get("research_only") else [])
+                    + list(dict.fromkeys(native_rejections)),
+                "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
+                "status": ("PROVISIONAL POSITIVE EV" if any(
+                    estimate["positive_estimate"] for estimate in native_research)
+                    else "REFERENCE ESTIMATE")}
+        except NoSignal as exc:
+            self._archive_research(market_id, str(exc))
+            self.reference_estimates.pop(market_id, None)
+            self.reference_fairs.pop(market_id, None)
+        self.refresh_consensus_estimate(market_id)
+
+    def refresh_consensus_estimate(self, market_id):
+        """Price a second, order-isolated research strategy from the same quotes."""
+        market = self.markets[market_id]
+        if market.extensions.get("paper_only"):
+            return
+        from .core.multi_book_consensus import consensus_fair_value, leave_one_book_out
+
+        try:
+            fair, _, weighting = consensus_fair_value(market,
+                list(self.quotes.get(market_id, {}).values()), self.settings.pricing)
+            self.consensus_fairs[market_id] = fair
+            self.consensus_estimates[market_id] = {
+                "market_id": market_id, "strategy": "multi_book_consensus",
+                "event_name": market.event_name, "sport": market.sport,
+                "phase": "inplay" if market.status == "live" else "pregame",
+                "league": market.league, "market_type": market.market_type,
+                "player": market.player, "statistic": market.statistic,
+                "line": str(market.line) if market.line is not None else None,
+                "start_time": market.start_time.isoformat(),
+                "probabilities": {key: str(value) for key, value in fair.probabilities.items()},
+                "references": list(fair.references), "model": fair.model,
+                "reference_profile_id": fair.reference_profile_id,
+                "weighting_basis": weighting, "independent_book_count": len(fair.references),
+                "book_corroboration": "three_or_more" if len(fair.references) >= 3 else "two_book_baseline",
+                "reference_disagreement_probability": str(fair.disagreement),
+                "leave_one_book_out": leave_one_book_out(fair),
+                "quality_mode": "trusted_provider", "execution_eligible": False,
+                "native_market_matched": False, "native_research_estimates": [],
+                "limitations": ["Research only; no consensus strategy execution approval",
+                    "Unknown active status and quote-observation age remain explicit per book",
+                    "Book weights are research assumptions, not calibrated probabilities"]
+                    + (["Post-start price-row time is not proof of current event state or an executable live selection"]
+                       if market.status == "live" else []),
+                "calculated_at": fair.calculated_at.isoformat(), "synthetic": fair.synthetic,
+                "status": "REFERENCE ESTIMATE",
+            }
+        except NoSignal as exc:
+            self._archive_research(market_id, str(exc), strategy="multi_book_consensus")
+            self.consensus_estimates.pop(market_id, None)
+            self.consensus_fairs.pop(market_id, None)
+
+    def _archive_research(self, market_id, reason, *, strategy="sharp_books"):
+        """Retain the last evaluated evidence with its original clocks, never as a live offer."""
+        cache = (self._last_current_research if strategy == "sharp_books" else
+                 self._last_current_consensus)
+        previous = cache.pop(market_id, None)
+        if previous is None:
+            return
+        self.research_history.append({**previous, "historical": True,
+            "status": "EXPIRED RESEARCH", "expiration_reason": reason,
+            "native_research_stage": "references_expired",
+            "native_discovery_reason": "Sportsbook references expired; any earlier native depth and estimated EV are historical only",
+            "expired_at": utcnow().isoformat(), "execution_eligible": False,
+            "native_market_matched": False,
+            "native_research_estimates": [{**offer, "historical": True,
+                "execution_eligible": False} for offer in previous["native_research_estimates"]]})
+
+    def public_reference_estimates(self):
+        """Use current monitored depth without querying a venue or routing orders."""
+        result = []
+        for strategy, estimates, fairs in (("multi_book_consensus", getattr(self, "consensus_estimates", {}),
+                                            getattr(self, "consensus_fairs", {})),
+                                           ("sharp_books", self.reference_estimates,
+                                            self.reference_fairs)):
+          for market_id, row in estimates.items():
+            market, fair = self.markets.get(market_id), fairs.get(market_id)
+            pricing = getattr(getattr(self, "settings", None), "pricing", None)
+            if strategy == "multi_book_consensus" and market:
+                from .core.multi_book_consensus import consensus_scope
+                try:
+                    pricing, _ = consensus_scope(market,
+                        list(self.quotes.get(market_id, {}).values()), pricing)
+                except NoSignal as exc:
+                    self._archive_research(market_id, str(exc), strategy=strategy)
+                    continue
+            if market and fair and pricing is not None and (strategy == "multi_book_consensus" or
+                    market_config(self.settings.pricing, market).reference_quality_mode == "trusted_provider"):
+                try:
+                    validate_fair_references(market, fair, pricing, utcnow())
+                except NoSignal as exc:
+                    self._archive_research(market_id, str(exc), strategy=strategy)
+                    continue  # Keep the historical audit record, not a stale live card.
+            comparisons = (self.native.research_comparisons(market, fair, pricing_config=pricing)
+                if strategy == "multi_book_consensus" and market and fair else
+                self.native.research_comparisons(market, fair) if market and fair else [])
+            # A discovery lead's prior calculation can outlive its native
+            # stream. Keep reviewed native mappings on their existing path.
+            research_lead = bool(market and market.extensions.get("research_only"))
+            all_estimates = (comparisons if research_lead else
+                             [*row.get("native_research_estimates", []), *comparisons])
+            stage, discovery_reason = self.native.research_discovery_status(market, all_estimates)
+            displayed = {**row, "native_market_matched": bool(comparisons) if research_lead else
+                           bool(comparisons) or row["native_market_matched"],
+                           "native_research_estimates": all_estimates,
+                           "native_research_stage": stage,
+                           "native_discovery_reason": discovery_reason,
+                           "native_identity_rejections": (self.native.research_identity_rejections(market)
+                               if hasattr(self.native, "research_identity_rejections") else []),
+                           "native_venue_funnel": (self.native.research_venue_funnel(market, comparisons)
+                               if market and hasattr(self.native, "research_venue_funnel") else {}),
+                           "native_match_count": len({(item["venue"], item["native_market_id"])
+                                                      for item in comparisons}),
+                           "status": ("PROVISIONAL POSITIVE EV" if any(
+                               item.get("positive_after_costs") or item.get("positive_estimate")
+                               for item in all_estimates) else
+                               "REFERENCE ESTIMATE" if research_lead else row["status"])}
+            if row["quality_mode"] == "trusted_provider":
+                cache = (self._last_current_consensus if strategy == "multi_book_consensus" else
+                         self._last_current_research)
+                cache[market_id] = displayed
+            result.append(displayed)
+        return result
+
     async def recalculate(self, market_id, event=None):
         market = self.markets[market_id]
         await self.native.recalculate(market_id, event)
@@ -473,6 +719,7 @@ class Engine:
             del self.opportunities[key]
         quotes = list(self.quotes.get(market_id, {}).values())
         books = list(self.books.get(market_id, {}).values())
+        self.refresh_reference_estimate(market_id)
         if not any(r.enabled and isinstance(r.plugin, StrategyPlugin) for r in self.registry.records.values()):
             self.signals[market_id] = {"status": "NO SIGNAL", "reason": "Strategy disabled"}
             await self._record_signal(market, **self.signals[market_id])
@@ -511,7 +758,10 @@ class Engine:
                     strategy.health = {"status": "error", "message": f"Strategy stopped: {type(exc).__name__}"}
                     self.risk.halt("Strategy failure")
         if not generated:
-            self.signals[market_id] = {"status": "NO SIGNAL", "reason": "; ".join(reasons) if reasons else "No executable synchronized book"}
+            reference_only = market_id in self.reference_estimates
+            self.signals[market_id] = {"status": "RESEARCH ONLY" if reference_only else "NO SIGNAL",
+                                       "reason": ("Fair sportsbook probability available; no matched executable native offer"
+                                                  if reference_only else "; ".join(reasons) if reasons else "No executable synchronized book")}
             await self._record_signal(market, **self.signals[market_id])
             return
         config = market_config(self.settings.pricing, market)
@@ -543,7 +793,15 @@ class Engine:
                  for q in self.quotes.get(market_id, {}).values() if q.source_time and q.status == "active"]
         if config.reference_profile_mode == "strict":
             market = self.markets[market_id]
-            times = [q.source_observed_at.timestamp() + float(rule.ttl_seconds)
+            if config.reference_quality_mode == "trusted_provider":
+                times = [q.received_at.timestamp() + config.trusted_max_delivery_age_ms / 1000
+                         for q in self.quotes.get(market_id, {}).values()
+                         if q.status in {"active", "unknown"}]
+                times += [q.source_scope_poll_at.timestamp() + config.trusted_max_indicator_age_ms / 1000
+                          for q in self.quotes.get(market_id, {}).values()
+                          if q.source_scope_poll_at and q.status in {"active", "unknown"}]
+            else:
+                times = [q.source_observed_at.timestamp() + float(rule.ttl_seconds)
                      for q in self.quotes.get(market_id, {}).values()
                      if q.source_observed_at and q.observation_verified and q.status == "active"
                      and (rule := freshness_rule(config, market, q.provider, q.bookmaker)) is not None]
@@ -630,9 +888,12 @@ class Engine:
                         cap = self.risk.config.max_native_order_attempts
                         if (cap is not None and len(self.risk.native_orders) >= cap
                                 and self.risk.auto_trade):
-                            self.risk.auto_trade = False
-                            await self.notice("info", "Native order attempt limit reached; automatic trading paused", "operator")
+                            self.risk.halt("Native order attempt limit reached")
+                            await self.storage.save_config("kill_switch", True)
+                            await self.notice("info", "Native order attempt limit reached; emergency stop restored", "operator")
                 else:
+                    if self.settings.mode in {"sandbox", "production"}:
+                        raise RiskRejected("Native one-shot authorization cannot route a non-native strategy")
                     await self.oms.execute(c, self.markets[c.market_id], self.book(c.market_id, c.venue, c.outcome), self.settings.mode)
                 self.metrics.counters["orders_routed"] += 1
             except RiskRejected as exc:
@@ -646,6 +907,9 @@ class Engine:
     async def _maintenance(self):
         while True:
             await asyncio.sleep(.5)
+            if (self.settings.mode in {"sandbox", "production"}
+                    and self.risk.expire_native_authorization()):
+                await self.storage.save_config("kill_switch", True)
             now = utcnow().timestamp()
             while self.expirations and self.expirations[0][0] <= now:
                 _, revision, market_id = heapq.heappop(self.expirations)
@@ -657,10 +921,15 @@ class Engine:
             positive = {k for k, c in self.opportunities.items()
                         if c.execution_eligible and c.ev_per_contract >= self.settings.pricing.min_ev}
             self.metrics.update_opportunities(positive, utcnow())
+
+    async def _health_loop(self):
+        """Health reporting must not wait behind pricing or order maintenance."""
+        while True:
+            await asyncio.sleep(1)
             for name, record in self.registry.records.items():
                 if record.enabled:
                     try:
-                        record.health = await record.plugin.health_check()
+                        record.health = await asyncio.wait_for(record.plugin.health_check(), timeout=2)
                     except Exception as exc:
                         record.health = {"status": "error", "message": type(exc).__name__}
 
@@ -732,22 +1001,59 @@ class Engine:
         await self.recalculate(result.market_id)
         await self.notice("info", f"Simulated settlement recorded; realized P&L {realized:.2f}", "paper_settlement")
 
-    async def control(self, *, auto_trade=None, kill_switch=None, expected_launch_digest=None):
+    async def control(self, *, auto_trade=None, kill_switch=None, expected_launch_digest=None,
+                      authorization_expires_at=None, native_venues=None):
+        standby_release = (self.settings.mode in {"sandbox", "production"}
+                           and kill_switch is False and auto_trade is False)
+        native_mode = self.settings.mode in {"sandbox", "production"}
+        selected_venues = frozenset()
+        if native_venues is not None and (not native_mode or auto_trade is not True):
+            raise ValueError("Native venue selection requires an explicit native automation request")
+        if native_mode and auto_trade is True:
+            profiles = self.native.profiles_by_venue()
+            if native_venues is None:
+                if len(profiles) > 1:
+                    raise ValueError("Select the exact reviewed venues for automatic execution")
+                selected_venues = frozenset(profiles)
+            else:
+                selected_venues = frozenset(native_venues)
+                if (not selected_venues or len(selected_venues) != len(native_venues)
+                        or not selected_venues <= profiles.keys()):
+                    raise ValueError("Native execution venues are missing, duplicated or unreviewed")
+            if self.risk.auto_trade and selected_venues != self.risk.native_enabled_venues:
+                raise ValueError("Pause native automation before changing its venue scope")
         def check_native_activation():
-            if not auto_trade or self.settings.mode in {"demo", "paper"}:
+            if self.settings.mode in {"demo", "paper"} or not (auto_trade or kill_switch is False):
                 return
-            report = self.native.report()
-            if (expected_launch_digest is not None
-                    and expected_launch_digest != report.profile_digest):
+            now = utcnow()
+            if (authorization_expires_at is None or authorization_expires_at.tzinfo is None
+                    or not now < authorization_expires_at <= now + timedelta(hours=24)):
+                raise ValueError("Native trading requires an explicit authorization expiry within 24 hours")
+            if kill_switch is not False:
+                existing = self.risk.native_authorization_expires_at
+                if existing is None or existing <= now or authorization_expires_at > existing:
+                    raise ValueError("Release the kill switch with a bounded authorization before enabling orders")
+            if auto_trade is True and selected_venues:
+                report = (self.native.report() if len(self.native.profiles_by_venue()) == 1
+                          and self.native.portfolio is None else self.native.report(venues=selected_venues))
+            else:
+                report = self.native.report()
+            if (expected_launch_digest is None or expected_launch_digest != report.profile_digest):
                 raise ValueError("The reviewed launch scope changed; refresh and review before enabling")
-            if not self.settings.live_enabled or not report.safe_to_arm:
+            if not self.settings.live_enabled or (not standby_release and not report.safe_to_arm):
                 raise ValueError("Native execution requires explicit enablement and all launch checks passing")
 
         # Reject an invalid combined enable/reset before modifying or persisting
         # the emergency stop. An explicit stop still takes precedence.
+        if (kill_switch is False and self.settings.mode in {"sandbox", "production"}
+                and auto_trade is None):
+            raise ValueError("Explicitly keep automation paused or enable it with the reviewed scope")
+        if standby_release and self.risk.auto_trade:
+            raise ValueError("Pause automation before releasing the emergency stop in standby")
         if kill_switch is not True:
             check_native_activation()
-        previous_stop = (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted)
+        previous_stop = (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted,
+                         self.risk.native_authorization_expires_at, self.risk.native_enabled_venues)
         if kill_switch is True:
             self.risk.halt("Operator emergency stop")
             await self.storage.save_config("kill_switch", True)
@@ -759,6 +1065,7 @@ class Engine:
             if self.native.manager.invalidated_settlements:
                 raise ValueError("Repair invalidated native settlement accounting before resetting")
             self.risk.kill_switch, self.risk.kill_reason = False, ""
+            self.risk.native_authorization_expires_at = authorization_expires_at
             self.halt_persisted = False
             await self.storage.save_config("kill_switch", False)
         if auto_trade is not None:
@@ -772,12 +1079,16 @@ class Engine:
                     # A new safety halt raised during the persistence await
                     # takes precedence over the state from before this request.
                     if not self.risk.kill_switch:
-                        self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted = previous_stop
+                        (self.risk.kill_switch, self.risk.kill_reason, self.halt_persisted,
+                         self.risk.native_authorization_expires_at,
+                         self.risk.native_enabled_venues) = previous_stop
                     await self.storage.save_config("kill_switch", self.risk.kill_switch)
                 raise
             if auto_trade and self.risk.kill_switch:
                 raise ValueError("Reset kill switch first")
             self.risk.auto_trade = auto_trade
+            if native_mode:
+                self.risk.native_enabled_venues = selected_venues if auto_trade else frozenset()
             if not auto_trade:
                 await self.oms.cancel_all()
                 await self.native.manager.cancel_all()
@@ -800,17 +1111,31 @@ class Engine:
 
     def quote_public(self, quote):
         market = self.markets.get(quote.market_id)
-        strict = self.settings.pricing.reference_profile_mode == "strict"
-        eligible, reasons, age = quote_eligibility(self.settings.pricing, market, quote, utcnow()) if market else (False, ("Unknown market",), None)
+        config = market_config(self.settings.pricing, market) if market else self.settings.pricing
+        strict = config.reference_profile_mode == "strict"
+        trusted = strict and config.reference_quality_mode == "trusted_provider"
+        eligible, reasons, age = ((trusted_quote_research_eligibility(config, market, quote, utcnow()) if trusted
+                                  else quote_eligibility(config, market, quote, utcnow()))
+                                  if market else (False, ("Unknown market",), None))
         paper_age = quote.age_ms()
         paper_usable = (bool(market and market.extensions.get("paper_only"))
             and quote.provider in {"parlay_paper_input", "oddize_paper_input"}
-            and quote.status == "active" and quote.quality == 1.0
+            and (quote.status == "active" or quote.provider == "oddize_paper_input"
+                 and quote.status == "unknown") and quote.quality == 1.0
             and paper_age is not None and 0 <= paper_age <= 600000)
-        return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": age,
+        observation_age = ((utcnow() - quote.source_observed_at).total_seconds() * 1000
+                           if quote.observation_verified and quote.source_observed_at else None)
+        poll_age = ((utcnow() - quote.source_scope_poll_at).total_seconds() * 1000
+                    if quote.source_scope_poll_at else None)
+        stored_age = ((utcnow() - quote.source_stored_at).total_seconds() * 1000
+                      if quote.source_stored_at else None)
+        return {**quote.model_dump(mode="json"), "age_ms": quote.age_ms(), "observation_age_ms": observation_age,
+                "scope_poll_age_ms": poll_age, "stored_price_age_ms": stored_age,
+                "delivery_age_ms": (utcnow() - quote.received_at).total_seconds() * 1000,
+                "trusted_research_usable": trusted and eligible,
                 "execution_freshness_reasons": reasons if strict else (),
                 "paper_comparison_usable": paper_usable,
-                "fresh": quote.status == "active" and (eligible if strict else quote.fresh(self.settings.pricing.max_quote_age_ms))}
+                "fresh": quote.status == "active" and (eligible and not trusted if strict else quote.fresh(config.max_quote_age_ms))}
 
     def market_detail(self, market_id):
         market = self.markets[market_id]
@@ -834,6 +1159,9 @@ class Engine:
         }
 
     def state(self):
+        from .core.cross_exchange_arb import scan_arbitrage_research
+
+        research_rows = self.public_reference_estimates()
         orders = list(self.risk.orders.values())
         filled = [o for o in orders if o.filled_quantity]
         positions = [{
@@ -852,17 +1180,25 @@ class Engine:
             "mode": self.settings.mode, "auto_trade": self.risk.auto_trade,
             "live_enabled": self.settings.live_enabled,
             "kill_switch": self.risk.kill_switch, "kill_reason": self.risk.kill_reason,
+            "native_authorization_expires_at": (self.risk.native_authorization_expires_at.isoformat()
+                if self.risk.native_authorization_expires_at else None),
+            "native_enabled_venues": sorted(self.risk.native_enabled_venues),
             "synthetic": self.settings.mode in {"demo", "paper"},
             "sample_feed_enabled": self.settings.sample_feed_enabled,
             "started_at": self.started_at.isoformat(),
             "timestamp": utcnow().isoformat(), "plugins": self.registry.public(),
             "markets": [m.model_dump(mode="json") for m in self.markets.values()],
+            "live_game_states": [state.model_dump(mode="json") for state in self.game_states.values()],
             "quotes": [self.quote_public(q) for values in self.quotes.values() for q in values.values()],
             "opportunities": sorted([self.candidate_public(c) for c in self.opportunities.values()], key=lambda c: Decimal(c["ev_per_contract"]), reverse=True),
+            "reference_estimates": research_rows,
+            "arbitrage_research": scan_arbitrage_research(research_rows),
+            "research_history": list(reversed(self.research_history))[:50],
             "orders": [o.model_dump(mode="json") for o in reversed(orders[-200:])],
             "native_orders": [o.model_dump(mode="json") for o in list(self.risk.native_orders.values())[-200:]],
             "native_signals": [o.model_dump(mode="json") for o in self.native.signals.values()],
-            "native_opportunities": [c.model_dump(mode="json") for c in self.native.candidates.values()],
+            "native_opportunities": [{**c.model_dump(mode="json"),
+                **self.native.candidate_disposition(c)} for c in self.native.candidates.values()],
             "positions": positions, "metrics": metrics,
             "risk": {**self.risk.config.model_dump(mode="json"), "total_exposure": str(self.risk.exposures()),
                      "daily_realized": str(self.risk.daily_realized), "position_conflicts_enforced": True},

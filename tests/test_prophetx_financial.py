@@ -34,6 +34,11 @@ def test_wallet_sync_accepts_only_bounded_provider_clock_skew():
             "gec_balance": "0", "unmatched_order_balance_status": "succeed",
             "unmatched_order_last_synced_at": iso(.6)}
     assert balance_facts({"data": data}, observed_at=NOW) == (D("25"), D("0"), D("0"))
+    data["gec_balance"] = "100"
+    assert balance_facts({"data": data}, observed_at=NOW)[0] == D("25")
+    with pytest.raises(ReconciliationError, match="exposure-credit"):
+        balance_facts({"data": data}, observed_at=NOW, funded_cash_only=True)
+    data["gec_balance"] = "0"
     data["unmatched_order_last_synced_at"] = iso(2.1)
     with pytest.raises(ReconciliationError):
         balance_facts({"data": data}, observed_at=NOW)
@@ -160,11 +165,30 @@ async def test_empty_order_null_cannot_bypass_reporting_clock(case, clock):
                               observed_at=NOW, require_clock=False)
 
 
-@pytest.mark.parametrize("cursor,nonempty", [(None, True), (False, False), (0, False), (" ", False)])
+@pytest.mark.parametrize("cursor,nonempty", [(False, False), (0, False), (" ", False)])
 async def test_empty_history_compatibility_does_not_weaken_other_cursors(case, cursor, nonempty):
     client = case[1]
     client.overrides["/v4/mm/get_order_history"] = lambda _: {
         "data": {"orders": [deepcopy(client.row)] if nonempty else [], "next_cursor": cursor},
+        "last_synced_at": iso()}
+    with pytest.raises(ReconciliationError):
+        await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
+
+
+async def test_observed_short_nonempty_order_null_cursor_has_fresh_source_clock(case):
+    client = case[1]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [deepcopy(client.row)], "next_cursor": None},
+        "last_synced_at": iso()}
+    result = await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
+    assert len(result.rows) == 1
+    assert result.end_marker == "observed_short_order_null"
+
+
+async def test_full_order_page_with_null_cursor_is_not_complete(case):
+    client = case[1]
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [deepcopy(client.row)] * 1000, "next_cursor": None},
         "last_synced_at": iso()}
     with pytest.raises(ReconciliationError):
         await reporting_pages(client, "/v4/mm/get_order_history", "orders", observed_at=NOW)
@@ -351,7 +375,182 @@ async def test_inventory_matches_owned_orders_positions_and_cash(case):
 async def test_inventory_missing_history_review_never_assumes_empty_account(case):
     order, client, _ = case
     result = await probe_prophetx_account(client, [order], observed_at=NOW)
-    assert not result.reconciled and result.position_count is None and not result.cash_available_verified
+    assert not result.reconciled and result.position_count is None and result.cash_available_verified
+    assert result.balance_usd == D("89.8")
+
+
+async def test_current_empty_inventory_uses_wallet_active_history_and_private_fence(case):
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    def active_status(params):
+        assert params["status"] in {"open", "inactive"}
+        assert 0 < params["to"] - params["from"] < 60 * 86400
+        return {"data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
+    client.overrides["/v4/mm/get_order_history"] = active_status
+    other = SimpleNamespace(venue="kalshi", environment="sandbox",
+        account_fingerprint="other", cost_usd=D("10"))
+    result = await probe_prophetx_account(client, observed_at=NOW,
+                                           external_positions=(other,))
+    assert result.reconciled and result.cash_available_verified
+    assert result.open_order_count == result.position_count == 0
+    assert result.external_position_count == 0 and result.external_cost_usd == 0
+    assert result.balance_usd == D("49.10")
+    assert client.private.matches(result, client=client)
+    assert [params["status"] for _, params in client.calls] == ["open", "inactive"]
+
+
+async def test_current_empty_inventory_timestamp_is_completion_time(case, monkeypatch):
+    from evplatform.venues import prophetx_account, prophetx_financial
+
+    _, client, _ = case
+    clock = {"now": NOW}
+    monkeypatch.setattr(prophetx_account, "utcnow", lambda: clock["now"])
+    monkeypatch.setattr(prophetx_financial, "utcnow", lambda: clock["now"])
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+
+    def active_status(params):
+        clock["now"] = NOW + timedelta(seconds=24)
+        client.balance["unmatched_order_last_synced_at"] = iso(24)
+        return {"data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(24)}
+
+    client.overrides["/v4/mm/get_order_history"] = active_status
+    result = await probe_prophetx_account(client)
+    assert result.reconciled and result.cash_available_verified
+    assert result.observed_at == NOW + timedelta(seconds=24)
+
+
+async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case):
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    client.overrides["/v4/mm/get_order_history"] = lambda params: {
+        "data": {"orders": [client.row] if params["status"] == "open" else [],
+                 "next_cursor": None}, "last_synced_at": iso()}
+    active = await probe_prophetx_account(client, observed_at=NOW)
+    assert not active.reconciled and active.open_order_count is None
+    assert "active-order history is not empty" in active.reason
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-1)}
+    lagging = await probe_prophetx_account(client, observed_at=NOW)
+    assert not lagging.reconciled
+    assert "reporting has not caught up" in lagging.reason
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
+    client.private.orders[OID] = ({"status": "open"}, 1)
+    private_active = await probe_prophetx_account(client, observed_at=NOW)
+    assert not private_active.reconciled
+    assert "private stream still has active" in private_active.reason
+
+
+async def test_current_empty_inventory_retries_one_lagging_reporting_watermark(case):
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    clocks = iter((iso(-1), iso(-1), iso(), iso()))
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": next(clocks)}
+    result = await probe_prophetx_account(client, observed_at=NOW)
+    assert result.reconciled and result.open_order_count == result.position_count == 0
+    assert [params["status"] for _, params in client.calls] == [
+        "open", "inactive", "open", "inactive"]
+
+
+async def test_current_empty_inventory_retries_stale_page_without_accepting_it(case, monkeypatch):
+    from evplatform.venues import prophetx_account
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    calls = iter((iso(-11), iso(), iso()))
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": next(calls)}
+    slept = []
+    async def pace(seconds):
+        slept.append(seconds)
+    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
+    result = await probe_prophetx_account(client, observed_at=NOW)
+    assert result.reconciled and result.balance_usd == D("49.10")
+    assert slept == [5]
+    assert [params["status"] for _, params in client.calls] == ["open", "open", "inactive"]
+
+
+async def test_current_empty_inventory_still_rejects_persistently_stale_report(case, monkeypatch):
+    from evplatform.venues import prophetx_account
+    _, client, _ = case
+    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-11)}
+    async def pace(_seconds):
+        pass
+    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
+    result = await probe_prophetx_account(client, observed_at=NOW)
+    assert not result.reconciled and result.open_order_count is None
+    assert "Reporting watermark is stale or in the future" in result.reason
+    assert [params["status"] for _, params in client.calls] == ["open", "open"]
+
+
+async def test_external_fill_allows_cash_diagnostic_without_certifying_inventory(case):
+    _, client, review = case
+    external = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint=review.account_fingerprint, cost_usd=D("1"))
+    result = await probe_prophetx_account(client, observed_at=NOW,
+                                          external_positions=(external,))
+    assert result.balance_usd == D("89.8") and result.cash_available_verified
+    assert result.external_position_count == 1 and result.external_cost_usd == D("1")
+    assert not result.reconciled and not result.trading_permission_verified
+    with pytest.raises(ReconciliationError, match="external fills"):
+        await probe_prophetx_account(client, review=review, observed_at=NOW,
+                                      external_positions=(external,))
+
+
+async def test_reviewed_current_empty_inventory_needs_no_lifetime_backfill(case):
+    _, client, old_review = case
+    client.balance.update(balance="50.10", matched_order_balance="0", unmatched_order_balance="0")
+    current = ProphetXAccountReview(account_fingerprint=old_review.account_fingerprint,
+        current_inventory_reviewed_at=NOW-timedelta(minutes=1),
+        current_inventory_scope_evidence="OFFLINE reviewed empty account inventory",
+        funded_cash_only=True, funding_scope_evidence="OFFLINE no GEC or LEC account evidence",
+        valid_until=NOW+timedelta(days=1))
+
+    def recent(params):
+        assert "updated_at_from" in params and "updated_at_to" in params
+        assert "from" not in params and "to" not in params
+        return {"data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
+
+    client.overrides["/v4/mm/get_order_history"] = recent
+    snapshot = await probe_prophetx_account(client, [], review=current, observed_at=NOW)
+    assert snapshot.reconciled and snapshot.cash_available_verified
+    assert snapshot.balance_usd == D("50.10")
+    assert snapshot.open_order_count == snapshot.position_count == 0
+    assert len(client.calls) == 1  # Bounded current updates, no lifetime windows.
+
+    client.balance["matched_order_balance"] = "1"
+    blocked = await probe_prophetx_account(client, [], review=current, observed_at=NOW)
+    assert not blocked.reconciled and "conflicts with wallet exposure" in blocked.reason
+
+
+async def test_current_inventory_review_rejects_old_baseline_and_unmanaged_position(case):
+    _, client, old_review = case
+    client.balance.update(balance="50.10", matched_order_balance="0", unmatched_order_balance="0")
+    review = ProphetXAccountReview(account_fingerprint=old_review.account_fingerprint,
+        current_inventory_reviewed_at=NOW-timedelta(minutes=1),
+        current_inventory_scope_evidence="OFFLINE reviewed empty account inventory",
+        funded_cash_only=True, funding_scope_evidence="OFFLINE no GEC or LEC account evidence",
+        valid_until=NOW+timedelta(days=1))
+    with pytest.raises(ReconciliationError, match="stale"):
+        await probe_prophetx_account(client, [], review=review.model_copy(update={
+            "current_inventory_reviewed_at": NOW-timedelta(days=3)}), observed_at=NOW)
+    client.overrides["/v4/mm/get_order_history"] = lambda _: {
+        "data": {"orders": [client.row], "next_cursor": ""}, "last_synced_at": iso()}
+    result = await probe_prophetx_account(client, [], review=review, observed_at=NOW)
+    assert not result.reconciled and "Unmanaged" in result.reason
+
+
+async def test_current_wallet_cash_excludes_credit_without_claiming_complete_inventory(case):
+    order, client, _ = case
+    client.balance["gec_balance"] = "250"
+    result = await probe_prophetx_account(client, [order], observed_at=NOW)
+    assert result.cash_available_verified and result.balance_usd == D("89.8")
+    assert not result.reconciled and result.position_count is None
+    client.balance["unmatched_order_last_synced_at"] = iso(-11)
+    with pytest.raises(ReconciliationError, match="Unmatched wallet balance"):
+        await probe_prophetx_account(client, [order], observed_at=NOW)
 
 
 async def test_inventory_external_position_missing_managed_order_and_private_change_block(case):
@@ -385,7 +584,7 @@ async def test_aggregate_wallet_exposure_mismatch_blocks_inventory(case):
     order, client, review = case
     client.balance["matched_order_balance"] = "11"
     result = await probe_prophetx_account(client, [order], review=review, observed_at=NOW)
-    assert not result.reconciled and "wallet exposure differs" in result.reason and not result.cash_available_verified
+    assert not result.reconciled and "wallet exposure differs" in result.reason and result.cash_available_verified
 
 
 async def test_empty_account_requires_complete_history_and_actual_zero_exposure(case):
@@ -400,7 +599,7 @@ async def test_changed_native_limit_price_does_not_clear_inventory(case):
     order, client, review = case
     client.row["price"] = 125
     result = await probe_prophetx_account(client, [order], review=review, observed_at=NOW)
-    assert not result.reconciled and not result.cash_available_verified
+    assert not result.reconciled and result.cash_available_verified
 
 
 def close_win(case):
@@ -419,6 +618,45 @@ async def test_settlement_uses_actual_cash_and_stable_revision(case):
     assert result.settled_at == NOW-timedelta(seconds=2)
     again = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
     assert result.settlement_id == again.settlement_id
+
+
+async def test_winnings_only_commission_arriving_at_settlement_is_not_double_counted(case):
+    order, client, review = case
+    order = order.model_copy(update={"intent": order.intent.model_copy(update={
+        "fee_payment_timing": "winnings_only"}), "fees": D(0)})
+    client.row["fee"] = ".2"
+    client.wallet = [client.wallet[0]]
+    client.balance["balance"] = "90"
+    close_win(case)
+    client.wallet[-1].update(balance_before="90", balance="112")
+    client.wallet.append(dict(details="settlement-fee-1", user_id=USER, trade_id=OID,
+        market_id="219", status="Completed", transaction_type="COMMISSION",
+        transaction_sub_type="COMMISSION", amount=".2", change="-.2",
+        balance_before="112", balance="111.8", created_at=iso(-1)))
+    result = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
+    assert result.payout_usd == D("22") and result.additional_fee_usd == D(".2")
+    assert result.payout_usd-order.filled_cost_usd-order.fees-result.additional_fee_usd == D("11.8")
+    folded = order.model_copy(update={"fees": D(".2")})
+    already_counted = await reconcile_prophetx_settlement(client, folded, [folded], review=review, observed_at=NOW)
+    assert already_counted.additional_fee_usd == 0
+    assert already_counted.payout_usd-folded.filled_cost_usd-folded.fees == D("11.8")
+
+
+async def test_losing_winnings_only_order_cannot_acquire_new_commission(case):
+    order, client, review = case
+    order = order.model_copy(update={"intent": order.intent.model_copy(update={
+        "fee_payment_timing": "winnings_only"}), "fees": D(0)})
+    client.wallet = [client.wallet[0]]
+    client.row.update(status="closed", winning_status="loss", settled_at=iso(-2), fee="0")
+    result = await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
+    assert result.payout_usd == result.additional_fee_usd == 0
+    client.wallet.append(dict(details="unexpected-losing-fee", user_id=USER, trade_id=OID,
+        market_id="219", status="Completed", transaction_type="COMMISSION",
+        transaction_sub_type="COMMISSION", amount=".1", change="-.1",
+        balance_before="90", balance="89.9", created_at=iso(-1)))
+    client.row["fee"] = ".1"
+    with pytest.raises(ReconciliationError, match="unexpected winnings fee"):
+        await reconcile_prophetx_settlement(client, order, [order], review=review, observed_at=NOW)
 
 
 async def test_closed_settlement_can_obtain_fee_from_exact_history(case):

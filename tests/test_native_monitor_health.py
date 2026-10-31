@@ -3,6 +3,7 @@ from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from evplatform.core.plugins import PluginRegistry
@@ -10,6 +11,37 @@ from evplatform.plugins.external import NativeMonitor, ProviderBridge
 from evplatform.integrations.parlay import ParlayWebSocket
 from evplatform.venues.novig import NovigClient, NovigSettings
 from evplatform.venues.polymarket_us import PolymarketUSClient, PolymarketUSMonitorConfig, PolymarketUSSettings
+
+
+@pytest.mark.asyncio
+async def test_polymarket_private_denial_keeps_public_research_enabled_without_auth(monkeypatch):
+    monkeypatch.setenv("TEST_POLY_ID", "not-a-real-key")
+    monkeypatch.setenv("TEST_POLY_SECRET", "not-a-real-secret")
+    monitor = NativeMonitor(PolymarketUSClient, PolymarketUSSettings,
+        {"api_key_id": "TEST_POLY_ID", "secret_key": "TEST_POLY_SECRET"}, None,
+        config_model=PolymarketUSMonitorConfig)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"message": "denied"})))
+    monitor.factory = lambda settings: PolymarketUSClient(settings, http)
+    monitor._refresh_polymarket_discovery = AsyncMock()
+    registry = PluginRegistry()
+    registry.register(monitor)
+    context = SimpleNamespace(config={"environment": "production", "market_slugs": [],
+        "private_updates": True, "discovery_leagues": ["nba"]})
+    try:
+        await registry.start("polymarket_us", context)
+        record = registry.public()[0]
+        assert record["enabled"] is True
+        assert record["credential_status"] == "rejected"
+        assert record["health"]["state"] == "public_research"
+        assert record["health"]["private_auth_failure"] == "unauthorized"
+        assert record["health"]["authenticated"] is False
+        assert record["health"]["streaming"] is False
+        assert monitor.task is None
+        assert monitor.discovery_task is not None
+    finally:
+        await registry.stop("polymarket_us")
+        await http.aclose()
 
 
 @pytest.mark.asyncio

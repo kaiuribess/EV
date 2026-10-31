@@ -1,19 +1,20 @@
 """Kalshi occurrence/expiration clocks must never become NBA tipoff clocks."""
 from copy import deepcopy
+from datetime import datetime, timezone
 
 import pytest
 
-from evplatform.integrations.kalshi_event_crosswalk import fixture_candidates
+from evplatform.integrations.kalshi_event_crosswalk import fixture_candidates, moneyline_candidates
 
 
 MARKETS = {"cursor": "", "markets": [
     {"ticker": "KXNBAGAME-26OCT22CLEPHI-PHI", "event_ticker": "KXNBAGAME-26OCT22CLEPHI",
      "market_type": "binary", "status": "active", "occurrence_datetime": "2026-10-23T02:00:00Z",
-     "rules_primary": "If Philadelphia wins the game, then Yes.",
+     "rules_primary": "If Philadelphia wins the Cleveland vs Philadelphia Pro Basketball game originally scheduled for Oct 22, 2026, then the market resolves to Yes.",
      "rules_secondary": "If postponed but begins within 48 hours, resolve official result. Otherwise resolve to a fair price."},
     {"ticker": "KXNBAGAME-26OCT22CLEPHI-CLE", "event_ticker": "KXNBAGAME-26OCT22CLEPHI",
      "market_type": "binary", "status": "active", "occurrence_datetime": "2026-10-23T02:00:00Z",
-     "rules_primary": "If Cleveland wins the game, then Yes.",
+     "rules_primary": "If Cleveland wins the Cleveland vs Philadelphia Pro Basketball game originally scheduled for Oct 22, 2026, then the market resolves to Yes.",
      "rules_secondary": "If postponed but begins within 48 hours, resolve official result. Otherwise resolve to a fair price."},
 ]}
 SOURCE = {"items": [{"identity": {"provider": "oddize_rest", "event_id": "game-1",
@@ -29,9 +30,103 @@ def test_matching_fixture_retains_distinct_tipoff_and_expiration():
     assert candidate["native_occurrence_times"] == ["2026-10-23T02:00:00+00:00"]
     assert candidate["occurrence_is_tipoff"] is False
     assert candidate["native_fair_price_on_cancel"] is True
+    assert candidate["native_outcome_rules_verified"] is True
     assert all(len(row["text_sha256"]) == 64 for row in candidate["native_rule_evidence"].values())
     assert not candidate["settlement_equivalence_verified"]
     assert not result["execution_authorized"]
+
+
+def _source_moneyline():
+    source = deepcopy(SOURCE)
+    source["items"][0]["signature"] = "a" * 64
+    source["items"][0]["identity"].update(
+        market_key="ml", player_key=None, line=None, period=None,
+        outcome_points={"PHI": None, "CLE": None})
+    source["items"][0]["observation"] = {
+        "decimal_odds": {"PHI": "2.10", "CLE": "1.80"},
+        "source_observed_at": "2026-10-22T22:59:59Z",
+        "source_price_changed_at": "2026-10-22T22:30:00Z",
+        "observation_verified": True, "observation_complete": True,
+        "market_status_verified": True, "status": "active"}
+    return source
+
+
+def test_exact_moneyline_sides_and_quote_evidence_are_review_only():
+    source = _source_moneyline()
+    fixtures = fixture_candidates(MARKETS, source)
+    result = moneyline_candidates(fixtures, source,
+                                  now=datetime(2026, 10, 22, 23, tzinfo=timezone.utc))
+    assert result["candidate_count"] == result["quote_evidence_ready_count"] == 1
+    candidate = result["candidates"][0]
+    assert candidate["source_outcomes"] == {"PHI": "Philadelphia 76ers", "CLE": "Cleveland Cavaliers"}
+    assert candidate["native_outcomes"] == {
+        "Philadelphia 76ers": "KXNBAGAME-26OCT22CLEPHI-PHI",
+        "Cleveland Cavaliers": "KXNBAGAME-26OCT22CLEPHI-CLE"}
+    assert candidate["quote_evidence_ready"] is True
+    assert candidate["source_price_changed_at"] == "2026-10-22T22:30:00Z"
+    assert candidate["candidate_only"] and not candidate["settlement_equivalence_verified"]
+    assert not result["execution_authorized"]
+
+
+def test_oddspapi_moneyline_uses_documented_home_away_ids_and_catalog():
+    source = _source_moneyline()
+    identity = source["items"][0]["identity"]
+    identity.update(provider="oddspapi_rest", market_key="111", period="result", line="0",
+                    outcome_points={"111": None, "112": None})
+    identity["context"] = {
+        "event_sport": 11, "tournament_id": 132, "event_league": "NBA",
+        "participants": ["Philadelphia 76ers", "Cleveland Cavaliers"],
+        "scheduled_start": "2026-10-22T23:00:00Z",
+        "market_catalog": {"marketType": "moneyline", "marketName": "Winner (incl. overtime)",
+                           "period": "result", "playerProp": False, "handicap": 0}}
+    source["items"][0]["observation"]["decimal_odds"] = {"111": "2.10", "112": "1.80"}
+    result = moneyline_candidates(fixture_candidates(MARKETS, source), source,
+                                  now=datetime(2026, 10, 22, 23, tzinfo=timezone.utc))
+    assert result["candidate_count"] == 1
+    assert result["candidates"][0]["source_outcomes"] == {
+        "111": "Philadelphia 76ers", "112": "Cleveland Cavaliers"}
+
+
+@pytest.mark.parametrize("change", [
+    lambda row: row["identity"].update(period="first_half"),
+    lambda row: row["identity"].update(line="1.5"),
+    lambda row: row["identity"].update(outcome_points={"PHI": 0, "CLE": None}),
+    lambda row: row["observation"].update(decimal_odds={"PHI": "2.10"}),
+    lambda row: row["observation"].update(decimal_odds={"PHI": "NaN", "CLE": "1.80"}),
+    lambda row: row["observation"].update(decimal_odds={"PHI": "2.10", "BOS": "1.80"}),
+])
+def test_nonmatching_source_moneyline_is_not_a_native_side_lead(change):
+    source = _source_moneyline()
+    change(source["items"][0])
+    result = moneyline_candidates(fixture_candidates(MARKETS, source), source,
+                                  now=datetime(2026, 10, 22, 23, tzinfo=timezone.utc))
+    assert result["candidate_count"] == 0
+
+
+@pytest.mark.parametrize("old,new", [
+    ("If Philadelphia wins", "If Cleveland wins"),
+    ("Cleveland vs Philadelphia", "Boston vs Philadelphia"),
+    ("Oct 22, 2026", "Oct 23, 2026"),
+])
+def test_changed_native_winner_rule_stays_a_fixture_lead_only(old, new):
+    native, source = deepcopy(MARKETS), _source_moneyline()
+    native["markets"][0]["rules_primary"] = native["markets"][0]["rules_primary"].replace(old, new)
+    fixtures = fixture_candidates(native, source)
+    assert fixtures["match_count"] == 1
+    assert fixtures["matches"][0]["native_outcome_rules_verified"] is False
+    result = moneyline_candidates(fixtures, source,
+                                  now=datetime(2026, 10, 22, 23, tzinfo=timezone.utc))
+    assert result["candidate_count"] == 0
+
+
+def test_old_source_observation_is_visible_but_not_quote_ready():
+    source = _source_moneyline()
+    source["items"][0]["observation"]["source_observed_at"] = "2026-10-22T22:30:00Z"
+    result = moneyline_candidates(fixture_candidates(MARKETS, source), source,
+                                  now=datetime(2026, 10, 22, 23, tzinfo=timezone.utc))
+    assert result["candidate_count"] == 1
+    assert result["quote_evidence_ready_count"] == 0
+    assert "fresh_quote_observation" in result["candidates"][0]["quote_evidence_gaps"]
 
 
 def test_oddspapi_nba_fixture_lead_requires_exact_sport_tournament_and_names():

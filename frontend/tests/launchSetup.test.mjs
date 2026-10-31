@@ -3,7 +3,7 @@ import test from 'node:test'
 import { build } from 'esbuild'
 const bundle = await build({ entryPoints: ['src/launchSetupModel.ts'], bundle: true, write: false, format: 'esm', platform: 'node' })
 const model = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
-const { parseSetupReport, activationGate, activationBody, deferredPilotRequirement, candidateCounts, weightSummary, profileFreshnessCoverage, candidateIsResearch, candidateCanQualify, candidateDisplayStatus, referenceObservationAge, collectionEditorValue, collectionField } = model
+const { parseSetupReport, activationGate, venueActivationGate, activationBody, deferredPilotRequirement, candidateCounts, weightSummary, profileFreshnessCoverage, candidateIsResearch, candidateCanQualify, candidateDisplayStatus, referenceObservationAge, collectionEditorValue, collectionField } = model
 const NOW = Date.parse('2026-10-21T05:00:00Z')
 const DIGEST = 'a'.repeat(64)
 function report() {
@@ -57,7 +57,53 @@ test('quarter Kelly accepts cash-bounded stakes without turning the reporting un
 test('valid current production approval can prepare a digest-bound body without executing it', () => {
   const parsed = parseSetupReport(report())
   assert.equal(activationGate(parsed, NOW, NOW).allowed, true)
-  assert.deepEqual(activationBody(parsed, NOW, DIGEST, NOW), { auto_trade: true, kill_switch: false, expected_launch_digest: DIGEST })
+  assert.deepEqual(activationBody(parsed, NOW, DIGEST, NOW), { auto_trade: true, kill_switch: false,
+    expected_launch_digest: DIGEST, authorization_expires_at: new Date(NOW + 5 * 60 * 1000).toISOString() })
+})
+test('ProphetX can be reviewed alone while another venue fails the aggregate launch', () => {
+  const raw = report()
+  raw.accounts[0].venue = raw.launch_scope[0].venue = 'prophetx'
+  raw.activation.by_venue = { prophetx: { available: true, scope_digest: 'b'.repeat(64) } }
+  raw.safe_to_arm = raw.activation.available = false
+  raw.activation.reason = 'Another venue is blocked'
+  raw.requirements[0].status = 'pending'
+  raw.accounts.push({ ...structuredClone(raw.accounts[0]), venue: 'novig', profile_configured: false,
+    account_snapshot: { ...raw.accounts[0].account_snapshot, current: false }, blockers: [{ code: 'profile.missing', category: 'configuration', scope: 'novig', message: 'Novig review missing', action: 'Review profile' }] })
+  const parsed = parseSetupReport(raw)
+  assert.equal(activationGate(parsed, NOW, NOW).allowed, false)
+  assert.equal(venueActivationGate(parsed, NOW, NOW, 'prophetx').allowed, true)
+  assert.equal(venueActivationGate(parsed, NOW, NOW, 'novig').allowed, false)
+  assert.deepEqual(activationBody(parsed, NOW, 'b'.repeat(64), NOW, 'prophetx'), {
+    auto_trade: true, kill_switch: false, expected_launch_digest: 'b'.repeat(64), native_venues: ['prophetx'],
+    authorization_expires_at: new Date(NOW + 5 * 60 * 1000).toISOString(),
+  })
+  assert.throws(() => activationBody(parsed, NOW, DIGEST, NOW, 'prophetx'), /scope changed/)
+})
+test('venue activation rejects unreviewed scopes and stale or contradictory account facts', () => {
+  const base = report()
+  base.accounts[0].venue = base.launch_scope[0].venue = 'prophetx'
+  base.activation.by_venue = { prophetx: { available: true, scope_digest: 'b'.repeat(64) } }
+  for (const change of [
+    r => { r.launch_scope = [] },
+    r => { r.activation.by_venue.prophetx.available = false },
+    r => { r.accounts[0].account_snapshot.reconciled = false },
+    r => { r.accounts[0].blockers.push({ code: 'location.unverified', category: 'account', scope: 'prophetx', message: 'Location missing', action: 'Verify' }) },
+    r => { r.risk_policy.applied = false },
+    r => { r.switches.auto_trade = true; r.switches.kill_switch = false },
+  ]) {
+    const raw = structuredClone(base); change(raw)
+    const parsed = parseSetupReport(raw)
+    assert.equal(venueActivationGate(parsed, NOW, NOW, 'prophetx').allowed, false)
+    assert.throws(() => activationBody(parsed, NOW, 'b'.repeat(64), NOW, 'prophetx'))
+  }
+  const parsed = parseSetupReport(base)
+  assert.equal(venueActivationGate(parsed, NOW - 12000, NOW, 'prophetx').allowed, false)
+  assert.equal(venueActivationGate(parsed, NOW, NOW, 'prophetx', 'Refresh failed').allowed, false)
+  for (const change of [
+    r => { r.activation.by_venue.prophetx.scope_digest = 'invalid' },
+    r => { r.activation.by_venue.prophetx.available = 'true' },
+    r => { r.switches.native_enabled_venues = ['prophetx', 'prophetx'] },
+  ]) { const raw = structuredClone(base); change(raw); assert.throws(() => parseSetupReport(raw)) }
 })
 test('one-order pilot defers only historical proof after the backend approves the exact live scope', () => {
   const raw = report()

@@ -12,9 +12,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from .models import utcnow
+from .config import TrustedPilotMarketScope
 
 
 Environment = Literal["sandbox", "production"]
@@ -39,6 +40,10 @@ class LiveLimits(StrictRecord):
     max_total_exposure_usd: Decimal | None = Field(gt=0)
     daily_loss_limit_usd: Decimal | None = Field(gt=0)
     available_cash_only: bool = False
+    # This opt-in uses a fixed, approved stake and durable local exposure caps.
+    # It does not assert a current balance; ProphetX may reject insufficient
+    # funds. Every other venue keeps authenticated current cash enforcement.
+    cash_policy: Literal["verified_current", "prophetx_exchange_rejection"] = "verified_current"
     block_overlapping_events: bool = False
     block_overlapping_players: bool = False
     stake_sizing: Literal["capped", "quarter_kelly"] = "capped"
@@ -47,10 +52,15 @@ class LiveLimits(StrictRecord):
     max_orders_per_minute: int = Field(ge=1)
     # A durable intent counts even if submission fails or its outcome is unknown.
     max_native_order_attempts: int | None = Field(default=None, ge=1)
+    max_native_daily_attempts: int | None = Field(default=None, ge=1)
+    max_native_daily_debit_usd: Decimal | None = Field(default=None, gt=0)
+    # Opt-in single-account recurring scope. The default keeps the existing
+    # portfolio-wide fence; the profile digest binds any narrower choice.
+    external_exposure_scope: Literal["global", "profile_account"] = "global"
 
     @field_validator("max_order_stake_usd", "max_event_exposure_usd", "max_player_exposure_usd",
                      "max_venue_exposure_usd", "max_correlated_exposure_usd",
-                     "max_total_exposure_usd", "daily_loss_limit_usd")
+                     "max_total_exposure_usd", "daily_loss_limit_usd", "max_native_daily_debit_usd")
     @classmethod
     def finite_money(cls, value: Decimal) -> Decimal:
         if value is not None and not value.is_finite():
@@ -71,6 +81,11 @@ class LiveLimits(StrictRecord):
             self.max_total_exposure_usd,
         ) if value is not None):
             raise ValueError("Per-order stake cannot exceed an exposure limit")
+        if self.cash_policy == "prophetx_exchange_rejection" and (
+                self.available_cash_only or self.stake_sizing != "capped"
+                or any(value is None for value in (*caps, self.daily_loss_limit_usd,
+                    self.max_native_daily_debit_usd))):
+            raise ValueError("Exchange-rejection cash policy needs fixed stake and complete monetary caps")
         return self
 
 
@@ -115,6 +130,123 @@ class LaunchEvidence(StrictRecord):
         return self
 
 
+class ApprovedNativeFamilyRule(StrictRecord):
+    """Account-bound reusable question rule; each discovered ID is rechecked."""
+    schema_version: Literal[1] = 1
+    scope: TrustedPilotMarketScope
+    rule_version: str = Field(min_length=8)
+    approved_by: str = Field(min_length=1)
+    approval_evidence: str = Field(min_length=16)
+    approved_at: datetime
+    expires_at: datetime
+    # Kalshi's primary rule is parsed against winner, teams and game date by
+    # the existing crosswalk. Its secondary clause must match exactly. For
+    # ProphetX these are approved exact type|sub_type|period metadata tuples.
+    # Its unqualified main Moneyline may use a separately reviewed full-game
+    # token. The legacy unprefixed token covers NBA only; another league needs
+    # its own LEAGUE|moneyline|moneyline|default_full_game token and settlement
+    # evidence. A token never supplies a missing strike or event identity.
+    allowed_native_rule_texts: tuple[str, ...] = Field(min_length=1)
+    max_start_delta_seconds: int = Field(default=0, ge=0, le=30)
+    # Explicit native order-grid evidence is reviewed once per family. Current
+    # catalog, fee, account and liquidity evidence is still required per game.
+    quantity_step: Decimal = Field(gt=0)
+    minimum_quantity: Decimal = Field(gt=0)
+    minimum_order_cost_usd: Decimal = Field(ge=0)
+    cash_quantum_usd: Decimal = Field(gt=0)
+    order_minimum_source: str = Field(min_length=16)
+    kalshi_exchange_index: int | None = Field(default=None, ge=0)
+    # ProphetX's current account fee bound is separate from the advertised
+    # rate; it remains absent until genuine evidence supports a safe bound.
+    prophetx_winnings_fee_upper_per_stake: Decimal | None = Field(default=None, ge=0)
+    prophetx_fee_source: str | None = None
+    prophetx_fee_evidence_kind: Literal["exchange_verified", "owner_approved_assumption"] = "exchange_verified"
+    prophetx_assumed_winnings_profit_rate: Decimal | None = Field(default=None, ge=0, lt=1)
+    prophetx_native_settlement_evidence: str | None = None
+    # A multi-competition rule cannot inherit NBA settlement evidence. Every
+    # additional competition has its own reviewed native contract source.
+    additional_native_settlement_evidence: dict[str, str] = Field(default_factory=dict)
+    prophetx_source_timestamp_unit: Literal["unknown", "seconds", "milliseconds", "microseconds", "nanoseconds"] = "unknown"
+    prophetx_timestamp_unit_evidence: str | None = None
+    # A separate in-play rule needs an explicit, reviewed PBP state TTL.
+    # No pregame approval inherits an in-play clock or native permission.
+    inplay_state_max_age_ms: int | None = Field(default=None, ge=100, le=10000)
+    inplay_event_identity_basis: Literal["provider_id", "exact_same_provider_fixture"] = "provider_id"
+    inplay_identity_evidence: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_rule(self, handler):
+        payload = handler(self)
+        if not self.additional_native_settlement_evidence:
+            payload.pop("additional_native_settlement_evidence", None)
+        return payload
+
+    @model_validator(mode="after")
+    def coherent_rule(self):
+        if (self.scope.market_type not in {"moneyline", "player_prop"}
+                or self.scope.venue == "kalshi" and (
+                    self.scope.league != "NBA" or self.scope.market_type != "moneyline")
+                or not self.scope.source_normal_rule_evidence
+                or self.approved_at.tzinfo is None or self.expires_at.tzinfo is None
+                or self.expires_at <= self.approved_at
+                or any(not value.is_finite() for value in (self.quantity_step,
+                    self.minimum_quantity, self.minimum_order_cost_usd, self.cash_quantum_usd))
+                or self.minimum_quantity % self.quantity_step
+                or any(not text.strip() for text in self.allowed_native_rule_texts)
+                or len(set(self.allowed_native_rule_texts)) != len(self.allowed_native_rule_texts)):
+            raise ValueError("Approved family rule needs exact source, native and order-grid evidence")
+        if (self.scope.phase == "inplay") != (self.inplay_state_max_age_ms is not None):
+            raise ValueError("In-play family needs its own reviewed live-state age limit")
+        if self.inplay_event_identity_basis == "exact_same_provider_fixture":
+            if self.scope.phase != "inplay" or not self.inplay_identity_evidence or len(self.inplay_identity_evidence) < 16:
+                raise ValueError("Structural PBP identity requires a reviewed in-play family rule")
+        elif self.inplay_identity_evidence is not None:
+            raise ValueError("Provider-ID identity does not use structural crosswalk approval")
+        if self.scope.venue == "prophetx" and (
+                (self.prophetx_fee_evidence_kind == "exchange_verified" and
+                 (self.prophetx_winnings_fee_upper_per_stake is None or
+                  not self.prophetx_winnings_fee_upper_per_stake.is_finite() or
+                  self.prophetx_assumed_winnings_profit_rate is not None))
+                or (self.prophetx_fee_evidence_kind == "owner_approved_assumption" and
+                    (self.prophetx_winnings_fee_upper_per_stake is not None or
+                     self.prophetx_assumed_winnings_profit_rate != Decimal("0.02")))
+                or not self.prophetx_fee_source
+                or not self.prophetx_native_settlement_evidence
+                or self.prophetx_source_timestamp_unit == "unknown"
+                or not self.prophetx_timestamp_unit_evidence):
+            raise ValueError("ProphetX family rule needs an account-applicable winnings fee bound")
+        expected = {f"{sport}:{league}" for sport, league in self.scope.additional_competitions}
+        if (set(self.additional_native_settlement_evidence) != expected
+                or any(not isinstance(value, str) or len(value.strip()) < 16
+                       for value in self.additional_native_settlement_evidence.values())):
+            raise ValueError("Each added competition needs its own reviewed native settlement evidence")
+        if self.scope.venue == "kalshi" and self.kalshi_exchange_index is None:
+            raise ValueError("Kalshi family rule needs an exact approved exchange index")
+        return self
+
+    def digest(self) -> str:
+        payload = self.model_dump(mode="json")
+        if not self.additional_native_settlement_evidence:
+            payload.pop("additional_native_settlement_evidence", None)
+        if self.scope.phase == "pregame":
+            payload["scope"].pop("phase", None)
+        if self.inplay_state_max_age_ms is None:
+            payload.pop("inplay_state_max_age_ms")
+        if self.inplay_event_identity_basis == "provider_id":
+            payload.pop("inplay_event_identity_basis")
+        if self.inplay_identity_evidence is None:
+            payload.pop("inplay_identity_evidence")
+        return digest_json(payload)
+
+    def settlement_evidence_for(self, market) -> str | None:
+        if (market.sport, market.league) == (self.scope.sport, self.scope.league):
+            return self.prophetx_native_settlement_evidence
+        return self.additional_native_settlement_evidence.get(f"{market.sport}:{market.league}")
+
+    def matches(self, market) -> bool:
+        return self.scope.matches(market)
+
+
 class LaunchProfile(StrictRecord):
     schema_version: Literal[1] = 1
     venue: str = Field(min_length=1)
@@ -122,7 +254,8 @@ class LaunchProfile(StrictRecord):
     account_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_id: str = Field(min_length=1)
     sandbox_account_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    market_ids: tuple[str, ...] = Field(min_length=1)
+    market_ids: tuple[str, ...] = ()
+    family_rule: ApprovedNativeFamilyRule | None = None
     strategy_ids: tuple[str, ...] = Field(min_length=1)
     provider_ids: tuple[str, ...] = Field(min_length=1)
     mapping_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -144,6 +277,23 @@ class LaunchProfile(StrictRecord):
     evidence: tuple[LaunchEvidence, ...] = ()
 
     @model_validator(mode="after")
+    def exact_or_family_scope(self):
+        if (bool(self.market_ids) == (self.family_rule is not None)
+                or self.family_rule is not None and self.family_rule.scope.venue != self.venue):
+            raise ValueError("Launch profile needs either exact markets or one matching approved family rule")
+        if self.limits.cash_policy == "prophetx_exchange_rejection" and self.venue != "prophetx":
+            raise ValueError("Exchange-rejection cash policy requires a ProphetX profile")
+        if self.validation_pilot and self.family_rule is not None and (
+                self.venue != "prophetx" or self.family_rule.scope.sport != "basketball"
+                or self.family_rule.scope.league != "NBA"
+                or self.family_rule.scope.market_type != "moneyline"
+                or self.family_rule.scope.period != "FULL"
+                or self.family_rule.scope.additional_competitions
+                or self.min_reference_books < 3):
+            raise ValueError("Conditional validation pilot requires a reviewed ProphetX NBA full-game moneyline family")
+        return self
+
+    @model_validator(mode="after")
     def bounded_validation_pilot(self):
         if not self.validation_pilot:
             return self
@@ -151,17 +301,31 @@ class LaunchProfile(StrictRecord):
         caps = (limits.max_order_stake_usd, limits.max_event_exposure_usd,
                 limits.max_player_exposure_usd, limits.max_venue_exposure_usd,
                 limits.max_correlated_exposure_usd, limits.max_total_exposure_usd)
-        if (self.venue != "kalshi" or self.environment != "production"
-                or self.settlement_policy != "kalshi_ioc_binary_halt_on_exception"
-                or any(cap is None or cap > Decimal("1") for cap in caps)
+        pilot_settlement = {
+            "kalshi": "kalshi_ioc_binary_halt_on_exception",
+            "novig": "novig_ioc_win_loss_halt_on_exception",
+            "prophetx": "prophetx_funded_cash_win_loss_halt_on_exception",
+        }
+        fixed_prophetx = (self.venue == "prophetx" and self.family_rule is not None
+            and limits.cash_policy == "prophetx_exchange_rejection"
+            and not limits.available_cash_only and limits.stake_sizing == "capped")
+        verified_cash = (limits.cash_policy == "verified_current"
+            and limits.available_cash_only and limits.stake_sizing == "quarter_kelly")
+        if (self.environment != "production"
+                or self.settlement_policy != pilot_settlement.get(self.venue)
+                or any(cap is None or cap > Decimal("5") for cap in caps)
+                or (self.family_rule is not None and (
+                    limits.daily_loss_limit_usd is None or limits.daily_loss_limit_usd > Decimal("5")
+                    or limits.max_native_daily_debit_usd is None
+                    or limits.max_native_daily_debit_usd > Decimal("5")))
                 or limits.max_native_order_attempts != 1
                 or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1
-                or not limits.available_cash_only or not limits.block_overlapping_events
+                or not (fixed_prophetx or verified_cash) or not limits.block_overlapping_events
                 or not limits.block_overlapping_players
-                or limits.stake_sizing != "quarter_kelly" or limits.unit_size_usd != Decimal("5")
+                or limits.unit_size_usd != Decimal("5")
                 or set(self.strategy_ids) != {"native_positive_ev"}
                 or self.min_reference_books < 2):
-            raise ValueError("Validation pilot requires one $1 Kalshi attempt with cash and overlap limits")
+            raise ValueError("Validation pilot requires one at-most-$5 supported-venue attempt with cash and overlap limits")
         return self
 
     @field_validator("market_ids", "strategy_ids", "provider_ids")
@@ -178,8 +342,34 @@ class LaunchProfile(StrictRecord):
         # pilot must not invalidate unrelated reviewed accounts/evidence.
         if not self.validation_pilot:
             payload.pop("validation_pilot")
+        if self.family_rule is None:
+            payload.pop("family_rule")
+        else:
+            # The in-play fields are opt-in. Keep an existing pregame family
+            # authorization bound to the same rules when these defaults are
+            # introduced by a newer build, while hashing every approved
+            # in-play value when it is actually configured.
+            family = payload["family_rule"]
+            if self.family_rule.scope.phase == "pregame":
+                family["scope"].pop("phase", None)
+            if self.family_rule.inplay_state_max_age_ms is None:
+                family.pop("inplay_state_max_age_ms", None)
+            if self.family_rule.inplay_event_identity_basis == "provider_id":
+                family.pop("inplay_event_identity_basis", None)
+            if self.family_rule.inplay_identity_evidence is None:
+                family.pop("inplay_identity_evidence", None)
+            if not self.family_rule.additional_native_settlement_evidence:
+                family.pop("additional_native_settlement_evidence", None)
         if self.limits.max_native_order_attempts is None:
             payload["limits"].pop("max_native_order_attempts")
+        if self.limits.max_native_daily_attempts is None:
+            payload["limits"].pop("max_native_daily_attempts")
+        if self.limits.max_native_daily_debit_usd is None:
+            payload["limits"].pop("max_native_daily_debit_usd")
+        if self.limits.cash_policy == "verified_current":
+            payload["limits"].pop("cash_policy")
+        if self.limits.external_exposure_scope == "global":
+            payload["limits"].pop("external_exposure_scope")
         return digest_json(payload)
 
 
@@ -207,16 +397,36 @@ class MarketReadiness(StrictRecord):
     provider_mapping_verified: bool = False
     venue_mapping_verified: bool = False
     fee_schedule_verified: bool = False
+    fee_assumption_approved: bool = False
     native_units_supported: bool = False
     order_minimum_verified: bool = False
     usable_reference_books: int = Field(default=0, ge=0)
     required_books_present: bool = False
     oldest_reference_age_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    # Provider delivery is a bounded input indicator, never a measured
+    # selection-observation age. The source policy is separately authorized.
+    reference_age_basis: Literal["selection_observation", "provider_delivery"] = "selection_observation"
     orderbook_age_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     orderbook_synchronized: bool = False
     market_active: bool = False
     executable_liquidity: bool = False
     synthetic: bool = True
+
+
+def family_market_ready(market: MarketReadiness, profile: LaunchProfile, *,
+                        runtime_age_seconds: float = 0) -> bool:
+    """One current exact fixture may arm a reusable scope; others cannot veto it."""
+    required = ("identity_verified", "provider_mapping_verified", "venue_mapping_verified",
+        "native_units_supported", "order_minimum_verified",
+        "required_books_present", "orderbook_synchronized", "market_active",
+        "executable_liquidity")
+    return bool((market.fee_schedule_verified or market.fee_assumption_approved)
+        and all(getattr(market, name) for name in required) and not market.synthetic
+        and market.usable_reference_books >= profile.min_reference_books
+        and market.oldest_reference_age_ms is not None
+        and market.orderbook_age_ms is not None
+        and 0 <= market.oldest_reference_age_ms + max(0, runtime_age_seconds)*1000 <= profile.max_reference_age_ms
+        and 0 <= market.orderbook_age_ms + max(0, runtime_age_seconds)*1000 <= profile.max_orderbook_age_ms)
 
 
 class RuntimeReadiness(StrictRecord):
@@ -232,6 +442,7 @@ class RuntimeReadiness(StrictRecord):
     configured_limits: LiveLimits | None = None
     enabled_strategy_ids: tuple[str, ...] = ()
     central_risk_enforced: bool = False
+    external_exposure_bounded: bool = False
     opposing_position_guards: bool = False
     durable_intents: bool = False
     persistence_healthy: bool = False
@@ -245,6 +456,10 @@ class RuntimeReadiness(StrictRecord):
     settlement_reconciliation_supported: bool = False
     native_credentials_present: bool = False
     account_identity_verified: bool = False
+    geographic_attestation_current: bool = False
+    # ProphetX can verify the actual owner's location for each exact order at
+    # dispatch. This is capability evidence, never a claim of current location.
+    order_bound_location_check_supported: bool = False
     unresolved_unknown_orders: int = Field(default=0, ge=0)
     reconciliation_discrepancies: int = Field(default=0, ge=0)
     native_pilot_prior_attempts: int = Field(default=0, ge=0)
@@ -304,6 +519,7 @@ class ReadinessReport(StrictRecord):
 
 _RUNTIME_FLAGS = {
     "central_risk_enforced": "Connect every native submission to central risk approval",
+    "external_exposure_bounded": "Reconcile or conservatively bound external account exposure before native submission",
     "opposing_position_guards": "Enable global opposing and correlated position checks",
     "durable_intents": "Persist and acknowledge each order intent before transmission",
     "persistence_healthy": "Restore the audit writer and durable order store",
@@ -378,9 +594,20 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         if profile.limits != runtime.configured_limits:
             block("profile.limit_mismatch", "Current limits differ from explicitly authorized limits",
                   "Apply the reviewed limits and repeat authorization for any change", category="authorization")
+        if profile.family_rule is not None:
+            rule = profile.family_rule
+            if not rule.approved_at <= now < rule.expires_at:
+                block("family.expired", "Approved market-family rule is expired or future-dated",
+                      "Review and reapprove the exact rule version", category="authorization")
         if set(profile.strategy_ids) != set(runtime.enabled_strategy_ids):
             block("profile.strategy_mismatch", "Enabled strategies differ from authorized strategies",
                   "Limit native routing to the exact approved strategy set", category="authorization")
+        if (profile.environment == "production" and profile.venue == "novig"
+                and not runtime.geographic_attestation_current):
+            block("account.geographic_attestation_missing",
+                  "Novig has no current account-bound location attestation in its runtime snapshot",
+                  "Obtain a venue-supported current location result bound to this trading account before arming",
+                  category="authorization", scope=profile.venue)
 
         feeds = {item.provider_id: item for item in runtime.feeds}
         if len(feeds) != len(runtime.feeds):
@@ -401,6 +628,11 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         markets = {item.market_id: item for item in runtime.markets}
         if len(markets) != len(runtime.markets):
             block("market.duplicate", "Runtime contains ambiguous duplicate market records", "Resolve duplicate canonical identities")
+        if profile.family_rule is not None and not any(
+                family_market_ready(item, profile, runtime_age_seconds=age)
+                for item in runtime.markets):
+            block("family.no_current_market", "No discovered market satisfies every reviewed family and live-data check",
+                  "Keep monitoring for a current exact match with references, fees and executable depth")
         for market_id in profile.market_ids:
             market = markets.get(market_id)
             if market is None:
@@ -430,6 +662,11 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
         digest = profile.digest()
         for kind in ("account_access", "native_lifecycle", "restart_recovery", "settlement_reconciliation", "risk_authorization",
                      *(("geographic_eligibility",) if profile.environment == "production" else ())):
+            if (kind == "geographic_eligibility" and profile.venue == "prophetx"
+                    and runtime.order_bound_location_check_supported):
+                # A fresh, account/order-bound location result is required by
+                # the ProphetX preflight immediately before every submission.
+                continue
             if (pilot and runtime.native_pilot_prior_attempts == 0
                     and kind in {"native_lifecycle", "restart_recovery", "settlement_reconciliation"}
                     and not any(e.kind == kind for e in profile.evidence)):

@@ -283,7 +283,7 @@ OddsPapiRest.manifest = provider_manifest(
     limitations=[
         "v4 REST only; separate B2B v5/WebSocket protocols are not implemented.",
         "Native sport IDs are numeric strings. Live and props permissions are bookmaker-specific.",
-        "Both active sides need bookmakerChangedAt and changedAt; price-change clocks never refresh unchanged odds.",
+        "Both active sides need affirmative status; bookmakerChangedAt and changedAt are change clocks, not quote verification.",
         "Fixture updatedAt and REST receipt are not quote freshness.",
     ],
 )

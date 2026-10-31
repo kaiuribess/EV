@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from evplatform.core.models import Market, Quote
+from evplatform.core.models import Market, Quote, Settlement
 
 from .base import ProviderEnvelope, parse_timestamp
 
@@ -67,6 +67,12 @@ class SourceOffer:
     observation_verified: bool = False
     observation_complete: bool = False
     source_price_changed_at: datetime | None = None
+    provider_reported_price_age_s: Decimal | None = None
+    source_stored_at: datetime | None = None
+    # Native selection IDs are evidence tied to this exact book/event/player/
+    # market/period/line. They never define a new canonical market by themselves.
+    source_selection_ids: dict[str, str] = field(default_factory=dict)
+    source_status_historical_hint: bool = False
     verification_reason: str | None = None
     market_status_verified: bool = False
     # A provider's book/fixture poll is useful for health review but does not
@@ -74,6 +80,9 @@ class SourceOffer:
     # quote-bound observation eligibility.
     source_scope_poll_at: datetime | None = None
     source_scope_is_current: bool | None = None
+    # Transport receipt of this particular source row. A merged WebSocket
+    # pair must retain the *older* side's delivery age, not the update frame's.
+    received_at: datetime | None = None
 
     def identity(self) -> dict[str, Any]:
         context = dict(self.context)
@@ -105,6 +114,12 @@ class VerifiedOfferMapping(BaseModel):
     bookmaker: str = Field(min_length=1)
     verified: bool = False
     evidence: str = Field(min_length=8)
+    # A reviewed team/market identity does not certify exceptional settlement.
+    # Identity-only mappings may be displayed, but strict live references stop
+    # at the contract-review gate until the source and target rules are bridged.
+    settlement_equivalence_verified: bool = True
+    normal_outcome_verified: bool = False
+    normal_outcome_evidence: str | None = None
 
     @model_validator(mode="after")
     def complete_outcomes(self):
@@ -112,6 +127,8 @@ class VerifiedOfferMapping(BaseModel):
             raise ValueError("Mapping must be explicitly verified")
         if not self.evidence.strip():
             raise ValueError("Mapping requires verification evidence")
+        if self.normal_outcome_verified and not (self.normal_outcome_evidence and self.normal_outcome_evidence.strip()):
+            raise ValueError("Normal WIN/LOSS review requires its own source-to-target evidence")
         if set(self.outcome_map.values()) != set(self.market.outcomes):
             raise ValueError("Mapping must cover every canonical outcome")
         if len(self.outcome_map) != len(self.market.outcomes):
@@ -196,10 +213,8 @@ def _parlay_unavailability_reason(row: dict) -> str | None:
     """
     if row.get("action") == "remove":
         return "Explicit source removal"
-    if row.get("suspended") is True or row.get("status") == "suspended":
+    if _explicitly_unavailable(row):
         return "Explicit source suspension"
-    if row.get("available") is False:
-        return "Source quote unavailable"
     fields = {key: row[key] for key in (
         "over_price", "under_price", "home_ml", "away_ml", "price", "price_american", "price_decimal",
     ) if key in row}
@@ -218,28 +233,55 @@ def _parlay_unavailability_reason(row: dict) -> str | None:
 def _observation_problem(envelope: ProviderEnvelope, *scopes: dict) -> str | None:
     """Retain adverse completeness evidence without making it market identity."""
     body = envelope.payload if isinstance(envelope.payload, dict) else {}
-    for scope in (body, *scopes):
-        if scope.get("topped_up") is True:
-            return "retained_top_up"
-        if scope.get("truncated") is True or scope.get("truncated_books"):
-            return "truncated_response"
-        if (scope.get("partial") is True or scope.get("missing_books")
-                or scope.get("snapshot_partial_reasons") or scope.get("snapshot_in_progress") is True):
-            return "partial_response"
-        if scope.get("snapshot_complete") is False:
-            return "incomplete_snapshot"
     headers = envelope.metadata.get("headers", {})
+    all_scopes = (body, *scopes)
+    # Choose the strongest adverse fact across response, book, market and row.
+    # A broad truncation must not hide a topped-up row, a failed collection,
+    # or a stale/degraded response when research accepts a complete row.
+    if any(scope.get("topped_up") is True for scope in all_scopes):
+        return "retained_top_up"
     # Parlay can return a previously built props board when its scan is busy.
     # A fresh HTTP receipt and a row's old collector clock do not establish
     # that the cached board still represents currently offered outcomes.
     if headers.get("x-parlay-stale"):
         return "stale_cached_board"
+    # X-Provider-State is per source, not per selection. Its adverse roles
+    # still disqualify the corresponding book from time-sensitive pricing.
+    try:
+        provider_state = json.loads(headers.get("x-provider-state", "{}"))
+        source_roles = provider_state.get("src", {}) if isinstance(provider_state, dict) else {}
+    except (TypeError, ValueError):
+        source_roles = {}
+    if isinstance(source_roles, dict):
+        for scope in scopes:
+            if not isinstance(scope, dict):
+                continue
+            name = scope.get("bookmaker") or scope.get("key")
+            state = source_roles.get(name)
+            if isinstance(state, dict) and state.get("role") in {"degraded", "offline"}:
+                return "degraded_source"
+    # /props documents x-result-degraded as comma-separated *book keys*.
+    # A failed Pinnacle read must not disqualify a complete FanDuel row from
+    # the same response. Unknown/global header formats remain conservative.
+    degraded = headers.get("x-result-degraded") or headers.get("x-result-degraded-sources")
+    if degraded:
+        affected = {part.strip().lower() for part in str(degraded).split(",") if part.strip()}
+        names = {str(scope.get("bookmaker") or scope.get("key") or "").lower()
+                 for scope in scopes if isinstance(scope, dict)}
+        if not names or affected & names or affected & {"true", "all", "*"}:
+            return "degraded_source"
+    if any(scope.get("partial") is True or scope.get("missing_books")
+           or scope.get("snapshot_partial_reasons") or scope.get("snapshot_in_progress") is True
+           for scope in all_scopes):
+        return "partial_response"
+    if any(scope.get("truncated") is True or scope.get("truncated_books") for scope in all_scopes):
+        return "truncated_response"
     if str(headers.get("x-result-truncated", "")).lower() == "true":
         return "truncated_response"
+    if any(scope.get("snapshot_complete") is False for scope in all_scopes):
+        return "incomplete_snapshot"
     if str(headers.get("x-result-has-more", "")).lower() == "true" or headers.get("x-next-offset"):
         return "paginated_response_not_atomic"
-    if headers.get("x-result-degraded") or headers.get("x-result-degraded-sources"):
-        return "degraded_source"
     return None
 
 
@@ -253,15 +295,41 @@ def _parlay_observation(envelope: ProviderEnvelope, row: dict, *, complete: bool
     # guessing seconds/milliseconds from magnitude would manufacture evidence.
     raw_observed = row.get("last_observed")
     observed = parse_timestamp(raw_observed) if isinstance(raw_observed, str) else None
-    verified = observed is not None and row.get("last_update_type") == "collector_observation"
+    verified = ((envelope.provider_id != "parlay_rest" or envelope.kind == "props_snapshot")
+                and observed is not None
+                and row.get("last_update_type") == "collector_observation")
+    # The separate Pinnacle current-state stream identifies its own rows with
+    # source_ts_ms/last_observed_ms. A generic complete game-board frame never
+    # inherits this observation from a heartbeat or nearby Pinnacle row.
+    current_state = (envelope.provider_id != "parlay_rest" and envelope.kind == "odds_update"
+                     and row.get("bookmaker") == "pinnacle"
+                     and row.get("source_ts_ms") is not None
+                     and row.get("last_observed_ms") is not None)
+    if current_state:
+        observed = parse_timestamp(row["last_observed_ms"], epoch_unit="milliseconds")
+        verified = observed is not None and row.get("action") != "remove" and row.get("available") is True
     problem = _observation_problem(envelope, *scopes, row)
     if observed is not None and observed > envelope.received_at:
         problem, verified = "future_observation_clock", False
+    try:
+        age = (Decimal(str(row["price_age_s"])) if envelope.provider_id != "parlay_rest"
+               and not isinstance(row.get("price_age_s"), bool) and row.get("price_age_s") is not None
+               else None)
+        if age is not None and (not age.is_finite() or age < 0):
+            age = None
+    except (InvalidOperation, ValueError):
+        age = None
     return {
         "source_observed_at": observed,
         "observation_verified": verified,
         "observation_complete": verified and complete and problem is None,
-        "source_price_changed_at": parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds"),
+        "source_price_changed_at": (None if envelope.provider_id == "parlay_rest" else
+            parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")),
+        "provider_reported_price_age_s": age,
+        "source_stored_at": (parse_timestamp(row.get("line_changed_at_ms"), epoch_unit="milliseconds")
+            if envelope.provider_id == "parlay_rest" and envelope.kind == "snapshot" else
+            parse_timestamp(row.get("last_update"), epoch_unit="milliseconds")
+            if envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot" else None),
         "verification_reason": problem or ("quote_bound_collector_observation" if verified else "unverified_observation_clock"),
     }
 
@@ -291,19 +359,16 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                         raise ValueError("Duplicate outcome in market")
                     prices[name] = decimal_price(outcome["price"], odds_format)
                     points[name] = number_identity(outcome.get("point"))
-                # Whole-book liveness is not per-market verification. Parlay's
-                # main reference and cookbook give conflicting oldest-price vs
-                # freshest-poll meanings for book.last_update_ms, so it cannot
-                # establish this market's source observation clock.
+                # Support confirmed book.line_changed_at_ms is the oldest
+                # stored served row. market.last_update has a different and
+                # ambiguous scope, so it cannot fill a missing stored clock.
                 observed = parse_timestamp(market.get("last_update"))
+                stored = parse_timestamp(book.get("line_changed_at_ms"), epoch_unit="milliseconds")
                 status = ("suspended" if any(_explicitly_unavailable(scope)
                     for scope in (event, book, market, *outcomes)) else "active")
-                # /odds?includeLinks=true carries links on individual FanDuel
-                # outcomes only for a matching recently observed native quote
-                # whose market and runner were OPEN/ACTIVE. Require every side
-                # of this exact main line. This verifies status only: no
-                # quote-bound observation clock is supplied by the game shape.
-                native_status = (
+                # Links certify a stored OPEN/ACTIVE observation, potentially
+                # five minutes old; they do not prove present market status.
+                historical_link_active = (
                     envelope.provider_id == "parlay_rest"
                     and envelope.kind == "snapshot"
                     and book.get("key") == "fanduel"
@@ -317,10 +382,13 @@ def _toa_offers(envelope: ProviderEnvelope, events: list, *, odds_format: str) -
                     str(market["key"]), None, None, market.get("period"), points, prices,
                     observed, envelope.published_at, status,
                     {**_row_context(market), **event_context},
-                    **(_parlay_observation(envelope, market, complete=len(prices) >= 2,
-                                           scopes=(event, book))
+                    **({**_parlay_observation(envelope, market, complete=len(prices) >= 2,
+                                             scopes=(event, book)), "source_stored_at": stored}
                        if envelope.provider_id.startswith("parlay") else {}),
-                    market_status_verified=native_status,
+                    # A FanDuel link reports OPEN/ACTIVE at the stored
+                    # observation, potentially minutes ago, not now.
+                    market_status_verified=False,
+                    source_status_historical_hint=historical_link_active,
                     source_scope_poll_at=poll_at,
                     source_scope_is_current=poll_current,
                 ))
@@ -423,20 +491,20 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
         if not prices:
             continue
         status = "withdrawn" if row.get("action") == "remove" else (
-            "suspended" if row.get("suspended") is True or row.get("status") == "suspended" or row.get("available") is False else "active"
+            "suspended" if _explicitly_unavailable(row) else "active"
         )
         observation = _parlay_observation(envelope, row, complete=len(prices) >= 2)
-        # /props?includeLinks=true emits FanDuel side links only when the
-        # stored native market was OPEN and that runner ACTIVE. Require both
-        # sides, a complete collector-bound observation and the documented
-        # REST shape. A single link does not certify the opposing price.
-        status_verified = (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
+        # Both FanDuel links are historical OPEN/ACTIVE hints, not proof of
+        # current selection availability. A single link proves neither side.
+        historical_link_active = (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
                            and row.get("bookmaker") == "fanduel" and has_totals and not has_outcome
                            and not has_moneyline and set(prices) == {"over", "under"}
                            and all(_valid_fanduel_link(row.get(f"{side}_link"))
                                    for side in ("over", "under"))
-                           and observation["observation_verified"] and observation["observation_complete"]
                            and status == "active")
+        selection_ids = {side: row[f"{side}_sid"] for side in ("over", "under")
+                         if side in prices and isinstance(row.get(f"{side}_sid"), str)
+                         and row[f"{side}_sid"].strip()}
         result.append(SourceOffer(
             envelope.provider_id, str(row.get("bookmaker", "")),
             str(row.get("canonical_event_id") or row.get("event_id") or row.get("eventId") or ""),
@@ -449,7 +517,10 @@ def _parlay_rows(envelope: ProviderEnvelope, rows: list) -> list[SourceOffer]:
              **({"scheduled_start": row["commence_time"]} if "commence_time" in row else {}),
              **({"event_sport": envelope.metadata["sport"]} if envelope.metadata.get("sport") else {})},
             **observation,
-            market_status_verified=status_verified,
+            market_status_verified=False,
+            source_status_historical_hint=historical_link_active,
+            source_selection_ids=selection_ids,
+            received_at=envelope.received_at,
         ))
     return result
 
@@ -586,15 +657,10 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                                 parse_timestamp(row.get("changedAt"))) for row in outcomes.values()]
                 source_time = _oldest([book_clock for book_clock, _ in clock_pairs])
                 provider_time = _oldest([recorded_clock for _, recorded_clock in clock_pairs])
-                # A bookmaker-reported *change* is a quote-bound observation at
-                # that instant. It is not proof that an unchanged price was
-                # observed again at REST receipt. Require both sides and the
-                # provider's recording clocks; downstream TTLs reject old
-                # changes even while the active flags remain affirmative.
-                change_observed = (active and len(outcomes) >= 2
-                                   and all(book_clock is not None and recorded_clock is not None
-                                           and book_clock <= recorded_clock <= envelope.received_at
-                                           for book_clock, recorded_clock in clock_pairs))
+                # v4 documents both clocks as *changes*, not quote observations.
+                # Availability flags do not prove an unchanged selection was
+                # re-observed in this REST response. Retain the change clocks
+                # separately and leave observation eligibility unknown.
                 result.append(SourceOffer(
                     envelope.provider_id, book_key, str(fixture.get("fixtureId", "")), str(market_id),
                     None if player_id == "0" else str(player_id),
@@ -603,24 +669,24 @@ def _oddspapi_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
                     "active" if active else "suspended",
                     {"bookmaker_market_id": market.get("bookmakerMarketId"),
                      "native_outcomes": {key: row.get("bookmakerOutcomeId") for key, row in outcomes.items()},
-                     "participants": [discovered.get("participant1Name") or fixture.get("participant1Id"),
-                                      discovered.get("participant2Name") or fixture.get("participant2Id")],
+                     "participants": [discovered.get("participant1Name") or fixture.get("participant1Name")
+                                      or fixture.get("participant1Id"),
+                                      discovered.get("participant2Name") or fixture.get("participant2Name")
+                                      or fixture.get("participant2Id")],
                      "participant_ids": [fixture.get("participant1Id"), fixture.get("participant2Id")],
                      "scheduled_start": discovered.get("startTime") or fixture.get("startTime"),
                      "event_sport": fixture.get("sportId"),
                      "tournament_id": fixture.get("tournamentId"),
-                     "event_league": discovered.get("tournamentName"),
+                     "event_league": discovered.get("tournamentName") or fixture.get("tournamentName"),
                      "market_catalog": {key: catalog[key] for key in (
                          "marketType", "marketName", "playerProp", "period", "handicap",
                      ) if key in catalog}},
-                    source_observed_at=source_time if change_observed else None,
-                    observation_verified=change_observed,
-                    observation_complete=change_observed,
+                    source_observed_at=None,
+                    observation_verified=False,
+                    observation_complete=False,
                     source_price_changed_at=source_time,
                     market_status_verified=active,
-                    verification_reason=("bookmaker_price_change_with_active_market"
-                                         if change_observed else
-                                         "current_availability_flags_only_no_quote_observation"
+                    verification_reason=("odds_papi_v4_change_clocks_not_quote_observation"
                                          if active else "odds_papi_availability_missing_or_inactive"),
                 ))
     return result
@@ -724,7 +790,10 @@ def _oddize_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
         result.append(SourceOffer(
             envelope.provider_id, group["bookmaker"], group["event_id"], group["market_key"],
             group["player_key"], group["line"], None, group["points"], group["prices"],
-            observed, None, "active", group["context"],
+            # Oddize publishes an observation clock but no current
+            # sportsbook-market status. Do not turn a listed price into an
+            # affirmative ACTIVE claim.
+            observed, None, "unknown", group["context"],
             source_observed_at=observed, observation_verified=verified,
             observation_complete=complete,
             verification_reason=problem or ("unsynchronized_outcomes" if not synchronized else
@@ -760,6 +829,327 @@ def extract_offers(envelope: ProviderEnvelope) -> list[SourceOffer]:
     return []
 
 
+class TrustedSourceProjector:
+    """Source-identity-only markets for the existing pricing engine.
+
+    These markets deliberately have a separate ID namespace and unreviewed
+    payout rules. They can show a fair probability, never a native order.
+    No team/player alias or missing opposing selection is guessed here.
+    """
+    SPORTS = {
+        "basketball_nba": ("basketball", "NBA"),
+        "americanfootball_nfl": ("football", "NFL"),
+        "baseball_mlb": ("baseball", "MLB"),
+        "icehockey_nhl": ("hockey", "NHL"),
+        "americanfootball_ncaaf": ("football", "NCAAF"),
+        "basketball_ncaab": ("basketball", "NCAABM"),
+        "basketball_ncaabm": ("basketball", "NCAABM"),
+        "tennis_atp": ("tennis", "ATP"),
+        "tennis_wta": ("tennis", "WTA"),
+        "mma_mixed_martial_arts": ("mma", "UFC"),
+        "soccer_epl": ("soccer", "EPL"),
+        "soccer_spain_la_liga": ("soccer", "LA_LIGA"),
+        "soccer_germany_bundesliga": ("soccer", "BUNDESLIGA"),
+        "soccer_italy_serie_a": ("soccer", "SERIE_A"),
+        "soccer_france_ligue_one": ("soccer", "LIGUE_1"),
+        "soccer_usa_mls": ("soccer", "MLS"),
+    }
+
+    def __init__(self, pricing_getter):
+        self.pricing_getter = pricing_getter
+        self.active: dict[tuple, tuple[Market, Quote]] = {}
+        self.events: dict[tuple[str, str], dict[str, Any]] = {}
+        self.ambiguous_events: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _key(offer: SourceOffer) -> tuple:
+        return (offer.provider, offer.bookmaker, offer.event_id, offer.market_key,
+                offer.player_key, offer.line, offer.period)
+
+    def invalidate(self, provider: str, sport: str | None = None) -> list[tuple[Market, Quote]]:
+        updates = []
+        for key, (market, quote) in list(self.active.items()):
+            if key[0] == provider and (sport is None or market.extensions.get("provider_sport") == sport):
+                updates.append((market, quote.model_copy(update={"status": "withdrawn"})))
+                del self.active[key]
+        return updates
+
+    def invalidate_scope(self, provider: str, selectors: dict[str, str],
+                         sport: str | None = None) -> list[tuple[Market, Quote]]:
+        """Withdraw research quotes when a named source row is removed or fails."""
+        positions = {"bookmaker": 1, "event_id": 2, "market_key": 3}
+        updates = []
+        for key, (market, quote) in list(self.active.items()):
+            if (key[0] != provider
+                    or sport is not None and market.extensions.get("provider_sport") != sport
+                    or any(key[positions[name]] != value for name, value in selectors.items()
+                           if name in positions)):
+                continue
+            updates.append((market, quote.model_copy(update={"status": "withdrawn"})))
+            del self.active[key]
+        return updates
+
+    @classmethod
+    def _market_quote(cls, envelope: ProviderEnvelope, offer: SourceOffer):
+        from evplatform.core.profile_import import STATISTICS
+        sport_key = offer.context.get("event_sport") or envelope.metadata.get("sport")
+        sport_league = cls.SPORTS.get(sport_key)
+        names = offer.context.get("participants")
+        start = parse_timestamp(offer.context.get("scheduled_start"))
+        if (sport_league is None or not offer.event_id or not offer.bookmaker
+                or not isinstance(names, list) or len(names) != 2
+                or any(not isinstance(name, str) or not name.strip() for name in names)
+                or names[0] == names[1] or start is None):
+            return None
+        inplay = start <= envelope.received_at
+        if inplay and (envelope.provider_id not in {"parlay_ws", "parlay_game_ws"}
+                or envelope.kind != "odds_update" or offer.observed_at is None
+                or not start <= offer.observed_at <= envelope.received_at):
+            # A delivery, heartbeat, or old prematch row does not establish an
+            # in-play price. A post-start row timestamp is still research: it
+            # is not a verified event-state or selection-availability check.
+            return None
+        if offer.market_key in {"h2h", "spreads", "totals"} and offer.period not in {None, "FULL", "full_game"}:
+            return None  # A period market is not the full-game research profile.
+        if sport_league[0] == "soccer" and offer.market_key == "h2h":
+            # A missing draw price does not establish a two-way winner market.
+            return None
+        market_type, statistic, player, line = None, None, None, None
+        if offer.market_key == "h2h" and offer.line is None and offer.player_key is None:
+            market_type = "moneyline"
+            outcomes = {"home": names[0], "away": names[1], names[0]: names[0], names[1]: names[1]}
+            if set(offer.prices) == {"home", "away"} or set(offer.prices) == set(names):
+                odds = {outcomes[key]: price for key, price in offer.prices.items()}
+            else:
+                return None  # Three-way and ambiguous winner markets need their own profile.
+        elif offer.market_key in {"spreads", "totals"} and len(offer.prices) == 2:
+            market_type = "spread" if offer.market_key == "spreads" else "total"
+            points = [number_identity(value) for value in offer.outcome_points.values()]
+            if any(value is None for value in points):
+                return None
+            if market_type == "total":
+                if set(offer.prices) != {"Over", "Under"} and set(offer.prices) != {"over", "under"}:
+                    return None
+                if len(set(points)) != 1:
+                    return None
+                line = Decimal(points[0])
+                odds = {key.lower(): price for key, price in offer.prices.items()}
+            else:
+                if set(offer.prices) != set(names) or (Decimal(offer.outcome_points[names[0]])
+                        != -Decimal(offer.outcome_points[names[1]])):
+                    return None
+                line = abs(Decimal(offer.outcome_points[names[0]]))
+                # A home -3.5 spread is a different selection from home +3.5.
+                # Keep the signed side in the normalized outcome identity.
+                odds = {f"{name} {Decimal(offer.outcome_points[name]):+g}": offer.prices[name]
+                        for name in names}
+        elif offer.market_key in STATISTICS and offer.player_key and offer.line is not None:
+            # The REST contract distinguishes FULL from Q1/1H/P1/F5 and legacy
+            # UNKNOWN. A full-game research profile must not price the latter.
+            if offer.period not in {"FULL", "full_game"}:
+                return None
+            market_type, statistic, player = "player_prop", STATISTICS[offer.market_key], offer.player_key
+            if {key.removeprefix(player + " ").lower() for key in offer.prices} != {"over", "under"}:
+                return None
+            if set(offer.outcome_points.values()) != {offer.line}:
+                return None
+            line = Decimal(offer.line)
+            odds = {key.removeprefix(player + " ").lower(): price for key, price in offer.prices.items()}
+        else:
+            return None
+        if len(odds) != 2 or any(not price.is_finite() or price <= 1 for price in odds.values()):
+            return None
+        period = ("FULL" if offer.market_key in {"h2h", "spreads", "totals"}
+                  or offer.period in {"FULL", "full_game"} else offer.period)
+        identity = {"source": "parlay", "sport": sport_key, "event": offer.event_id,
+                    "start": start.isoformat(), "participants": names, "market": offer.market_key,
+                    "player": player, "line": str(line) if line is not None else None,
+                    "period": period, "outcomes": sorted(odds)}
+        if inplay:
+            # Preserve every existing pregame research ID and give post-start
+            # rows a separate namespace so a prematch quote cannot join them.
+            identity["phase"] = "inplay"
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
+        push_possible = line is not None and line == line.to_integral_value()
+        if push_possible:
+            return None  # Conditional no-push odds need a separate probability model.
+        market = Market(id=f"research:parlay:{digest}", event_id=f"research:parlay:{offer.event_id}",
+            event_name=f"{names[1]} at {names[0]}", sport=sport_league[0], league=sport_league[1],
+            participants=tuple(names), start_time=start,
+            status="live" if inplay else "scheduled", market_type=market_type,
+            player=player, player_id=player, statistic=statistic, line=line,
+            outcomes=tuple(sorted(odds)), settlement=Settlement(
+                period=period, overtime="unverified", void_rule="unreviewed_source_rules",
+                push_rule="possible" if push_possible else "unverified",
+                payout=Decimal(1)),
+            original_ids={offer.provider: offer.event_id}, extensions={
+                "research_only": True, "provider_sport": sport_key,
+                "source_market_key": offer.market_key, "native_mapping_reviewed": False,
+                "normal_outcome_reviewed": False, "source_period": offer.period,
+                "inplay_price_after_start": inplay,
+                "event_state_verified": False})
+        status = offer.status if offer.status in {"suspended", "withdrawn"} else (
+            "active" if offer.market_status_verified else "unknown")
+        quote = Quote(market_id=market.id, provider=offer.provider, bookmaker=offer.bookmaker,
+            market_fingerprint=market.identity(), decimal_odds=odds, status=status,
+            source_time=offer.observed_at, source_observed_at=offer.source_observed_at,
+            source_price_changed_at=offer.source_price_changed_at,
+            provider_reported_price_age_s=offer.provider_reported_price_age_s,
+            source_stored_at=offer.source_stored_at,
+            source_selection_ids=offer.source_selection_ids,
+            source_status_historical_hint=offer.source_status_historical_hint,
+            observation_verified=offer.observation_verified,
+            observation_complete=offer.observation_complete,
+            market_status_verified=offer.market_status_verified,
+            source_scope_poll_at=offer.source_scope_poll_at,
+            source_scope_is_current=offer.source_scope_is_current,
+            verification_reason=offer.verification_reason,
+            settlement_equivalence_verified=False, normal_outcome_verified=False,
+            received_at=offer.received_at or envelope.received_at, provider_time=offer.provider_time,
+            synthetic=envelope.synthetic, original_market_id=offer.market_key)
+        return market, quote
+
+    def apply(self, envelope: ProviderEnvelope, offers: list[SourceOffer]) -> list[tuple[Market, Quote]]:
+        from evplatform.core.pricing import market_config
+        from evplatform.core.reference_profiles import profile_for_market
+        updates = []
+        # Focused REST prop rows may omit fixture names and start. The exact
+        # /events lookup supplies identity context only; it never supplies a
+        # quote observation clock or active-selection attestation.
+        focused_event = envelope.metadata.get("focused_event")
+        if (envelope.provider_id == "parlay_rest" and envelope.kind == "props_snapshot"
+                and isinstance(focused_event, dict)):
+            event_id = focused_event.get("id")
+            names = [focused_event.get("home_team"), focused_event.get("away_team")]
+            start = parse_timestamp(focused_event.get("commence_time"))
+            sport = envelope.metadata.get("sport")
+            if (offers and isinstance(event_id, str) and isinstance(sport, str)
+                    and all(isinstance(name, str) and name.strip() for name in names)
+                    and names[0] != names[1] and start is not None
+                    and all(offer.event_id == event_id for offer in offers)):
+                event_key = sport, event_id
+                evidence = {"scheduled_start": start.isoformat(),
+                            "participants": names, "event_sport": sport}
+                existing = self.events.get(event_key)
+                if event_key not in self.ambiguous_events:
+                    if existing is None or existing == evidence:
+                        self.events[event_key] = evidence
+                    else:
+                        self.events.pop(event_key, None)
+                        self.ambiguous_events.add(event_key)
+        if envelope.kind in {"feed_invalidated", "disconnected", "reconnect", "initial_state"}:
+            sport = envelope.metadata.get("sport") or (
+                envelope.payload.get("sport") if isinstance(envelope.payload, dict) else None)
+            updates.extend(self.invalidate(envelope.provider_id, sport if isinstance(sport, str) else None))
+        for offer in offers:
+            context = offer.context
+            if (offer.provider.startswith("parlay") and offer.market_key in {"h2h", "spreads", "totals"}
+                    and offer.event_id and parse_timestamp(context.get("scheduled_start")) is not None
+                    and isinstance(context.get("participants"), list)
+                    and len(context["participants"]) == 2):
+                event_key = str(context.get("event_sport") or envelope.metadata.get("sport")), offer.event_id
+                existing = self.events.get(event_key)
+                evidence = {"scheduled_start": parse_timestamp(context["scheduled_start"]).isoformat(),
+                            "participants": context["participants"], "event_sport": event_key[0]}
+                if event_key in self.ambiguous_events:
+                    continue
+                if existing is None or existing == evidence:
+                    self.events[event_key] = evidence
+                else:
+                    self.events.pop(event_key, None)
+                    self.ambiguous_events.add(event_key)
+        for offer in offers:
+            if not offer.provider.startswith("parlay"):
+                continue
+            event_key = str(offer.context.get("event_sport") or envelope.metadata.get("sport")), offer.event_id
+            if offer.player_key and event_key in self.events:
+                context = dict(offer.context)
+                for field_name in ("scheduled_start", "participants", "event_sport"):
+                    if (field_name not in context or context[field_name] is None
+                            or field_name == "participants" and not all(context[field_name])):
+                        context[field_name] = self.events[event_key][field_name]
+                offer = replace(offer, context=context)
+            key = self._key(offer)
+            try:
+                projected = self._market_quote(envelope, offer)
+            except (InvalidOperation, ValueError, TypeError):
+                # A malformed line invalidates this one displayed research
+                # quote, not the entire provider stream or its other markets.
+                projected = None
+            if projected is None or offer.status in {"suspended", "withdrawn"}:
+                prior = self.active.pop(key, None)
+                if prior is not None:
+                    updates.append((prior[0], prior[1].model_copy(update={"status": "withdrawn"})))
+                continue
+            market, quote = projected
+            config = market_config(self.pricing_getter(), market)
+            policy = config.trusted_pilot_policy
+            scope = policy.market_scope
+            full_game_winner = (offer.market_key == "h2h"
+                and (offer.period in {"FULL", "full_game"}
+                    or offer.provider == "parlay_game_ws" and offer.period is None)
+                and market.market_type == scope.market_type == "moneyline"
+                and len(market.participants) == 2
+                and set(market.outcomes) == set(market.participants)) if scope is not None else False
+            full_game_prop = (offer.period in {"FULL", "full_game"}
+                and market.market_type == scope.market_type == "player_prop"
+                and market.player and market.player_id
+                and market.statistic in scope.statistics
+                and market.line is not None
+                and market.line != market.line.to_integral_value()
+                and set(market.outcomes) == {"over", "under"}) if scope is not None else False
+            if (scope is not None and ((scope.phase == "pregame" and market.status == "scheduled")
+                    or (scope.phase == "inplay" and market.status == "live"
+                        and market.extensions.get("inplay_price_after_start") is True))
+                    and policy.enabled and policy.owner_approved
+                    and scope.source_normal_rule_evidence
+                    and config.normal_outcome_policy == "winner_only_binary"
+                    # Unsuffixed game h2h is documented as full-game. Props
+                    # require an explicit full-game period and exact half line.
+                    # The reviewed rule attests ordinary overtime/participation
+                    # scope; it never supplies quote freshness or active status.
+                    and (full_game_winner or full_game_prop)
+                    and offer.provider in {policy.provider_id, policy.crosscheck_provider_id}
+                    and offer.bookmaker in policy.trusted_books
+                    and scope.competition_permitted(market.sport, market.league)
+                    and market.settlement.period == "FULL"):
+                # Approval establishes only the ordinary full-game question.
+                # It never converts a heartbeat to quote observation or an
+                # unknown market status to affirmative active evidence.
+                settlement = market.settlement.model_copy(update={
+                    "overtime": "included", "push_rule": "not_applicable"})
+                market = market.model_copy(update={"id": market.id.replace("research:", "reviewed:", 1),
+                    "settlement": settlement, "extensions": {**market.extensions,
+                        "research_only": False, "normal_outcome_reviewed": True,
+                        "reviewed_normal_rule_id": scope.reviewed_normal_rule_id,
+                        "source_normal_rule_evidence": scope.source_normal_rule_evidence}})
+                quote = quote.model_copy(update={"market_id": market.id,
+                    "market_fingerprint": market.identity(), "normal_outcome_verified": True,
+                    "normal_outcome_evidence": (scope.reviewed_normal_rule_id + ": "
+                        + scope.source_normal_rule_evidence)})
+            if config.reference_profile_mode != "strict" or not (
+                    config.reference_quality_mode == "trusted_provider"
+                    or config.multi_book_consensus_enabled):
+                continue
+            if not config.multi_book_consensus_enabled:
+                try:
+                    if profile_for_market(config, market, envelope.received_at) is None:
+                        continue
+                except ValueError:
+                    continue
+            prior = self.active.get(key)
+            if (prior is not None and prior[0].id == market.id
+                    and prior[1].source_time is not None and quote.source_time is not None
+                    and quote.source_time < prior[1].source_time):
+                # A delayed stream frame must never replace a newer price.
+                continue
+            if prior is not None and prior[0].id != market.id:
+                updates.append((prior[0], prior[1].model_copy(update={"status": "withdrawn"})))
+            self.active[key] = market, quote
+            updates.append((market, quote))
+        return updates
+
+
 class VerifiedProviderMapper:
     def __init__(self, mappings: list[VerifiedOfferMapping] | None = None, *, quarantine_limit: int = 1000):
         self.mappings: dict[str, VerifiedOfferMapping] = {}
@@ -771,6 +1161,8 @@ class VerifiedProviderMapper:
         self._partial: dict[str, dict[str, SourceOffer]] = {}
         self._verified_watermarks: dict[tuple[str, str], datetime] = {}
         self._verification_latches: set[tuple[str, str]] = set()
+        self.research_projector: TrustedSourceProjector | None = None
+        self.research_updates: list[tuple[Market, Quote]] = []
         for mapping in mappings or []:
             self.register(mapping)
 
@@ -869,9 +1261,33 @@ class VerifiedProviderMapper:
             # Line-free game rows retain their actual outcome set. Spreads and
             # other prop structures require a dedicated verified mapper.
             moneyline = not offer.player_key and offer.line is None
-            streaming_pair = offer.provider == "parlay_ws" and (moneyline or paired_prop)
+            streaming_pair = offer.provider in {"parlay_ws", "parlay_game_ws"} and (moneyline or paired_prop)
             snapshot_pair = offer.provider == "parlay_rest" and paired_prop
             if len(offer.prices) != 1 or not (streaming_pair or snapshot_pair):
+                # A complete current game-board baseline may use home/away
+                # keys while later change frames use named teams. Seed the
+                # exact market identity with both sides so a one-sided delta
+                # can update the board without inventing a new receipt time
+                # for the unchanged opposing price. The stored side clocks
+                # remain separate and the merge is research-only.
+                participants = offer.context.get("participants")
+                if (offer.provider == "parlay_game_ws" and offer.market_key == "h2h"
+                        and moneyline and len(offer.prices) == 2
+                        and isinstance(participants, list) and len(participants) == 2):
+                    if set(offer.prices) == {"home", "away"}:
+                        names = {"home": participants[0], "away": participants[1]}
+                    elif set(offer.prices) == set(participants):
+                        names = {name: name for name in participants}
+                    else:
+                        names = {}
+                    if len(names) == 2:
+                        identity = offer.identity()
+                        identity.pop("outcome_points")
+                        key = json.dumps(identity, sort_keys=True, default=str)
+                        self._partial[key] = {names[side]: replace(offer,
+                            prices={names[side]: price},
+                            outcome_points={names[side]: offer.outcome_points.get(side)})
+                            for side, price in offer.prices.items()}
                 complete.append(offer)
                 continue
             identity = offer.identity()
@@ -900,6 +1316,12 @@ class VerifiedProviderMapper:
             acceptable = all(part.verification_reason == "quote_bound_collector_observation" for part in sides.values())
             adverse_reason = next((part.verification_reason for part in sides.values()
                                    if part.verification_reason != "quote_bound_collector_observation"), None)
+            # The documented complete game board is a replacement baseline;
+            # later odds_update frames contain only changed rows. Preserve the
+            # oldest side's receipt for a research-only cross-frame pair. It
+            # is not a current observation or an active-status attestation.
+            research_game_pair = (offer.provider == "parlay_game_ws" and offer.market_key == "h2h"
+                                  and len(sides) == 2 and not current_pair)
             complete.append(replace(
                 offer,
                 prices={side: part.prices[side] for side, part in sides.items()},
@@ -907,11 +1329,20 @@ class VerifiedProviderMapper:
                 observed_at=_oldest([part.observed_at for part in sides.values()]),
                 source_observed_at=_oldest(timestamps),
                 source_price_changed_at=_oldest([part.source_price_changed_at for part in sides.values()]),
+                provider_reported_price_age_s=max(
+                    (part.provider_reported_price_age_s for part in sides.values()
+                     if part.provider_reported_price_age_s is not None), default=None),
+                source_stored_at=_oldest([part.source_stored_at for part in sides.values()]),
+                source_status_historical_hint=all(part.source_status_historical_hint for part in sides.values()),
+                source_selection_ids={name: sid for part in sides.values()
+                    for name, sid in part.source_selection_ids.items()},
+                received_at=_oldest([part.received_at for part in sides.values()]),
                 observation_verified=verified,
                 observation_complete=verified and current_pair and same_observation and acceptable,
                 market_status_verified=all(part.market_status_verified for part in sides.values()),
-                verification_reason=("incomplete_or_cross_frame_outcomes" if not current_pair else
-                                     "unsynchronized_outcomes" if not same_observation else
+                verification_reason=("trusted_game_cross_frame_pair" if research_game_pair else
+                                     "incomplete_or_cross_frame_outcomes" if not current_pair else
+                                     "unsynchronized_outcomes" if verified and not same_observation else
                                      adverse_reason or offer.verification_reason),
                 status="active" if all(part.status == "active" for part in sides.values()) else "suspended",
             ))
@@ -960,8 +1391,11 @@ class VerifiedProviderMapper:
         return [offer for offer in offers if not any(_matches_scope(offer, scope) for scope in failures)], failures
 
     def __call__(self, envelope: ProviderEnvelope) -> list[tuple[Market, Quote]]:
+        self.research_updates = []
         if envelope.kind == "feed_invalidated":
             self._clear_partial(envelope.provider_id)
+            if self.research_projector is not None:
+                self.research_updates = self.research_projector.apply(envelope, [])
             return self._invalidate(envelope)
         result = []
         if envelope.kind == "initial_state" or envelope.snapshot_complete:
@@ -973,10 +1407,17 @@ class VerifiedProviderMapper:
             for scope in failed_scopes:
                 self._clear_partial(envelope.provider_id, scope)
                 result.extend(self._invalidate(envelope, scope))
+                if self.research_projector is not None:
+                    self.research_updates.extend(self.research_projector.invalidate_scope(
+                        envelope.provider_id, scope, envelope.metadata.get("sport")))
             offers = self._combine_partial_outcomes(extracted)
+            if self.research_projector is not None:
+                self.research_updates.extend(self.research_projector.apply(envelope, offers))
         except (ValueError, KeyError, TypeError, AttributeError, InvalidOperation):
             self._quarantine(None, "Invalid provider payload or price", envelope.provider_id)
             self._clear_partial(envelope.provider_id)
+            if self.research_projector is not None:
+                self.research_updates = self.research_projector.invalidate(envelope.provider_id)
             return result + self._invalidate(envelope)
         for offer in offers:
             mapping = self.mappings.get(offer.signature)
@@ -1001,14 +1442,24 @@ class VerifiedProviderMapper:
                 continue
             quote = Quote(
                 market_id=mapping.market.id, provider=envelope.provider_id, bookmaker=mapping.bookmaker,
+                market_fingerprint=mapping.market.identity(),
                 decimal_odds={mapping.outcome_map[key]: price for key, price in offer.prices.items()},
                 source_time=offer.observed_at, provider_time=offer.provider_time,
                 source_observed_at=offer.source_observed_at,
                 observation_verified=offer.observation_verified,
                 observation_complete=offer.observation_complete,
                 source_price_changed_at=offer.source_price_changed_at,
+                provider_reported_price_age_s=offer.provider_reported_price_age_s,
+                source_stored_at=offer.source_stored_at,
+                source_selection_ids=offer.source_selection_ids,
+                source_status_historical_hint=offer.source_status_historical_hint,
                 verification_reason=offer.verification_reason,
+                source_scope_poll_at=offer.source_scope_poll_at,
+                source_scope_is_current=offer.source_scope_is_current,
                 market_status_verified=offer.market_status_verified,
+                settlement_equivalence_verified=mapping.settlement_equivalence_verified,
+                normal_outcome_verified=mapping.normal_outcome_verified,
+                normal_outcome_evidence=mapping.normal_outcome_evidence,
                 received_at=envelope.received_at, synthetic=envelope.synthetic,
                 status=offer.status, original_market_id=offer.market_key,
             )

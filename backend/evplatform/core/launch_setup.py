@@ -7,20 +7,23 @@ the optional limits file is explicitly an unapplied operator draft.
 from __future__ import annotations
 
 import os
+import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 from .models import utcnow
 from .readiness import LiveLimits, ReadinessBlocker
+from .paths import runtime_data_file
 
 
 def _running(task):
     return task is not None and not task.done() and not task.cancelled()
 
 
-def operator_limits_draft(path="data/operator_launch_limits.json"):
+def operator_limits_draft(path=None):
     """Only validated, nonsecret money-policy fields may leave this boundary."""
     try:
-        target = Path(path)
+        target = Path(path) if path is not None else runtime_data_file("operator_launch_limits.json")
         if not target.exists():
             return None, None
         if target.stat().st_size > 16384:
@@ -28,6 +31,23 @@ def operator_limits_draft(path="data/operator_launch_limits.json"):
         return LiveLimits.model_validate_json(target.read_text(encoding="utf-8")), None
     except (OSError, ValueError):
         return None, "The saved operator limits need review."
+
+
+def save_operator_limits_draft(limits: LiveLimits, path=None):
+    """Save owner-editable limits without applying or authorizing live risk."""
+    target = Path(path) if path is not None else runtime_data_file("operator_launch_limits.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="operator-limits-", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(limits.model_dump_json())
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def launch_setup(engine, *, limits_draft=None, limits_error=None):
@@ -132,6 +152,11 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                 "identity_verified": current,
                 "reconciled": bool(current and snapshot.reconciled),
                 "cash_available_verified": bool(current and snapshot.cash_available_verified),
+                "exchange_index": snapshot.exchange_index if current else None,
+                "open_order_count": snapshot.open_order_count if current else None,
+                "position_count": snapshot.position_count if current else None,
+                "external_position_count": snapshot.external_position_count if current else None,
+                "external_cost_usd": str(snapshot.external_cost_usd) if current else None,
                 "balance_usd": str(snapshot.balance_usd) if current and snapshot.cash_available_verified
                     and snapshot.balance_usd is not None else None,
                 "observed_at": snapshot.observed_at.isoformat() if snapshot else None,
@@ -153,40 +178,73 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
     }
     native_markets = {item.market.id for item in mappings}
     launch_scope = []
+    structural = native.structural_review
+    source_signatures_loaded = (bool(structural) and all(
+        any(record.plugin.mapper and signature in record.plugin.mapper.mappings
+            for record in engine.registry.records.values() if isinstance(record.plugin, ProviderBridge))
+        for signature in structural.source_signatures.values()))
+    from .readiness import family_market_ready
     for venue, profile in profiles.items():
         scoped_markets = []
-        for market_id in profile.market_ids:
+        dynamic_ids = (tuple(item.market_id for item in native.runtime_facts(venue).markets
+            if family_market_ready(item, profile)) if profile.family_rule else ())
+        for market_id in (*profile.market_ids, *dynamic_ids):
             market = engine.markets.get(market_id)
             name = market_id if market is None else " · ".join(str(value) for value in (
                 market.event_name, market.market_type, market.player, market.statistic,
                 market.line, market.settlement.period) if value is not None and value != "")
-            scoped_markets.append({"id": market_id, "name": name})
+            row = {"id": market_id, "name": name}
+            if market is not None:
+                row["event_id"] = market.event_id
+            if structural and structural.canonical_market_id == market_id:
+                row["event_id"] = structural.canonical_event_id
+                row["structural_native_outcomes"] = structural.native_outcomes
+            selections = [{"ticker": item.instrument.instrument_id,
+                           "outcome": item.instrument.outcome,
+                           "native_outcome": item.instrument.native_outcome}
+                for item in mappings if item.market.id == market_id and item.instrument.venue == venue]
+            if selections:
+                row["native_selections"] = selections
+            scoped_markets.append(row)
         launch_scope.append({"venue": venue, "environment": profile.environment,
             "account_fingerprint": profile.account_fingerprint,
             "markets": scoped_markets, "strategy_ids": list(profile.strategy_ids),
             "provider_ids": list(profile.provider_ids), "settlement_policy": profile.settlement_policy,
-            "validation_pilot": profile.validation_pilot})
+            "validation_pilot": profile.validation_pilot,
+            "family_rule": profile.family_rule.model_dump(mode="json") if profile.family_rule else None})
     requirements = []
 
     def requirement(code, passed, title, detail, *, external=False):
         requirements.append({"code": code, "status": "passed" if passed else "pending",
             "title": title, "detail": detail, "external_evidence_required": external})
 
-    requirement("scope.markets", bool(native_markets & real_reference_markets), "Verify matching real markets",
+    dynamic_markets = {item.market_id for profile in profiles.values() if profile.family_rule
+        for item in native.runtime_facts(profile.venue).markets
+        if family_market_ready(item, profile)}
+    requirement("scope.markets", bool((native_markets | dynamic_markets) & real_reference_markets), "Verify matching real markets",
         "Match event, player, line and settlement rules across real sportsbook references and executable venue books.", external=True)
     requirement("scope.profiles", bool(profiles) and not native.profile_error, "Review the exact accounts and limits",
         "A saved limits draft is not an applied launch profile. Each selected account needs its own verified identity and market scope.")
     pricing = engine.settings.pricing
     reference_profiles_ready = True
+    reference_profiles_ready_by_venue = {venue: bool(profile.market_ids or profile.family_rule)
+        for venue, profile in profiles.items()}
     if pricing.reference_profile_mode == "strict":
         from .reference_profiles import profile_for_market
 
         scoped = []
         for launch_profile in profiles.values():
-            for market_id in launch_profile.market_ids:
+            family_ids = (tuple(item.market_id for item in native.runtime_facts(launch_profile.venue).markets
+                if family_market_ready(item, launch_profile)) if launch_profile.family_rule is not None else ())
+            for market_id in (*launch_profile.market_ids, *family_ids):
                 market = engine.markets.get(market_id)
                 try:
-                    selected = profile_for_market(pricing, market, now) if market else None
+                    if market is not None and pricing.live_multi_book_enabled:
+                        from .multi_book_consensus import native_live_pricing
+                        quotes = list(engine.quotes.get(market_id, {}).values())
+                        selected = profile_for_market(native_live_pricing(market, quotes, pricing, now), market, now)
+                    else:
+                        selected = profile_for_market(pricing, market, now) if market else None
                 except ValueError:
                     selected = None
                 scoped.append((launch_profile, market, selected))
@@ -194,8 +252,24 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         for launch_profile, market, selected in scoped:
             if market is None or selected is None:
                 reference_profiles_ready = False
+                reference_profiles_ready_by_venue[launch_profile.venue] = False
                 continue
             _, profile = selected
+            from .pricing import market_config
+            source_config = market_config(pricing, market)
+            pilot = source_config.trusted_pilot_policy
+            if (source_config.reference_quality_mode == "trusted_provider"
+                    and source_config.normal_outcome_policy == "winner_only_binary"
+                    and pilot.enabled and pilot.owner_approved and pilot.permits_market(market)
+                    and (pilot.market_scope is None or pilot.market_scope.venue == launch_profile.venue)
+                    and pilot.provider_id in launch_profile.provider_ids
+                    and len(set(pilot.trusted_books).intersection(profile.weights_percent))
+                        >= max(pilot.min_distinct_books, profile.min_distinct_books)):
+                # The separate owner-approved provider-trust route is checked
+                # against actual quote evidence by fair_value and runtime
+                # readiness. It intentionally does not claim exact-source TTL
+                # verification or promote this research profile globally.
+                continue
             rules = {rule.bookmaker for rule in pricing.profile_freshness_rules
                 if rule.verified and rule.provider in launch_profile.provider_ids
                 and rule.matches(market) and rule.phase == profile.phase
@@ -203,8 +277,9 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
             if (not profile.live_execution_allowed or len(rules) < profile.min_distinct_books
                     or not set(profile.required_any_anchor).intersection(rules)):
                 reference_profiles_ready = False
+                reference_profiles_ready_by_venue[launch_profile.venue] = False
         requirement("pricing.profiles", reference_profiles_ready, "Validate reference profiles for live execution",
-            "Validate only the selected launch markets with enough independent exact-source freshness rules and an anchor; every current quote must still pass status, completeness and sensitivity checks.", external=True)
+            "Selected markets need either sufficient exact-source rules and an anchor, or an approved scoped provider-trust pilot; every current quote must still pass status, completeness and sensitivity checks.", external=True)
     relevant_software = [item for item in software_blockers if not profiles or item.scope in profiles]
     requirement("software.settlement", bool(accounts) and not relevant_software,
         "Complete venue settlement support",
@@ -213,10 +288,12 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
     all_accounts_current = (bool(profiles) and len(selected_accounts) == len(profiles)
                             and all(item["account_snapshot"]["current"]
                                     and item["account_snapshot"]["reconciled"]
-                                    and item["account_snapshot"]["cash_available_verified"]
+                                    and (item["account_snapshot"]["cash_available_verified"]
+                                         or profiles[item["venue"]].venue == "prophetx"
+                                         and profiles[item["venue"]].limits.cash_policy == "prophetx_exchange_rejection")
                                     for item in selected_accounts))
-    requirement("account.current", all_accounts_current, "Verify spendable cash and existing exposure",
-        "Use current authenticated account reads, private streams and the shared order ledger; balances are never pooled.", external=True)
+    requirement("account.current", all_accounts_current, "Verify account identity and existing exposure",
+        "Use authenticated account reads, private streams and the shared order ledger. Current verified cash is required unless a reviewed ProphetX fixed-stake exchange-rejection policy applies; that policy does not claim available cash.", external=True)
     for kind, title, detail in (
         ("native_lifecycle", "Validate real order and fill handling", "Retain genuine acknowledgement, partial-fill, cancellation-race, unknown-outcome, fee and sequence-recovery evidence."),
         ("restart_recovery", "Validate recovery after restart", "Retain genuine durable-intent, open-order and position recovery evidence for this build."),
@@ -230,7 +307,7 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                     and any(not any(e.kind == kind for e in p.evidence) for p in profiles.values()))
         if deferred:
             passed = False
-            detail += " A one-order, $1 validation pilot defers this historical proof; it is not a completed check."
+            detail += " A one-order, at-most-$5 validation pilot defers this historical proof; it is not a completed check."
         if kind == "geographic_eligibility" and any(p.environment != "production" for p in profiles.values()):
             passed = False
         requirement(f"evidence.{kind}", passed, title, detail, external=kind != "risk_authorization")
@@ -238,6 +315,10 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "Every technical and account check must pass together. Quotes, fees and account facts are checked again before each order.")
     native_mode = engine.settings.mode == "production"
     activation_available = bool(native_mode and engine.settings.live_enabled and aggregate.safe_to_arm and reference_profiles_ready)
+    venue_activation = {venue: {"available": bool(native_mode and engine.settings.live_enabled
+            and report.safe_to_arm and reference_profiles_ready_by_venue.get(venue)),
+            "scope_digest": profile.digest()}
+        for venue, profile in profiles.items() for report in (native.report(venue),)}
     activation_reason = (
         "Current checks passed. Final activation remains an explicit operator action." if activation_available
         else "Finish the current launch checks before enabling real orders." if not aggregate.safe_to_arm or not reference_profiles_ready
@@ -259,15 +340,36 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
         "safe_to_arm": aggregate.safe_to_arm and reference_profiles_ready,
         "activation": {"available": activation_available,
             "scope_digest": aggregate.profile_digest,
+            "by_venue": venue_activation,
             "requires_restart": not native_mode or not engine.settings.live_enabled,
             "action_label": "Enable live trading", "reason": activation_reason},
         "switches": {"live_enabled": engine.settings.live_enabled, "auto_trade": engine.risk.auto_trade,
-                     "kill_switch": engine.risk.kill_switch},
+                     "kill_switch": engine.risk.kill_switch,
+                     "native_enabled_venues": sorted(engine.risk.native_enabled_venues)},
         "scope": {"profile_count": len(profiles), "verified_native_markets": len(native_markets),
             "real_reference_markets": len(real_reference_markets), "native_candidates": len(native.candidates),
             "synthetic_candidates": sum(bool(item.synthetic) for item in engine.opportunities.values())},
+        "external_inventory": {"loaded_count": len(native.external_positions),
+            "owner_tracked_count": sum(getattr(item, "tracking_basis", None) == "owner_attested_raw_fill"
+                for item in native.external_positions),
+            "unsettled_cost_usd": str(sum((native.engine.risk.external_cost(item)
+                for item in native.external_positions), Decimal(0))),
+            "venues": sorted({item.venue for item in native.external_positions}),
+            "pending_order_count": len(native.pending_external_orders),
+            "pending_venues": sorted({item.venue for item in native.pending_external_orders}),
+            "resolved_external_order_count": len(getattr(native, "resolved_external_orders", ())),
+            "unresolved_account_count": len(getattr(native, "unresolved_external_accounts", ())),
+            "unresolved_account_venues": sorted({item.venue for item in getattr(
+                native, "unresolved_external_accounts", ())}),
+            "account_reconciled": bool(native.external_positions) and all(
+                any(snapshot.account_fingerprint == item.account_fingerprint and snapshot.reconciled
+                    for snapshot in native.account_snapshots.values())
+                for item in native.external_positions),
+            "note": "External fills stay outside OMS history. Reviewed unsettled positions reserve cost and fees; resolved raw orders retain evidence without reserving current exposure. Cash already reflects original debits."},
         "risk_policy": risk_policy, "accounts": accounts, "requirements": requirements,
         "launch_scope": launch_scope,
+        "structural_review": ({**structural.model_dump(mode="json"),
+            "source_signatures_loaded": source_signatures_loaded} if structural else None),
         "software_blockers": [item.model_dump(mode="json") for item in software_blockers],
         "pricing": engine.settings.pricing.model_dump(mode="json"), "inputs": inputs,
         "profile_draft": {"can_prepare": False, "blockers": draft_blockers,

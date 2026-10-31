@@ -41,3 +41,9 @@ async def test_scope_requires_reviewed_cash_history_exact_mapping_and_current_fe
         assert not supports_prophetx_settlement_scope(profile, adapter, (bad,), ())
         client.account_review = client.account_review.model_copy(update={"funded_cash_only": False})
         assert not supports_prophetx_settlement_scope(profile, adapter, (item,), ())
+        client.account_review = ProphetXAccountReview(account_fingerprint=profile.account_fingerprint,
+            current_inventory_reviewed_at=utcnow()-timedelta(minutes=1),
+            current_inventory_scope_evidence="OFFLINE reviewed empty wallet fixture",
+            funded_cash_only=True, funding_scope_evidence="OFFLINE no LEC or GEC fixture",
+            valid_until=utcnow()+timedelta(hours=1))
+        assert supports_prophetx_settlement_scope(profile, adapter, (item,), ())

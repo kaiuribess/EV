@@ -57,7 +57,8 @@ def ready_fixture(environment="production"):
         environment=environment, venue=profile.venue, account_fingerprint=profile.account_fingerprint,
         build_id=profile.build_id, mapping_digest=profile.mapping_digest, pricing_digest=profile.pricing_digest,
         checked_at=now, configured_limits=profile.limits, enabled_strategy_ids=profile.strategy_ids,
-        central_risk_enforced=True, opposing_position_guards=True, durable_intents=True, persistence_healthy=True,
+        central_risk_enforced=True, external_exposure_bounded=True,
+        opposing_position_guards=True, durable_intents=True, persistence_healthy=True,
         signal_ledger_healthy=True, native_routing_supported=True, private_stream_authenticated=True,
         private_stream_synchronized=True, reconciliation_healthy=True, startup_recovery_complete=True,
         cancellation_races_supported=True, settlement_reconciliation_supported=True,
@@ -134,7 +135,7 @@ def pilot_fixture():
     return profile, runtime, now
 
 
-def test_one_dollar_first_order_pilot_defers_only_historical_validation():
+def test_bounded_first_order_pilot_defers_only_historical_validation():
     profile, runtime, now = pilot_fixture()
     report = evaluate_readiness(profile, runtime, now=now)
     assert report.safe_to_arm and report.live_trading_ready
@@ -162,20 +163,62 @@ def test_known_failed_lifecycle_evidence_is_not_waived_for_pilot():
     assert "evidence.native_lifecycle" in codes(report)
 
 
-def test_validation_pilot_rejects_unbounded_or_non_kalshi_scope():
+def test_validation_pilot_accepts_scoped_novig_and_rejects_wrong_venue_policy():
     profile, _, _ = pilot_fixture()
+    novig = LaunchProfile.model_validate({**profile.model_dump(), "venue": "novig",
+        "settlement_policy": "novig_ioc_win_loss_halt_on_exception"})
+    assert novig.validation_pilot and novig.limits.max_native_order_attempts == 1
     with pytest.raises(ValidationError):
         LaunchProfile.model_validate({**profile.model_dump(), "venue": "novig"})
+    prophetx = LaunchProfile.model_validate({**profile.model_dump(), "venue": "prophetx",
+        "settlement_policy": "prophetx_funded_cash_win_loss_halt_on_exception"})
+    assert prophetx.validation_pilot
     with pytest.raises(ValidationError):
         LaunchProfile.model_validate({**profile.model_dump(), "limits": {
             **profile.limits.model_dump(), "max_native_order_attempts": None}})
+
+
+def test_validation_pilot_allows_five_dollars_but_not_more():
+    profile, _, _ = pilot_fixture()
+    values = profile.limits.model_dump()
+    for field in ("max_order_stake_usd", "max_event_exposure_usd", "max_player_exposure_usd",
+                  "max_venue_exposure_usd", "max_correlated_exposure_usd", "max_total_exposure_usd"):
+        values[field] = Decimal("5")
+    five = LaunchProfile.model_validate({**profile.model_dump(), "limits": values})
+    assert five.validation_pilot and five.limits.max_order_stake_usd == Decimal("5")
+    values["max_order_stake_usd"] = Decimal("5.01")
+    with pytest.raises(ValidationError):
+        LaunchProfile.model_validate({**profile.model_dump(), "limits": values})
+
+
+def test_prophetx_order_bound_location_path_defers_only_location_evidence():
+    profile, runtime, now = pilot_fixture()
+    profile = LaunchProfile.model_validate({**profile.model_dump(), "venue": "prophetx",
+        "settlement_policy": "prophetx_funded_cash_win_loss_halt_on_exception",
+        "evidence": ()})
+    evidence = tuple(item.model_copy(update={"venue": "prophetx", "profile_digest": profile.digest()})
+        for item in pilot_fixture()[0].evidence if item.kind != "geographic_eligibility")
+    profile = profile.model_copy(update={"evidence": evidence})
+    runtime = runtime.model_copy(update={"venue": "prophetx", "configured_limits": profile.limits,
+        "enabled_strategy_ids": profile.strategy_ids,
+        "markets": (runtime.markets[0].model_copy(update={"order_minimum_verified": True}),),
+        "order_bound_location_check_supported": True})
+    assert evaluate_readiness(profile, runtime, now=now).safe_to_arm
+    blocked = evaluate_readiness(profile, runtime.model_copy(update={
+        "order_bound_location_check_supported": False}), now=now)
+    assert "evidence.geographic_eligibility" in codes(blocked)
 
 
 def test_legacy_profile_digest_stays_stable_without_pilot():
     profile, _, _ = ready_fixture()
     legacy = profile.model_dump(mode="json", exclude={"evidence"})
     legacy.pop("validation_pilot")
+    legacy.pop("family_rule")
     legacy["limits"].pop("max_native_order_attempts")
+    legacy["limits"].pop("max_native_daily_attempts")
+    legacy["limits"].pop("max_native_daily_debit_usd")
+    legacy["limits"].pop("external_exposure_scope")
+    legacy["limits"].pop("cash_policy")
     assert profile.digest() == digest_json(legacy)
 
 
@@ -276,6 +319,17 @@ def test_limits_have_no_implicit_money_authorization():
         LiveLimits.model_validate({**limits().model_dump(), "max_order_stake_usd": "NaN"})
     with pytest.raises(ValidationError):
         LiveLimits.model_validate({**limits().model_dump(), "max_order_stake_usd": "9"})
+
+
+def test_exchange_rejection_cash_policy_needs_explicit_fixed_monetary_caps():
+    base = {**limits().model_dump(), "cash_policy": "prophetx_exchange_rejection",
+            "max_native_daily_debit_usd": "20", "stake_sizing": "capped"}
+    assert LiveLimits.model_validate(base).cash_policy == "prophetx_exchange_rejection"
+    for change in ({"max_native_daily_debit_usd": None}, {"daily_loss_limit_usd": None},
+                   {"stake_sizing": "quarter_kelly"}, {"available_cash_only": True},
+                   {"max_total_exposure_usd": None}):
+        with pytest.raises(ValidationError):
+            LiveLimits.model_validate({**base, **change})
 
 
 def mapping_fixture(market):

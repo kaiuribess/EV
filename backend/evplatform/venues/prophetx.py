@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import math
 import re
@@ -28,7 +29,9 @@ from .dispatch import authenticated_request_guard, placement_guard
 
 
 class ProphetXSettings(NativeSettings):
-    requests_per_second: float = Field(default=1, gt=0, le=100)
+    # The documented default tier is 1 request/second. Production returned
+    # 429 on adjacent catalog reads at that boundary, so leave headroom.
+    requests_per_second: float = Field(default=0.5, gt=0, le=100)
     api_key: str = Field(default="", repr=False)
     secret_key: SecretStr = Field(default_factory=lambda: SecretStr(""), repr=False)
 
@@ -57,7 +60,8 @@ def executable_level(selection: dict) -> dict:
     """Return unambiguous stake and payout units; missing `value` has no depth."""
     price = decimal_value(selection["price"])
     stake = decimal_value(selection.get("value", 0))
-    if price != price.to_integral_value() or abs(price) < 100 or stake < 0:
+    if (not price.is_finite() or not stake.is_finite() or price != price.to_integral_value()
+            or abs(price) < 100 or stake < 0):
         raise ValueError("Invalid ProphetX American-price level")
     gross_per_stake = Decimal(1) + (price / 100 if price > 0 else 100 / -price)
     return {
@@ -90,11 +94,17 @@ class ProphetXClient(NativeTransport):
         "sandbox": "https://api.sandbox.prophetx.dev/partner",
         "production": "https://cash.api.prophetx.co/partner",
     }
+    GEO_HOSTS = {
+        "sandbox": "https://sandbox.prophetx.dev",
+        "production": "https://www.prophetx.co",
+    }
     TERMINAL_STATES = {"credentials_missing", "unauthorized", "access_denied", "geolocation_required",
                        "session_limit", "auth_outcome_unknown", "subscription_rejected", "auth_refresh_failed"}
 
     def __init__(self, settings: ProphetXSettings | None = None, client: httpx.AsyncClient | None = None):
         super().__init__(settings or ProphetXSettings(), client)
+        from .prophetx_market_data import ProphetXMarketData
+        self.public_market_data = ProphetXMarketData()
         self._access_token = ""
         self._refresh_token = ""
         self._access_expires = 0.0
@@ -109,6 +119,8 @@ class ProphetXClient(NativeTransport):
         self._authenticated_user_id = ""  # Backend-only identity from signed registration, never a key.
         self._confirmed_channels: set[str] = set()
         self._market_frames = 0
+        self._location_attempt: tuple[str, float] | None = None
+        self._channel_limit: int | None = None
         self._refresh_task: asyncio.Task | None = None
         self._last_auth_failure: dict | None = None
         from .prophetx_private import ProphetXPrivateState
@@ -139,7 +151,10 @@ class ProphetXClient(NativeTransport):
                 "signin_confirmed": self._signin_confirmed,
                 "subscriptions_confirmed": len(self._confirmed_channels), "subscriptions_expected": len(self.channels),
                 "market_frames": self._market_frames, "access_expires_at": self._access_expires or None,
-                "market_data_received": self._market_frames > 0, "trading_enabled": False,
+                 "market_data_received": any(book["levels"] for book in self.public_market_data.books.values()),
+                 "market_book_subjects": len(self.public_market_data.books),
+                 "market_book_rejections": self.public_market_data.rejected_frames,
+                 "channel_limit": self._channel_limit, "trading_enabled": False,
                 "last_auth_failure": self._last_auth_failure}
 
     def _require_credentials(self):
@@ -246,8 +261,9 @@ class ProphetXClient(NativeTransport):
             if self._ws is not None:
                 await self._ws.close()
 
-    async def discover_sports(self) -> dict:
-        return await self.request("GET", "/mm/get_tournaments")
+    async def discover_sports(self, *, active_events_only: bool = False) -> dict:
+        params = {"has_active_events": "true"} if active_events_only else None
+        return await self.request("GET", "/mm/get_tournaments", params=params)
 
     async def discover_events(self, **params) -> dict:
         return await self.request("GET", "/mm/get_sport_events", params=params)
@@ -269,6 +285,19 @@ class ProphetXClient(NativeTransport):
             raise ValueError("Invalid ProphetX price ladder")
         self.price_ladder = set(prices)
 
+    async def refresh_verified_price_ladder(self):
+        """Read the account's current v4 ladder; never fall back to guessed odds."""
+        self.price_ladder.clear()
+        response = await self.fetch_price_ladder()
+        if (not isinstance(response, dict) or response.get("success") is False
+                or not isinstance(response.get("data"), list)):
+            raise VenueError("ProphetX price ladder response is not a price list")
+        try:
+            self.set_verified_price_ladder(response["data"])
+        except ValueError as exc:
+            raise VenueError("ProphetX price ladder response is invalid") from exc
+        return self.price_ladder
+
     async def reconcile_order(self, order_id: str) -> dict:
         return await self.request("GET", f"/v4/mm/get_order/{quote(order_id, safe='')}")
 
@@ -280,6 +309,39 @@ class ProphetXClient(NativeTransport):
 
     async def fetch_balance(self) -> dict:
         return await self.request("GET", "/v4/mm/get_balance")
+
+    async def check_current_location(self, client_order_id: str) -> bool:
+        """Check this machine's current egress IP with ProphetX before an order.
+
+        This is deliberately separate from account authentication and never
+        accepts a caller-supplied IP or retains the address in logs/state.
+        An earlier successful check cannot certify a later order.
+        """
+        self._location_attempt = None
+        if not isinstance(client_order_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_order_id):
+            return False
+        try:
+            response = await self.http.get("https://api.ipify.org", params={"format": "json"})
+            response.raise_for_status()
+            address = ipaddress.ip_address(response.json()["ip"])
+            if not address.is_global:
+                raise ValueError("Non-public egress IP")
+            response = await self.http.post(
+                self.GEO_HOSTS[self.settings.environment] + "/ip-geolocation/api/v1/check-ip",
+                json={"ip_address": str(address)},
+            )
+            response.raise_for_status()
+            result = response.json()
+            if isinstance(result, dict) and result.get("success") is True:
+                self._location_attempt = (client_order_id, time.monotonic() + 10)
+                return True
+            return False
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return False
+
+    def location_valid_for(self, client_order_id: str) -> bool:
+        return bool(self._location_attempt and self._location_attempt[0] == client_order_id
+                    and time.monotonic() < self._location_attempt[1])
 
     async def fetch_transactions(self, **params) -> dict:
         """Authenticated wallet ledger; never infer commission from a rate."""
@@ -309,16 +371,38 @@ class ProphetXClient(NativeTransport):
     async def submit_order(self, body: dict, *, before_send: Callable[[], None] | None = None) -> dict:
         client_id = body.get("external_id", "")
         guard = placement_guard(self, client_id, before_send)
+        if self.settings.environment == "production" and not self.location_valid_for(client_id):
+            raise VenueError("A fresh ProphetX location check is required for this order")
         if body.get("price") not in self.price_ladder:
             raise VenueError("Price must be validated against the current native price ladder")
 
         def dispatch():
             guard()
+            if self.settings.environment == "production":
+                if not self.location_valid_for(client_id):
+                    raise VenueError("ProphetX location check expired before dispatch")
+                self._location_attempt = None  # One check permits one transmission only.
             if body.get("price") not in self.price_ladder:
                 raise VenueError("Native price ladder changed before placement")
 
-        return await self.request("POST", "/v4/mm/submit_order", body=body, mutation_id=client_id,
-                                  before_send=dispatch)
+        try:
+            return await self.request("POST", "/v4/mm/submit_order", body=body, mutation_id=client_id,
+                                      before_send=dispatch)
+        except VenueHTTPError as exc:
+            # ProphetX documents these exact HTTP responses as placement
+            # rejections. A duplicate external_id, unrecognized code, timeout,
+            # or server error can conceal an accepted order and stays UNKNOWN.
+            from .common import ConfirmedOrderRejected
+            definite = {"invalid_strike_id", "invalid_quantity", "invalid_external_id",
+                "invalid_aggregator_id", "order_limit_exceeded", "strike_id_invalid",
+                "invalid_price", "order_invalid_profit", "event_not_available",
+                "market_is_only_for_prematch", "supplemental_market_pre_match_only",
+                "sport_event_is_not_booked", "sport_event_competitor_blacklisted",
+                "invalid_request"}
+            if (exc.status_code == 400 and exc.code in definite) or (
+                    exc.status_code == 403 and exc.code == "err_order_placement_disabled"):
+                raise ConfirmedOrderRejected(self.venue_id, exc.code) from None
+            raise
 
     async def cancel_order(self, order_id: str, *, external_id: str) -> dict:
         # 409/425 and eventually consistent 404 are not interpreted as cancellation.
@@ -367,6 +451,7 @@ class ProphetXClient(NativeTransport):
         if data.get("channel_count", 0) > data.get("channel_limit", 0):
             self.health, self.reason = "subscription_rejected", "ProphetX channel quota exceeded"
             raise VenueError("ProphetX channel quota exceeded")
+        self._channel_limit = data.get("channel_limit")
         self.channels = {item["channel_name"]: item for item in data["authorized_channel"]}
         self._authenticated_user_id = self.registration_user_id(data["authenticated"])
         self.private.register(data["authorized_channel"], user=self._authenticated_user_id,
@@ -494,6 +579,7 @@ class ProphetXClient(NativeTransport):
                 self._confirmed_channels.clear()
 
     async def disconnect(self):
+        self._location_attempt = None
         self.private.reset()
         await super().disconnect()
         self._signin_confirmed = False
@@ -515,7 +601,7 @@ class ProphetXClient(NativeTransport):
                              "all_or_none": False, "asynchronous_matching": True, "native_live_tested": False,
                              "supported_settlement_policies": ["prophetx_funded_cash_win_loss_halt_on_exception"]},
             "permissions": ["network", "secret:prophetx", "orders:conditional"],
-            "health_check": True, "rate_limits": {"local_default_rps": 1, "read_poll_min_seconds": 1},
+            "health_check": True, "rate_limits": {"local_default_rps": 0.5, "read_poll_min_seconds": 2},
             "config_schema": {"environment": {"type": "string", "enum": ["sandbox", "production"], "default": "sandbox"}},
             "docs": "https://docs.prophetx.co/docs/integrate-with-websockets",
         }

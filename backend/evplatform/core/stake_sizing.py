@@ -1,9 +1,10 @@
 """Conservative quarter Kelly in USD, using one account's available cash.
 
 Fees are bounded at the smallest legal order so fixed-fee dilution cannot
-inflate the Kelly fraction. Refund/void probability is treated as a loss for
-sizing only. This is deliberately more conservative than binary Kelly when
-settlement has additional outcomes; it never claims fitted probabilities.
+inflate the Kelly fraction. Under strict settlement modeling, bounded
+refund/void probability is treated as a loss for sizing only. Under the
+winner-only policy, sizing is conditional on normal resolution instead; it
+does not assert zero real-world exceptional-event probability.
 """
 from decimal import Decimal as D, ROUND_CEILING, localcontext
 
@@ -24,6 +25,7 @@ class StakeSizing(NativeContract):
     minimum_quantity: Positive
     minimum_cost_usd: Positive
     minimum_cost_with_fees_usd: Positive
+    minimum_upfront_debit_usd: Positive
     minimum_evidence: str = Field(min_length=1)
 
 
@@ -38,11 +40,12 @@ def minimum_order(book, price, now):
         quantity = max(ins.minimum_quantity, cash_steps * ins.quantity_step)
         ins.validate_quantity(quantity, order=True)
         cost = ins.cost_for(quantity, price)
-        return quantity, cost, cost + book.fee_bound.maximum_fee(ins, quantity, now)
+        fee = book.fee_bound
+        return quantity, cost, cost + fee.maximum_fee(ins, quantity, now, price), cost + fee.maximum_upfront_fee(ins, quantity, now, price)
 
 
 def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_size_usd, now,
-                        max_stake_usd=None, price=None):
+                        max_stake_usd=None, price=None, include_fees_in_estimate=True):
     if isinstance(available_cash_usd, (float, bool)) or available_cash_usd is None:
         raise NoSignal("Quarter Kelly requires verified account cash")
     cash = D(available_cash_usd)
@@ -50,14 +53,22 @@ def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_
         raise NoSignal("No verified available account cash after pending reservations")
     price = book.asks[0].price if price is None else price
     ins = book.instrument
-    quantity, cost, reserved = minimum_order(book, price, now)
+    quantity, cost, economic_cost, upfront_debit = minimum_order(book, price, now)
     with localcontext() as context:
         context.prec = 100
         # Match size may be much smaller than the NEW order minimum. Reserve
         # for a cash rounding loss on every smallest legal partial match.
         gross = ins.minimum_split_payout(quantity, price) / quantity
-        unit_cost = reserved / quantity
-        p = probability * (1 - bounds.push_probability_upper_bound - bounds.void_probability_upper_bound)
+        if not include_fees_in_estimate:
+            unit_cost = cost / quantity
+        elif book.fee_bound.fee_payment_timing == "winnings_only":
+            # The maximum fee is paid only when the outcome wins. Keep the
+            # full bound on that branch, with no fictitious fee on a loss.
+            gross -= (economic_cost - cost) / quantity
+            unit_cost = cost / quantity
+        else:
+            unit_cost = economic_cost / quantity
+        p = probability * (1 - bounds.non_decisive_probability())
         fraction = max(D(0), min(D(1), (p * gross - unit_cost) / (gross - unit_cost))) if gross > unit_cost else D(0)
         budget = cash * D("0.25") * fraction
         if max_stake_usd is not None:
@@ -67,5 +78,6 @@ def quarter_kelly_budget(book, probability, bounds, *, available_cash_usd, unit_
             budget = min(budget, cap)
     return StakeSizing(unit_size_usd=unit_size_usd, account_cash_after_reservations_usd=cash,
         conservative_probability=p, full_kelly_fraction=fraction, budget_usd=budget,
-        minimum_quantity=quantity, minimum_cost_usd=cost, minimum_cost_with_fees_usd=reserved,
+        minimum_quantity=quantity, minimum_cost_usd=cost, minimum_cost_with_fees_usd=economic_cost,
+        minimum_upfront_debit_usd=upfront_debit,
         minimum_evidence=ins.order_minimum_source)

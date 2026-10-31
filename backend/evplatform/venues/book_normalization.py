@@ -57,8 +57,11 @@ class NativeMarketMapping(NativeContract):
             raise ValueError("ProphetX mappings require native event and market scope")
         if self.source_timestamp_unit != "unknown" and not self.timestamp_unit_evidence.strip():
             raise ValueError("Numeric ProphetX clock units require verification evidence")
-        if not self.fee_bound.verified or self.fee_bound.instrument_fingerprint != instrument_fingerprint(i):
+        if not self.fee_bound.usable_for_execution or self.fee_bound.instrument_fingerprint != instrument_fingerprint(i):
             raise ValueError("Fee bound must be verified for this exact instrument")
+        if (self.fee_bound.evidence_kind == "owner_approved_assumption"
+                and (i.venue != "prophetx" or not i.source.startswith("family:"))):
+            raise ValueError("Owner fee assumptions require an approved ProphetX family rule")
         return self
 
 
@@ -93,7 +96,10 @@ def _oldest(times) -> datetime | None:
 class NativeBookMapper:
     def __init__(self, mappings: list[NativeMarketMapping] | tuple[NativeMarketMapping, ...] = ()):
         self.mappings = tuple(NativeMarketMapping.model_validate(item) for item in mappings)
+        self._static_mappings = self.mappings
         self.mapping_digest = digest_json(NativeMappingFile(mappings=self.mappings).model_dump(mode="json"))
+        self.dynamic_rule_digests: dict[tuple[str, str, str], str] = {}
+        self.dynamic_evidence: dict[tuple[str, str, str], dict] = {}
         self._index: dict[tuple[str, str], list[NativeMarketMapping]] = {}
         self._clocks: dict[tuple[str, str], dict] = {}
         self._sequences: dict[tuple[str, str, str], int] = {}
@@ -115,6 +121,74 @@ class NativeBookMapper:
             native.add(native_key)
             source_id = item.source_market_id if i.venue == "prophetx" else i.instrument_id
             self._index.setdefault((i.venue, source_id), []).append(item)
+
+    def register_family_mapping(self, item: NativeMarketMapping, *, rule_digest: str,
+                                evidence: dict | None = None) -> bool:
+        """Index a per-fixture mapping without changing the approved file digest.
+
+        The caller must validate the approved family rule against current
+        source/native facts and fee lineage. A rediscovered identical mapping
+        is idempotent; conflicting identity is never silently replaced.
+        """
+        item = NativeMarketMapping.model_validate(item)
+        if len(rule_digest) != 64 or any(ch not in "0123456789abcdef" for ch in rule_digest):
+            raise ValueError("Approved family rule digest is required")
+        i = item.instrument
+        key = (i.venue, i.canonical_market_id, i.outcome)
+        if evidence is not None:
+            required = {"source_event_id", "source_identity", "native_market_id",
+                "native_outcome_id", "native_rule_sha256", "catalog_observed_at",
+                "fee_observed_at"}
+            if not isinstance(evidence, dict) or not required <= evidence.keys() or any(
+                    not isinstance(evidence[name], str) or not evidence[name]
+                    for name in required):
+                raise ValueError("Family mapping requires attributable source, native and fee evidence")
+            if (evidence["source_identity"] != item.market.identity()
+                    or evidence["native_market_id"] != (item.source_market_id or i.instrument_id)
+                    or evidence["native_outcome_id"] != i.native_outcome):
+                raise ValueError("Family mapping evidence does not bind this exact instrument")
+        native_key = (i.venue, i.instrument_id, i.native_outcome)
+        existing = next((row for row in self.mappings if (
+            row.instrument.venue, row.instrument.canonical_market_id, row.instrument.outcome) == key), None)
+        if existing is not None:
+            if (self.dynamic_rule_digests.get(key) != rule_digest
+                    or existing.market != item.market or existing.instrument != item.instrument
+                    or existing.opposing_outcome != item.opposing_outcome
+                    or existing.source_event_id != item.source_event_id
+                    or existing.source_market_id != item.source_market_id
+                    or existing.prop_sub_type != item.prop_sub_type
+                    or existing.source_timestamp_unit != item.source_timestamp_unit
+                    or existing.timestamp_unit_evidence != item.timestamp_unit_evidence):
+                raise ValueError("Family mapping changed after registration")
+            prior_evidence = self.dynamic_evidence.get(key)
+            if evidence is not None and prior_evidence is not None:
+                stable = required - {"catalog_observed_at", "fee_observed_at"}
+                if any(prior_evidence[name] != evidence[name] for name in stable):
+                    raise ValueError("Family mapping evidence lineage changed")
+            if existing.fee_bound != item.fee_bound:
+                if (item.fee_bound.observed_at <= existing.fee_bound.observed_at
+                        or item.fee_bound.source.split(";", 1)[0] !=
+                        existing.fee_bound.source.split(";", 1)[0]):
+                    raise ValueError("Family fee lineage changed or moved backwards")
+                source_id = item.source_market_id if i.venue == "prophetx" else i.instrument_id
+                self.mappings = tuple(item if row is existing else row for row in self.mappings)
+                self._index[(i.venue, source_id)] = [item if row is existing else row
+                    for row in self._index[(i.venue, source_id)]]
+            if evidence is not None:
+                self.dynamic_evidence[key] = evidence
+            return False
+        if any((row.instrument.venue, row.instrument.instrument_id,
+                row.instrument.native_outcome) == native_key or
+               row.market.id == item.market.id and row.market.identity() != item.market.identity()
+               for row in self.mappings):
+            raise ValueError("Ambiguous native or canonical family mapping")
+        self.mappings += (item,)
+        self.dynamic_rule_digests[key] = rule_digest
+        if evidence is not None:
+            self.dynamic_evidence[key] = evidence
+        source_id = item.source_market_id if i.venue == "prophetx" else i.instrument_id
+        self._index.setdefault((i.venue, source_id), []).append(item)
+        return True
 
     @classmethod
     def from_file(cls, path: str | Path) -> "NativeBookMapper":
@@ -163,7 +237,7 @@ class NativeBookMapper:
             if venue == "novig":
                 return self._novig(client, frame, received)
             if venue == "prophetx":
-                return self._prophetx(frame, received)
+                return self._prophetx(client, frame, received)
             if venue == "polymarket_us":
                 return self._polymarket_us(client, frame, received)
             return []
@@ -350,7 +424,7 @@ class NativeBookMapper:
                                          synchronized=key in self._clocks, status=status))
         return result
 
-    def _prophetx(self, frame, received):
+    def _prophetx(self, client, frame, received):
         if frame.get("event") in {"market", "v2.market", "market_strike", "v2.market_strike", "sport_event", "v2.sport_event"}:
             # Rule/status changes require fresh reviewed scope and book data.
             # Do not guess which native status strings mean active.
@@ -365,6 +439,14 @@ class NativeBookMapper:
             return []
         if not isinstance(scope, dict) or str(scope.get("event_id")) != str(data["sport_event_id"]):
             return self.invalidate("prophetx")
+        if frame.get("envelope", {}).get("op") == "d":
+            return self.invalidate("prophetx")
+        if client is not None and hasattr(client, "public_market_data"):
+            catalog = client.public_market_data.catalog.get((str(data["sport_event_id"]), native_market))
+            catalog_at = client.public_market_data.catalog_at
+            if (catalog is None or catalog["status"] != "active" or catalog_at is None
+                    or not 0 <= (received-catalog_at).total_seconds() <= 600):
+                return self.invalidate("prophetx")
         info = data["info"]
         sequence = int(info["sequence_number"])
         subject = f"{data['sport_event_id']}:{native_market}:{info['id']}"
@@ -381,17 +463,42 @@ class NativeBookMapper:
                     or (mapping.prop_sub_type is not None and str(scope.get("sub_type")) != mapping.prop_sub_type)
                     or (mapping.prop_sub_type is None and scope.get("sub_type") is not None)):
                 continue
+            if client is not None and hasattr(client, "public_market_data"):
+                identity = catalog["strikes"].get(mapping.instrument.instrument_id)
+                if identity is None or identity["outcome_id"] != mapping.instrument.native_outcome:
+                    return self.invalidate("prophetx")
             selections = [row for group in groups for row in group
                           if str(row.get("strike_id")) == mapping.instrument.instrument_id
                           and str(row.get("outcome_id")) == mapping.instrument.native_outcome]
+            if any(str(row.get("strike_id")) == mapping.instrument.instrument_id
+                   and str(row.get("outcome_id")) != mapping.instrument.native_outcome
+                   for group in groups for row in group):
+                return self.invalidate("prophetx")
             if not selections:
                 # This event can update another strike within the same market.
                 # Do not clear or refresh an unrelated strike's snapshot.
                 continue
             levels, times, seen_prices = [], [], set()
             for selection in selections:
+                stake = decimal_value(selection.get("value", 0))
+                if not stake.is_finite() or stake < 0:
+                    raise ValueError("Invalid ProphetX advertised stake")
+                if stake == 0:
+                    continue  # provider placeholder: no executable price or depth
                 parsed = executable_level(selection)
                 p, q = parsed["american_price"], parsed["executable_stake_usd"]
+                # The reviewed fee cap must cover the documented 2% of
+                # winnings at this *actual* American price. A fixed $0.02 per
+                # dollar of risk would understate longshot commissions.
+                minimum_fee_per_stake = (p / Decimal(100) if p > 0
+                    else Decimal(100) / abs(p)) * Decimal(".02")
+                fee = mapping.fee_bound
+                covers_public_rate = (fee.assumed_winnings_profit_rate == Decimal(".02")
+                    if fee.evidence_kind == "owner_approved_assumption"
+                    else fee.per_unit_usd >= minimum_fee_per_stake)
+                if fee.fee_payment_timing != "winnings_only" or not covers_public_rate:
+                    levels, times = [], []
+                    break
                 if p in seen_prices:
                     raise ValueError("Duplicate ProphetX price level")
                 seen_prices.add(p)
@@ -400,8 +507,6 @@ class NativeBookMapper:
                     times.append(_clock(parsed["source_observed_at"], mapping.source_timestamp_unit))
             # The official payload contains all displayed selections for a strike;
             # replacements may reduce displayed depth and never borrow old levels.
-            if frame.get("envelope", {}).get("op") == "d":
-                levels, times = [], []
             result.append(self._book(mapping, levels, times, sequence, received,
                                      status="active" if levels else "suspended"))
         return result

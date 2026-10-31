@@ -15,6 +15,7 @@ from evplatform.core.native_accounting import NativeCumulativeSnapshot, NativeFi
 from evplatform.core.native_oms import NativeOrder, NativeOrderManager, NativeSettlement
 from evplatform.core.pricing import fair_value, opportunity
 from evplatform.core.risk import RiskEngine, RiskRejected
+from evplatform.core.external_inventory import PendingExternalOrder
 from evplatform.core.storage import Storage
 from evplatform.venues.reconciliation import NativeCancelReport, NativeOrderReport
 
@@ -34,17 +35,90 @@ def order(market, *, venue="novig", outcome="home", identifier=None):
         risk_family_id=risk_family(market), reviewed_correlation_groups=reviewed_correlations(market))
 
 
+async def test_kalshi_shard_three_persists_with_unknown_intent_across_restart(system, market):
+    manager, _, storage, _ = system
+    base = order(market)
+    instrument = base.intent.instrument.model_copy(update={
+        "venue": "kalshi", "instrument_id": "OFFLINE-NBA-TICKER", "native_outcome": "yes",
+        "exchange_index": 3, "quantity_unit": "contracts", "payout_per_unit_usd": D(1),
+        "quantity_step": D(".01"), "minimum_quantity": D(".01"), "cash_quantum_usd": D(".0001"),
+        "price_bands": (NativePriceBand(minimum=".0001", maximum=".9999", step=".0001"),)})
+    intent = base.intent.model_copy(update={"instrument": instrument, "quantity": D(1),
+                                     "mode": "production"})
+    uncertain = NativeOrder.model_validate({**base.model_dump(mode="json"),
+        "intent": intent.model_dump(mode="json"), "status": "submitting"})
+    await manager._save(uncertain)
+    recovered_risk = RiskEngine(RiskConfig(live_max_order_stake=D("1")))
+    recovered = NativeOrderManager(recovered_risk, storage, manager.bus, Metrics(), lock=asyncio.Lock(),
+        revalidate=lambda o: None, preflight=lambda o: None)
+    await recovered.start()
+    saved = recovered_risk.native_orders[uncertain.id]
+    assert saved.intent.instrument.exchange_index == 3
+    assert saved.intent.instrument.instrument_id == "OFFLINE-NBA-TICKER"
+    assert saved.account_fingerprint == uncertain.account_fingerprint
+    assert saved.status == OrderStatus.UNKNOWN and recovered_risk.kill_switch
+    assert not recovered_risk.auto_trade
+
+
+def test_other_venue_pending_external_order_blocks_real_reservation_but_not_research(market):
+    risk = RiskEngine(RiskConfig())
+    risk.pending_external_orders = (PendingExternalOrder(venue="kalshi", native_order_id="outside",
+        source_artifact="kalshi_smoke.json", source_sha256="a" * 64),)
+    base = order(market)
+    proposed = base.model_copy(update={"intent": base.intent.model_copy(update={"mode": "production"})})
+    with pytest.raises(RiskRejected, match="Unbounded external account exposure"):
+        risk.check_native_reservation(proposed, preview_only=True)
+
+
+def test_reviewed_account_scope_isolates_other_venue_inventory_but_not_its_own(market):
+    from types import SimpleNamespace
+
+    risk = RiskEngine(RiskConfig(live_max_order_stake=D("25"),
+        live_stake_authorized=True, max_native_daily_debit=D("25")))
+    base = order(market)
+    proposed = base.model_copy(update={"intent": base.intent.model_copy(update={
+        "mode": "production"}), "execution_origin": "manual"})
+    risk.native_exposure_scope = ("novig", "a" * 64)
+    risk.pending_external_orders = (PendingExternalOrder(venue="kalshi",
+        native_order_id="outside", source_artifact="kalshi_smoke.json",
+        source_sha256="a" * 64),)
+    other = SimpleNamespace(venue="prophetx", account_fingerprint="b" * 64,
+        environment="production", sport=market.sport, cost_usd=D("24"),
+        recorded_at=utcnow())
+    risk.external_positions = (other,)
+    assert risk.external_exposure_bounded("novig")
+    assert risk.exposures() == D("24")  # Reporting keeps the whole portfolio.
+    assert risk.native_exposures(proposed) == 0
+    risk.check_native_reservation(proposed, preview_only=True)
+    risk.pending_external_orders = (SimpleNamespace(venue="novig"),)
+    with pytest.raises(RiskRejected, match="Unbounded external account exposure"):
+        risk.check_native_reservation(proposed, preview_only=True)
+    risk.pending_external_orders = ()
+    risk.external_positions = (SimpleNamespace(venue="novig",
+        account_fingerprint="a" * 64, environment="production",
+        sport=market.sport, cost_usd=D(".97"), recorded_at=utcnow()),)
+    with pytest.raises(RiskRejected, match="external native position blocks this sport"):
+        risk.check_native_reservation(proposed, preview_only=True)
+    wrong_account = proposed.model_copy(update={"account_fingerprint": "c" * 64})
+    with pytest.raises(RiskRejected, match="outside the reviewed account exposure scope"):
+        risk.check_native_reservation(wrong_account, preview_only=True)
+
+
 class Adapter:
     def __init__(self, risk):
         self.risk, self.submissions, self.cancellations = risk, [], []
         self.bound_account_fingerprint = "a" * 64
         self.report = None
         self.fail = False
+        self.reject_code = None
         self.bound_account_fingerprint = "a"*64
 
     async def submit_intent(self, intent, authorization):
         assert self.risk.authority.consume(authorization, intent.id)
         self.submissions.append(intent)
+        if self.reject_code:
+            from evplatform.venues.common import ConfirmedOrderRejected
+            raise ConfirmedOrderRejected("prophetx", self.reject_code)
         if self.fail: raise TimeoutError("OFFLINE unknown response")
         return {"native_order_id": "native-"+intent.id}
 
@@ -63,6 +137,10 @@ async def system(tmp_path):
     await storage.open()
     risk = RiskEngine(RiskConfig(live_max_order_stake=D("1")))
     risk.auto_trade = True
+    # OMS fixtures exercise order accounting independently of the reviewed
+    # launch controller; the venue selector itself has separate gate tests.
+    risk.native_enabled_venues = frozenset({"novig", "kalshi", "prophetx", "polymarket_us"})
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     schemas = SchemaRegistry()
     schemas.register("native.order", 1, NativeOrder)
     schemas.register("native.settlement", 1, NativeSettlement)
@@ -148,15 +226,76 @@ async def test_one_native_attempt_cap_survives_restart_and_unknown_outcome(syste
     assert len(adapter.submissions) == 1
     risk.kill_switch = False
     risk.auto_trade = True
+    risk.native_enabled_venues = frozenset({"novig"})
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
         await manager.execute(order(market))
     risk.native_orders.clear()
     await manager.start()
     risk.kill_switch = False
     risk.auto_trade = True
+    risk.native_enabled_venues = frozenset({"novig"})
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
     with pytest.raises(RiskRejected, match="Native order attempt limit reached"):
         await manager.execute(order(market))
     assert len(adapter.submissions) == 1
+
+
+async def test_recurring_daily_attempt_cap_counts_unknown_intent_after_restart(system, market):
+    manager, risk, _, adapter = system
+    risk.config = risk.config.model_copy(update={
+        "max_native_order_attempts": None, "max_native_daily_attempts": 1,
+        "max_native_daily_debit": D("5")})
+    adapter.fail = True
+    first = await manager.execute(order(market))
+    assert first.status == OrderStatus.UNKNOWN
+    assert len(adapter.submissions) == 1
+    risk.native_orders.clear()
+    await manager.start()
+    risk.kill_switch = False
+    risk.auto_trade = True
+    risk.native_enabled_venues = frozenset({"novig"})
+    risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
+    with pytest.raises(RiskRejected, match="Daily native order attempt limit reached"):
+        await manager.execute(order(market))
+    assert len(adapter.submissions) == 1
+
+
+async def test_recurring_daily_debit_cap_uses_worst_case_intents(system, market):
+    manager, risk, _, adapter = system
+    risk.config = risk.config.model_copy(update={
+        "max_native_order_attempts": None, "max_native_daily_attempts": 3,
+        "max_native_daily_debit": D(".90")})
+    first = await manager.execute(order(market))
+    assert first.reserved_cost == D(".47")
+    with pytest.raises(RiskRejected, match="Daily native upfront debit limit reached"):
+        await manager.execute(order(market))
+    assert len(adapter.submissions) == 1
+
+
+def test_recurring_daily_debit_counts_reviewed_external_fill_without_cash_double_debit(market):
+    from types import SimpleNamespace
+    risk = RiskEngine(RiskConfig().model_copy(update={"max_native_daily_debit": D("1.40")}))
+    base = order(market)
+    proposed = base.model_copy(update={"intent": base.intent.model_copy(update={"mode": "production"})})
+    external = SimpleNamespace(environment="production", cost_usd=D(".97175"), recorded_at=utcnow())
+    risk.external_positions = (external,)
+    with pytest.raises(RiskRejected, match="Daily native upfront debit limit reached"):
+        risk.check_native_daily_budget(proposed)
+    risk.external_positions = (SimpleNamespace(environment="production", cost_usd=D(".97175"),
+        recorded_at=utcnow() - timedelta(days=1)),)
+    risk.check_native_daily_budget(proposed)
+
+
+async def test_external_position_blocks_same_sport_without_becoming_oms_order(system, market):
+    from types import SimpleNamespace
+    manager, risk, _, adapter = system
+    risk.external_positions = (SimpleNamespace(venue="novig", environment="production",
+        sport=market.sport, cost_usd=D(".97175")),)
+    with pytest.raises(RiskRejected, match="external native position blocks this sport"):
+        await manager.execute(order(market))
+    assert not adapter.submissions and not risk.native_orders
+    assert risk.exposures() == D(".97175")
 
 
 async def test_unknown_transmission_never_retried_and_survives_restart(system, market):
@@ -171,6 +310,19 @@ async def test_unknown_transmission_never_retried_and_survives_restart(system, m
     await manager.start()
     assert risk.native_orders[result.id].status == OrderStatus.UNKNOWN
     assert risk.exposures() == D(".47")
+
+
+async def test_documented_venue_rejection_is_durable_and_does_not_halt(system, market):
+    manager, risk, _, adapter = system
+    adapter.reject_code = "event_not_available"
+    result = await manager.execute(order(market))
+    assert result.status == OrderStatus.REJECTED
+    assert result.reconciliation_complete and result.venue_order_id is None
+    assert result.reason == "Venue rejected placement: event_not_available"
+    assert not risk.kill_switch and len(adapter.submissions) == 1
+    risk.native_orders.clear()
+    await manager.start()
+    assert risk.native_orders[result.id].status == OrderStatus.REJECTED
 
 
 async def test_opposing_position_blocked_across_native_orders(system, market):
@@ -246,6 +398,27 @@ async def test_settlement_requires_final_account_identity_and_is_idempotent(syst
     assert risk.exposures() == 0 and risk.daily_realized == D(".549")
     with pytest.raises(ValueError):
         await manager.settle(settlement.model_copy(update={"payout_usd": D(0)}))
+
+
+@pytest.mark.parametrize("payout,fee_refund,expected_pnl", [
+    (".45", ".001", "0"),  # actual cash/fee refund on an exceptional grade
+    (".225", "0", "-.226"),  # actual partial payout is not a fabricated total loss
+])
+async def test_exceptional_cash_settlement_uses_authoritative_payout_not_binary_loss(
+        system, market, payout, fee_refund, expected_pnl):
+    manager, risk, _, adapter = system
+    placed = await manager.execute(order(market))
+    adapter.report = report(placed, quantity="100", cost=".45", fees=".001",
+                            status="filled", terminal=True)
+    await manager.reconcile(placed.id)
+    result = NativeSettlement(order_id=placed.id, venue="novig", account_fingerprint="a"*64,
+        environment="sandbox", market_fingerprint=market.identity(), settlement_id="offline-cash-grade",
+        payout_usd=payout, fee_refund_usd=fee_refund, settled_at=utcnow(),
+        evidence="OFFLINE authoritative cash-settlement fixture")
+    await manager.settle(result)
+    assert risk.daily_realized == D(expected_pnl)
+    assert manager.realized_today() == D(expected_pnl)
+    assert risk.exposures() == 0
 
 
 async def test_stale_reconciliation_cannot_reopen_terminal_order(system, market):

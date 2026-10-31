@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { CheckCircle2, ChevronRight, LockKeyhole, Radio, RefreshCw, ShieldCheck, TriangleAlert, Wallet, X } from 'lucide-react'
 import { request } from './api'
 import { human, money, type Json } from './types'
-import { activationBody, activationGate, deferredPilotRequirement, parseSetupReport, profileFreshnessCoverage, setupIsCurrent, weightSummary, type SetupReport } from './launchSetupModel'
+import { activationBody, deferredPilotRequirement, parseSetupReport, profileFreshnessCoverage, setupIsCurrent, venueActivationGate, weightSummary, type SetupReport } from './launchSetupModel'
 import './LaunchSetup.css'
 import { AccountCash } from './AccountCash'
 
@@ -28,6 +28,39 @@ function Limits({ report, complete = false }: { report: SetupReport; complete?: 
     {values?.max_native_order_attempts !== null && values?.max_native_order_attempts !== undefined &&
       <div><span>Maximum native order attempts</span><strong>{typeof values.max_native_order_attempts === 'number' ? values.max_native_order_attempts : 'Not configured'}</strong></div>}
   </div>
+}
+
+function LimitsDraftEditor({ report, mutate, notify, refresh, disabled }: {
+  report: SetupReport; mutate: Props['mutate']; notify: Props['notify']; refresh: () => Promise<unknown>; disabled: boolean
+}) {
+  const saved = report.risk_policy.values
+  const [draft, setDraft] = useState(() => saved ? JSON.stringify(saved, null, 2) : '')
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { if (!dirty) setDraft(saved ? JSON.stringify(saved, null, 2) : '') }, [saved, dirty])
+  const save = async () => {
+    setSaving(true)
+    try {
+      const values = JSON.parse(draft)
+      if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('Enter a complete limits object.')
+      await mutate('/api/launch/limits-draft', values)
+      setDirty(false)
+      await refresh()
+      notify('Limits draft saved. Live limits and trading authorization are unchanged.')
+    } catch (failure) {
+      notify(failure instanceof Error ? failure.message : 'Limits draft could not be saved.', true)
+    } finally { setSaving(false) }
+  }
+  return <details className="setup-limits-editor"><summary>Edit launch limits draft <ChevronRight size={12} /></summary>
+    <p className="setup-note">You can change the spending and frequency caps here. This saves a draft only; it does not claim a balance is spendable or enable orders. A changed live scope requires a new reviewed launch profile.</p>
+    <textarea aria-label="Launch limits JSON" value={draft} rows={16} spellCheck={false}
+      disabled={disabled || saving || report.switches.auto_trade || !report.switches.kill_switch}
+      onChange={event => { setDraft(event.target.value); setDirty(true) }} />
+    <div className="setup-limits-editor-actions"><button type="button" className="button quiet" disabled={!dirty || saving}
+      onClick={() => { setDraft(saved ? JSON.stringify(saved, null, 2) : ''); setDirty(false) }}>Discard edits</button>
+      <button type="button" className="button primary" disabled={!dirty || saving || disabled || report.switches.auto_trade || !report.switches.kill_switch}
+        onClick={() => void save()}>{saving ? 'Saving…' : 'Save limits draft'}</button></div>
+  </details>
 }
 
 function PricingModel({ pricing }: { pricing: SetupReport['pricing'] }) {
@@ -75,6 +108,8 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
   const [probing, setProbing] = useState<string | null>(null)
   const [clock, setClock] = useState(Date.now())
   const [review, setReview] = useState<SetupReport | null>(null)
+  const [selectedVenue, setSelectedVenue] = useState('prophetx')
+  const [reviewVenue, setReviewVenue] = useState<string | null>(null)
   const [confirmed, setConfirmed] = useState(false)
   const mounted = useRef(true)
   const activeRequest = useRef<AbortController | null>(null)
@@ -96,7 +131,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
     } catch (failure) {
       if (mounted.current && activeRequest.current === controller) {
         setError(controller.signal.aborted ? 'Launch checks timed out or were interrupted. Real trading is unavailable.' : failure instanceof Error ? failure.message : 'Launch checks are unavailable.')
-        setReceivedAt(null); setReview(null); setConfirmed(false)
+        setReceivedAt(null); setReview(null); setReviewVenue(null); setConfirmed(false)
       }
       throw failure
     } finally {
@@ -109,7 +144,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
     const refresh = () => { if (!document.hidden && !busy.current && !activeRequest.current) void fetchReport().catch(() => {}) }
     const visibility = () => {
       setClock(Date.now())
-      if (document.hidden) { activeRequest.current?.abort(); setReceivedAt(null); setReview(null); setConfirmed(false) }
+      if (document.hidden) { activeRequest.current?.abort(); setReceivedAt(null); setReview(null); setReviewVenue(null); setConfirmed(false) }
       else refresh()
     }
     refresh()
@@ -123,30 +158,34 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
     else if (!review && dialog.current?.open) dialog.current?.close()
   }, [review])
   const current = setupIsCurrent(report, receivedAt, clock, error)
-  const gate = activationGate(report, receivedAt, clock, error)
+  const gate = venueActivationGate(report, receivedAt, clock, selectedVenue, error)
   const prepareReview = async () => {
     if (disabled || busy.current || !gate.allowed) return
     busy.current = true; setWorking(true)
     try {
       const fresh = await fetchReport()
-      const checked = activationGate(fresh.report, fresh.receivedAt, Date.now())
+      const checked = venueActivationGate(fresh.report, fresh.receivedAt, Date.now(), selectedVenue)
       if (!checked.allowed) throw new Error(checked.reason)
-      setConfirmed(false); setReview(fresh.report)
+      setConfirmed(false); setReviewVenue(selectedVenue); setReview(fresh.report)
     } catch (failure) { notify(failure instanceof Error ? failure.message : 'Launch checks are unavailable.', true) }
     finally { busy.current = false; if (mounted.current) setWorking(false) }
   }
   const enable = async () => {
-    if (!review || !confirmed || disabled || busy.current) return
+    if (!review || !reviewVenue || reviewVenue !== selectedVenue || !confirmed || disabled || busy.current) return
     busy.current = true; setWorking(true)
     try {
       const fresh = await fetchReport()
-      const body = activationBody(fresh.report, fresh.receivedAt, review.activation.scope_digest ?? '', Date.now())
-      await mutate('/api/control', body)
-      setReview(null); setConfirmed(false)
-      notify('Activation request accepted for the reviewed trading scope. Checking the current engine state.')
+      const body = activationBody(fresh.report, fresh.receivedAt, review.activation.by_venue?.[reviewVenue]?.scope_digest ?? '', Date.now(), reviewVenue)
+      if (reviewVenue === 'prophetx' && !reviewPilot)
+        await mutate('/api/launch/recurring/activate', {
+          venue: reviewVenue, expected_launch_digest: body.expected_launch_digest,
+        })
+      else await mutate('/api/control', body)
+      setReview(null); setReviewVenue(null); setConfirmed(false)
+      notify(`${human(reviewVenue)} activation request accepted for the reviewed scope. Checking the current engine state.`)
       await fetchReport()
     } catch (failure) {
-      setReview(null); setConfirmed(false)
+      setReview(null); setReviewVenue(null); setConfirmed(false)
       notify(failure instanceof Error ? failure.message : 'Activation could not be confirmed. Check the current engine state.', true)
       void fetchReport().catch(() => {})
     } finally { busy.current = false; if (mounted.current) setWorking(false) }
@@ -162,10 +201,12 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
       notify(failure instanceof Error ? failure.message : 'Account diagnostic failed.', true)
     } finally { if (mounted.current) setProbing(null) }
   }
-  const dialogCurrent = gate.allowed && review?.activation.scope_digest === report?.activation.scope_digest
+  const dialogCurrent = gate.allowed && reviewVenue === selectedVenue
+    && !!review?.activation.by_venue?.[selectedVenue]?.scope_digest
+    && review.activation.by_venue[selectedVenue].scope_digest === report?.activation.by_venue?.[selectedVenue]?.scope_digest
   const pending = report?.requirements.filter(r => r.status !== 'passed') ?? []
-  const pilot = report?.launch_scope.length === 1 && report.launch_scope[0].validation_pilot === true
-  const reviewPilot = review?.launch_scope.length === 1 && review.launch_scope[0].validation_pilot === true
+  const pilot = report?.launch_scope.find(scope => scope.venue === selectedVenue)?.validation_pilot === true
+  const reviewPilot = review?.launch_scope.find(scope => scope.venue === reviewVenue)?.validation_pilot === true
   return <section className="panel launch-setup" aria-labelledby={id}>
     <header className="setup-header"><div><span className="eyebrow">REAL TRADING SETUP</span><h2 id={id}>{current ? gate.allowed ? 'Ready for your final review' : report?.switches.auto_trade && !report.switches.kill_switch && report.environment === 'production' ? 'Real trading is enabled' : 'Finish setup before real trading' : 'Checking launch readiness'}</h2><p>Connected feeds, verified markets and trading permission are checked separately.</p></div><button className="button quiet" onClick={() => void fetchReport().catch(() => {})} disabled={loading || working}><RefreshCw size={14} className={loading ? 'setup-spin' : ''} />Refresh checks</button></header>
     {error && <div className="setup-alert" role="alert"><TriangleAlert size={18} /><span>{error} Previous facts below are not current approval.</span></div>}
@@ -173,7 +214,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
       {!current && !error && <div className="setup-alert"><TriangleAlert size={18} /><span>This snapshot has expired. Refresh before relying on account or readiness facts.</span></div>}
       <div className="setup-counts" aria-label="Real and synthetic signal counts">
         <div><strong>{report.scope.native_candidates}</strong><span>Real native candidates</span></div><div><strong>{report.scope.synthetic_candidates}</strong><span>Synthetic demo candidates</span></div>
-        <div><strong>{report.scope.verified_native_markets}</strong><span>Verified exchange markets</span></div><div><strong>{report.scope.real_reference_markets}</strong><span>Markets with real references</span></div>
+        <div><strong>{report.scope.verified_native_markets}</strong><span>Verified exchange markets</span></div><div><strong>{report.scope.real_reference_markets}</strong><span>Markets with provider quotes (may be ineligible)</span></div>
       </div>
       <div className="setup-body"><div className="setup-section-title"><h3>Your exchange connections</h3><span>Each wallet is checked independently</span></div>
         <div className="setup-accounts">{report.accounts.map(account => {
@@ -191,15 +232,16 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
           </article>
         })}</div>
         {!report.accounts.length && <p className="setup-placeholder">No exchange monitor plugins are registered.</p>}
+        {report.external_inventory && <p className="setup-note">External positions: {report.external_inventory.loaded_count} tracked ({report.external_inventory.owner_tracked_count ?? 0} owner attested), {report.external_inventory.pending_order_count} awaiting inventory review. Reserved external exposure: {money(report.external_inventory.unsettled_cost_usd)}. {report.external_inventory.note}</p>}
         <AccountCash />
-        <div className="setup-two-columns"><section className="setup-subpanel"><div className="setup-section-title"><h3>Trading limits</h3><span className={`setup-pill ${current && report.risk_policy.applied ? 'good' : ''}`}>{!current ? 'Unconfirmed' : report.risk_policy.applied ? 'Applied to live scope' : report.risk_policy.values ? 'Saved draft · not applied' : 'Not configured'}</span></div><Limits report={report} /><details className="setup-all-limits"><summary>Review all exposure and order limits <ChevronRight size={12} /></summary><Limits report={report} complete /></details><p className="setup-note">{report.risk_policy.applied ? 'These limits bind the reviewed scope.' : 'Saved limits do not authorize real orders.'} Wallet balances are never pooled. Pending orders and unsettled fills retain their game and player reservations.</p>{report.risk_policy.error && <p className="setup-inline-error">{report.risk_policy.error}</p>}</section>
+        <div className="setup-two-columns"><section className="setup-subpanel"><div className="setup-section-title"><h3>Trading limits</h3><span className={`setup-pill ${current && report.risk_policy.applied ? 'good' : ''}`}>{!current ? 'Unconfirmed' : report.risk_policy.applied ? 'Applied to live scope' : report.risk_policy.values ? 'Saved draft · not applied' : 'Not configured'}</span></div><Limits report={report} /><details className="setup-all-limits"><summary>Review all exposure and order limits <ChevronRight size={12} /></summary><Limits report={report} complete /></details><LimitsDraftEditor report={report} mutate={mutate} notify={notify} refresh={fetchReport} disabled={disabled || !current || working} /><p className="setup-note">{report.risk_policy.applied ? 'These limits bind the reviewed scope.' : 'Saved limits do not authorize real orders.'} Wallet balances are never pooled. Pending orders and unsettled fills retain their game and player reservations.</p>{report.risk_policy.error && <p className="setup-inline-error">{report.risk_policy.error}</p>}</section>
           <PricingModel pricing={report.pricing} /></div>
         <details className="setup-inputs"><summary><Radio size={16} />Sportsbook mapping coverage <ChevronRight size={13} /></summary><div className="table-scroll"><table><thead><tr><th>PROVIDER</th><th>ACCESS</th><th>MAPPED UPDATES</th><th>AWAITING REVIEW</th><th>QUOTE CLOCK VERIFIED</th><th>MARKET STATUS VERIFIED</th><th>BOTH ON SAME QUOTE</th></tr></thead><tbody>{report.inputs.map(input => <tr key={input.provider}><td>{human(input.provider)}</td><td>{current && input.authenticated ? 'Authenticated' : 'Unconfirmed'}</td><td>{input.mapped_quotes.toLocaleString()}</td><td>{input.quarantined.toLocaleString()}{input.review_window_capped ? '+' : ''}</td><td>{input.quote_clock_verified_in_review_window?.toLocaleString() ?? '—'}</td><td>{input.market_status_verified_in_review_window?.toLocaleString() ?? '—'}</td><td>{input.both_evidence_verified_in_review_window?.toLocaleString() ?? '—'}</td></tr>)}</tbody></table></div><p className="setup-note">The clock, status and same-quote counts cover only the bounded review window. The last count requires complete observation evidence and active status on one quote; it still does not approve a freshness limit, settlement match or trade. A + means the window reached its cap. Mapped updates are cumulative observations, not unique tradable markets. Quarantined observations cannot produce approved native orders.</p></details>
         <div className="setup-section-title"><h3>What still needs to pass</h3><span>{current ? `${pending.filter(item => !deferredPilotRequirement(report, item.code)).length} blocking · ${pending.filter(item => deferredPilotRequirement(report, item.code)).length} pilot-deferred` : 'Current status unconfirmed'}</span></div><div className="setup-checklist">{report.requirements.map(item => <details key={item.code}><summary>{current && item.status === 'passed' ? <CheckCircle2 size={17} className="good" /> : <LockKeyhole size={16} />}<strong>{item.title}</strong><span>{!current ? 'Unconfirmed' : item.status === 'passed' ? 'Passed' : deferredPilotRequirement(report, item.code) ? 'After pilot' : 'Pending'}</span></summary><p>{item.detail}</p></details>)}</div>
       </div></>}
-    <footer className="setup-activation"><div><strong>{gate.allowed ? pilot ? 'One-order pilot ready for review' : 'Your final action' : 'Real trading stays unavailable until checks pass'}</strong><p>{gate.reason}</p><small>{current && report ? `Checked ${new Date(report.checked_at).toLocaleTimeString()}` : 'Awaiting a fresh report'} · No order is placed by this setup report.</small></div><button className="button primary" disabled={disabled || working || loading || !gate.allowed} onClick={() => void prepareReview()}><ShieldCheck size={16} />{working ? 'Checking…' : pilot ? 'Review one-order pilot' : 'Enable real trading'}</button></footer>
+    <footer className="setup-activation"><div><label className="setup-venue-select">Exchange to enable <select value={selectedVenue} disabled={working} onChange={event => { setSelectedVenue(event.target.value); setReview(null); setReviewVenue(null); setConfirmed(false) }}><option value="prophetx">ProphetX</option><option value="novig">Novig</option><option value="kalshi">Kalshi</option><option value="polymarket_us">Polymarket US</option></select></label><strong>{gate.allowed ? pilot ? 'One-order pilot ready for review' : `${human(selectedVenue)} ready for final review` : `${human(selectedVenue)} trading remains unavailable until checks pass`}</strong><p>{gate.reason}</p><small>{current && report ? `Checked ${new Date(report.checked_at).toLocaleTimeString()}` : 'Awaiting a fresh report'} · No order is placed by this setup report.</small></div><button className="button primary" disabled={disabled || working || loading || !gate.allowed} onClick={() => void prepareReview()}><ShieldCheck size={16} />{working ? 'Checking…' : pilot ? 'Review one-order pilot' : `Enable ${human(selectedVenue)}`}</button></footer>
     <dialog className="setup-dialog" ref={dialog} aria-labelledby={`${id}-review`} onCancel={event => { if (working) event.preventDefault(); else { setReview(null); setConfirmed(false) } }}>
-      {review && <><header><div><span className="eyebrow">FINAL OWNER REVIEW</span><h2 id={`${id}-review`}>{reviewPilot ? 'Enable one-order Kalshi pilot' : 'Enable real-money trading'}</h2></div><button className="icon-button" aria-label="Close activation review" disabled={working} onClick={() => setReview(null)}><X size={19} /></button></header><p>Automation may place real orders only within this reviewed scope. Review the accounts, markets and limits before continuing.</p><div className="setup-review-accounts">{review.launch_scope.map(scope => <section key={scope.venue}><h3>{human(scope.venue)} · {human(scope.environment)}</h3><p>Account fingerprint <code>{scope.account_fingerprint}</code></p><ul>{scope.markets.map(market => <li key={market.id}><strong>{market.name}</strong><small>{market.id}</small></li>)}</ul><dl><div><dt>Strategies</dt><dd>{scope.strategy_ids.join(', ')}</dd></div><div><dt>Reference providers</dt><dd>{scope.provider_ids.join(', ')}</dd></div><div><dt>Settlement policy</dt><dd>{scope.settlement_policy}</dd></div></dl></section>)}</div><Limits report={review} complete /><p className="setup-note">Positive estimated EV does not guarantee profit. {reviewPilot ? 'This pilot permits one native order attempt, caps exposure at $1 and pauses automatic trading after that attempt. Its outcome and settlement still need review.' : 'This activates ongoing order submission subject to the central risk engine.'}</p><label className="setup-confirmation"><input type="checkbox" checked={confirmed} disabled={working} onChange={e => setConfirmed(e.target.checked)} /><span>I confirm these accounts, markets and limits for real-money automation.</span></label>{!dialogCurrent && <p role="alert" className="setup-inline-error">The current checks or reviewed scope changed. Close this review and refresh.</p>}<div className="setup-dialog-actions"><button className="button quiet" disabled={working} onClick={() => setReview(null)}>Keep paused</button><button className="button primary" disabled={!confirmed || !dialogCurrent || disabled || working} onClick={() => void enable()}>{working ? 'Checking current scope…' : reviewPilot ? 'Confirm one-order pilot' : 'Confirm and enable real trading'}</button></div></>}
+      {review && <><header><div><span className="eyebrow">FINAL OWNER REVIEW</span><h2 id={`${id}-review`}>{reviewPilot ? `Enable one-order ${human(reviewVenue)} pilot` : `Enable ${human(reviewVenue)} real-money trading`}</h2></div><button className="icon-button" aria-label="Close activation review" disabled={working} onClick={() => setReview(null)}><X size={19} /></button></header><p>{reviewVenue === 'prophetx' && !reviewPilot ? 'Recurring ProphetX automation is bounded by its saved authorization, which cannot exceed 24 hours. Research scanning continues after expiry.' : 'Automation may place real orders only within this reviewed exchange scope for five minutes. Research scanning continues after permission expires.'}</p><div className="setup-review-accounts">{review.launch_scope.filter(scope => scope.venue === reviewVenue).map(scope => <section key={scope.venue}><h3>{human(scope.venue)} · {human(scope.environment)}</h3><p>Account fingerprint <code>{scope.account_fingerprint}</code></p><ul>{scope.markets.map(market => <li key={market.id}><strong>{market.name}</strong><small>{market.id}</small></li>)}</ul><dl><div><dt>Strategies</dt><dd>{scope.strategy_ids.join(', ')}</dd></div><div><dt>Reference providers</dt><dd>{scope.provider_ids.join(', ')}</dd></div><div><dt>Settlement policy</dt><dd>{scope.settlement_policy}</dd></div></dl></section>)}</div><Limits report={review} complete /><p className="setup-note">Positive estimated EV does not guarantee profit. {reviewPilot ? 'This pilot permits one native order attempt and pauses automatic trading after that attempt. The reviewed limits shown above apply.' : reviewVenue === 'prophetx' ? 'The saved recurring authorization, launch profile and central risk engine must all agree before orders can route.' : 'Order submission remains subject to the central risk engine and this five-minute authorization.'}</p><label className="setup-confirmation"><input type="checkbox" checked={confirmed} disabled={working} onChange={e => setConfirmed(e.target.checked)} /><span>I confirm this exchange, its markets and these limits for real-money automation.</span></label>{!dialogCurrent && <p role="alert" className="setup-inline-error">The current checks or reviewed scope changed. Close this review and refresh.</p>}<div className="setup-dialog-actions"><button className="button quiet" disabled={working} onClick={() => setReview(null)}>Keep paused</button><button className="button primary" disabled={!confirmed || !dialogCurrent || disabled || working} onClick={() => void enable()}>{working ? 'Checking current scope…' : reviewPilot ? 'Confirm one-order pilot' : 'Confirm and enable real trading'}</button></div></>}
     </dialog>
   </section>
 }

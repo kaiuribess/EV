@@ -226,6 +226,31 @@ class ProphetXPrivateState:
         self.reason = "Private orders agree with complete reporting history"
         return watermark
 
+    def reconcile_current_empty(self, *, started_at, reporting_watermark,
+                                captured_fence, client, observed_at=None):
+        """Bind a current zero-inventory REST read to the live private stream.
+
+        Terminal private events may remain cached. Any active or unrecognized
+        private state prevents an empty account from being certified.
+        """
+        self.baseline = None
+        now = observed_at or utcnow()
+        if captured_fence is None or self.fence(client=client) != captured_fence:
+            raise ReconciliationError("ProphetX private account changed or heartbeat is unavailable")
+        start = source_time(started_at, observed_at=now, name="Private reconciliation start")
+        watermark = source_time(reporting_watermark, observed_at=now,
+                                name="Private reporting watermark")
+        if watermark < start:
+            raise ReconciliationError("Current ProphetX reporting has not caught up to the wallet probe")
+        terminal = {"canceled", "cancelled", "invalid", "settled", "closed"}
+        if any(facts.get("status") not in terminal for facts, _ in self.orders.values()):
+            raise ReconciliationError("ProphetX private stream still has active or unknown orders")
+        if self.fence(client=client) != captured_fence:
+            raise ReconciliationError("ProphetX private account changed during current inventory validation")
+        self.baseline = captured_fence, watermark
+        self.reason = "Private stream agrees with current empty account inventory"
+        return watermark
+
     def matches(self, snapshot, *, client):
         fence = self.fence(client=client)
         return bool(fence and self.baseline and self.baseline[0] == fence and snapshot is not None

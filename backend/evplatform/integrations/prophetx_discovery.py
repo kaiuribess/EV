@@ -8,6 +8,93 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 
+def active_tournament_ids(payload: dict, leagues: list[str]) -> dict[str, int]:
+    """Accept only exact named leagues from the authenticated active catalog.
+
+    A tournament name is identity evidence for research discovery, not proof
+    that any particular market is equivalent or executable.
+    """
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data.get("tournaments") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or len(rows) > 5000:
+        raise ValueError("Unexpected ProphetX tournament catalog shape")
+    requested = set(leagues)
+    selected = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("name") not in requested:
+            continue
+        native_id = row.get("id")
+        if (isinstance(native_id, bool) or not isinstance(native_id, (int, str))
+                or not str(native_id).isascii() or not str(native_id).isdigit()
+                or not 0 < int(native_id) <= 9_223_372_036_854_775_807):
+            raise ValueError("Invalid ProphetX tournament ID")
+        name = row["name"]
+        if name in selected and selected[name] != int(native_id):
+            raise ValueError("Conflicting ProphetX tournament identity")
+        if any(other_name != name and other_id == int(native_id)
+               for other_name, other_id in selected.items()):
+            raise ValueError("Tournament ID belongs to multiple leagues")
+        selected[name] = int(native_id)
+    return selected
+
+
+def active_tournament_options(payload: dict, leagues: list[str]) -> list[tuple[str, int]]:
+    """Map exact production tournament names to canonical league identities.
+
+    ATP/WTA have multiple named tournaments; retain every observed ID for the
+    existing bounded subscription scheduler to rank. The returned names are
+    catalog identities, not evidence that any market is executable.
+    """
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data.get("tournaments") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or len(rows) > 5000:
+        raise ValueError("Unexpected ProphetX tournament catalog shape")
+    requested = set(leagues)
+    aliases = {"College Football": "NCAAF", "College Basketball": "NCAABM"}
+    options: list[tuple[str, int]] = []
+    by_id: dict[int, str] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            continue
+        name = row["name"]
+        league = (name if name in requested else aliases.get(name)
+                  or ("ATP" if name.startswith("ATP ") and not name.startswith("ATP Challenger ") else
+                      "WTA" if name.startswith("WTA ") else None))
+        if league not in requested:
+            continue
+        native_id = row.get("id")
+        if (isinstance(native_id, bool) or not isinstance(native_id, (int, str))
+                or not str(native_id).isascii() or not str(native_id).isdigit()
+                or not 0 < int(native_id) <= 9_223_372_036_854_775_807):
+            raise ValueError("Invalid ProphetX tournament ID")
+        native_id = int(native_id)
+        if native_id in by_id:
+            if by_id[native_id] != league:
+                raise ValueError("Tournament ID belongs to multiple leagues")
+            continue
+        by_id[native_id] = league
+        options.append((league, native_id))
+    return options
+
+
+def summarize_tournaments(payload: dict, *, limit: int = 50) -> dict:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data.get("tournaments") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or len(rows) > 5000:
+        raise ValueError("Unexpected ProphetX tournament catalog shape")
+    tournaments = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        native_id = row.get("id")
+        if (isinstance(native_id, bool) or not isinstance(native_id, (int, str))
+                or not str(native_id).isascii() or not str(native_id).isdigit()):
+            continue
+        tournaments.append({"id": str(native_id), "name": _label(row.get("name"))})
+    return {"total": len(rows), "truncated": len(rows) > limit,
+            "tournaments": tournaments, "read_only": True, "mapping_verified": False}
+
+
 def _label(value, limit=120):
     return str(value)[:limit] if isinstance(value, (str, int, float)) and not isinstance(value, bool) else None
 

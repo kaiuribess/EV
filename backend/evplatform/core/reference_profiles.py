@@ -50,9 +50,11 @@ class ReferenceProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal[1] = 1
     selectors: tuple[ProfileSelector, ...] = Field(min_length=1)
-    phase: Literal["pregame"] = "pregame"
+    phase: Literal["pregame", "inplay"] = "pregame"
     weights_percent: dict[str, Decimal]
-    required_any_anchor: tuple[str, ...] = Field(min_length=1)
+    # Anchor-free research and separately approved multi-book scopes are
+    # explicit; existing sharp profiles retain their configured anchors.
+    required_any_anchor: tuple[str, ...] = ()
     min_distinct_books: int = Field(ge=1)
     status: str = Field(min_length=1)
     live_execution_allowed: bool = False
@@ -69,6 +71,9 @@ class ReferenceProfile(BaseModel):
             raise ValueError("Profile weights must be finite, positive and sum to 100")
         if self.min_distinct_books > len(self.weights_percent):
             raise ValueError("Profile quorum exceeds its eligible bookmaker count")
+        if not self.required_any_anchor and (self.status not in {"research_only", "approved_multi_book"}
+                or self.live_execution_allowed):
+            raise ValueError("Anchor-free profiles require research or separately approved multi-book status")
         if len(set(self.required_any_anchor)) != len(self.required_any_anchor) or set(self.required_any_anchor) - set(self.weights_percent):
             raise ValueError("Anchors must be distinct eligible canonical bookmakers")
         if len({selector.key() for selector in self.selectors}) != len(self.selectors):
@@ -79,7 +84,7 @@ class ReferenceProfile(BaseModel):
 class ReferenceFreshnessRule(ProfileSelector):
     provider: str = Field(min_length=1)
     bookmaker: str = Field(min_length=1)
-    phase: Literal["pregame"] = "pregame"
+    phase: Literal["pregame", "inplay"] = "pregame"
     ttl_seconds: Decimal = Field(gt=0)
     verified: bool = False
     evidence: str = Field(min_length=8)
@@ -103,10 +108,13 @@ class ReferenceFreshnessRule(ProfileSelector):
 def profile_for_market(config, market: Market, now: datetime) -> tuple[str, ReferenceProfile] | None:
     if config.reference_profile_mode != "strict":
         return None
-    if market.status != "scheduled" or now >= market.start_time:
-        raise ValueError("Reference profiles are pregame only; scheduled future start required")
+    phase = "pregame" if market.status == "scheduled" and now < market.start_time else (
+        "inplay" if market.status == "live" and now >= market.start_time else None)
+    if phase is None:
+        raise ValueError("Market phase and scheduled start are inconsistent")
     matches = [(name, config.reference_profiles[name]) for name in config.enabled_reference_profiles
-               if any(selector.matches(market) for selector in config.reference_profiles[name].selectors)]
+               if config.reference_profiles[name].phase == phase
+               and any(selector.matches(market) for selector in config.reference_profiles[name].selectors)]
     if not matches:
         raise ValueError("No enabled reference profile matches the exact sport, league, market and statistic")
     if len(matches) != 1:
@@ -123,11 +131,14 @@ def policy_digest(config, market: Market) -> str:
 def freshness_rule(config, market: Market, provider: str, bookmaker: str) -> ReferenceFreshnessRule | None:
     return next((rule for rule in config.profile_freshness_rules
                  if rule.provider == provider and rule.bookmaker == bookmaker and rule.matches(market)
-                 and rule.phase == "pregame" and rule.verified), None)
+                 and rule.phase == ("inplay" if market.status == "live" else "pregame")
+                 and rule.verified), None)
 
 
 def quote_eligibility(config, market: Market, quote: Quote, now: datetime) -> tuple[bool, tuple[str, ...], float | None]:
     reasons = []
+    if quote.status != "active":
+        reasons.append("Current sportsbook market is not verified active")
     age = None if quote.source_observed_at is None else (now - quote.source_observed_at).total_seconds() * 1000
     if not quote.observation_verified or quote.source_observed_at is None:
         reasons.append("Validated outcome-level observation is missing")
@@ -135,9 +146,87 @@ def quote_eligibility(config, market: Market, quote: Quote, now: datetime) -> tu
         reasons.append("Synchronized complete outcome observation is unverified")
     if not quote.market_status_verified:
         reasons.append("Current outcome-level market status is unverified")
+    if config.normal_outcome_policy == "winner_only_binary":
+        if not quote.normal_outcome_verified or not quote.normal_outcome_evidence:
+            reasons.append("Normal WIN/LOSS condition has no reviewed source-to-target match")
+    elif not quote.settlement_equivalence_verified:
+        reasons.append("Source-to-target exceptional settlement comparison is unresolved")
     rule = freshness_rule(config, market, quote.provider, quote.bookmaker)
     if rule is None:
         reasons.append("Verified exact-source TTL is missing")
     if age is not None and (age < 0 or rule is not None and Decimal(str(age)) > rule.ttl_seconds * 1000):
         reasons.append("Validated observation is expired or future-dated")
     return not reasons, tuple(reasons), age
+
+
+def trusted_quote_research_eligibility(config, market: Market, quote: Quote,
+                                       now: datetime) -> tuple[bool, tuple[str, ...], float | None]:
+    """Bound transport evidence without claiming quote-bound observation.
+
+    A Parlay book/fixture poll and a delivered row are useful research inputs.
+    Neither certifies that a particular unchanged selection is still offered.
+    This predicate grants research input eligibility only. A separate exact,
+    owner-approved pilot policy and native risk gates are needed for execution.
+    """
+    if quote.status in {"suspended", "withdrawn"}:
+        return False, ("Sportsbook selection explicitly suspended or withdrawn",), None
+    if market.status == "live":
+        clock = quote.source_observed_at if quote.observation_verified else quote.source_time
+        if (market.extensions.get("inplay_price_after_start") is not True
+                or clock is None or clock < market.start_time
+                or not 0 <= (now-clock).total_seconds()*1000 <= config.trusted_max_indicator_age_ms):
+            return False, ("In-play price-row time is missing, prematch or expired",), None
+    delivery_age = (now - quote.received_at).total_seconds() * 1000
+    if not 0 <= delivery_age <= config.trusted_max_delivery_age_ms:
+        return False, ("Provider-delivered price pair is expired or future-dated",), None
+    # A bounded or paginated *board* does not establish complete coverage,
+    # but a self-contained, exact two-sided Parlay row can still support a
+    # labeled source-only research estimate. It cannot authorize an order.
+    limited_board = quote.verification_reason in {
+        "truncated_response", "incomplete_snapshot", "paginated_response_not_atomic"}
+    pilot = config.trusted_pilot_policy
+    reviewed_pilot_row = (pilot.enabled and pilot.owner_approved and pilot.permits_market(market))
+    if limited_board and not ((market.extensions.get("research_only") is True or reviewed_pilot_row)
+            and quote.provider in {"parlay_rest", "parlay_ws", "parlay_game_ws"}
+            and len(market.outcomes) == 2 and set(quote.decimal_odds) == set(market.outcomes)):
+        return False, ("Bounded provider board has no complete exact price pair",), None
+    if quote.verification_reason in {
+        "retained_top_up", "partial_response", "stale_cached_board",
+        "degraded_source", "future_observation_clock",
+        "incomplete_or_cross_frame_outcomes", "unsynchronized_outcomes",
+    }:
+        return False, ("Provider reported incomplete, cached, or degraded price evidence",), None
+    if quote.provider == "parlay_rest" and quote.source_stored_at is not None:
+        stored_age = (now - quote.source_stored_at).total_seconds() * 1000
+        if not 0 <= stored_age <= config.trusted_max_indicator_age_ms:
+            return False, ("Parlay stored price rows are expired or future-dated",), delivery_age
+    for stamp, label in ((quote.source_observed_at if quote.observation_verified else None,
+                          "quote observation"), (quote.source_scope_poll_at, "book/fixture poll")):
+        if stamp is not None:
+            age = (now - stamp).total_seconds() * 1000
+            if not 0 <= age <= config.trusted_max_indicator_age_ms:
+                return False, (f"Provider {label} indicator is expired or future-dated",), delivery_age
+    caveats = ["Provider-trusted research estimate; not approved for live execution"]
+    if market.status == "live":
+        caveats.append("Price-row timestamp follows scheduled start; current event state and selection availability unverified")
+    if limited_board:
+        caveats.append("Provider board coverage is bounded or paginated; only this complete price pair was used")
+    if not quote.observation_verified or quote.source_observed_at is None:
+        caveats.append("Exact selection observation age unknown")
+    if quote.provider == "parlay_rest" and quote.source_stored_at is None:
+        caveats.append("Parlay stored price-row age unknown")
+    if quote.source_status_historical_hint:
+        caveats.append("FanDuel links indicate historical OPEN/ACTIVE status only")
+    if not quote.market_status_verified or quote.status == "unknown":
+        caveats.append("Selection active status unverified")
+    if quote.source_scope_poll_at is None:
+        caveats.append("Book/fixture poll age unknown")
+    if quote.source_scope_is_current is False:
+        caveats.append("Provider did not mark book/fixture poll current")
+    if quote.verification_reason == "trusted_game_cross_frame_pair":
+        caveats.append("Opposing game prices came from separate WebSocket frames; delivery age uses the older side")
+    if not quote.normal_outcome_verified:
+        caveats.append("Source-to-native normal WIN/LOSS condition not reviewed")
+    if market.extensions.get("research_only"):
+        caveats.append("Source market identity has no reviewed native mapping")
+    return True, tuple(caveats), delivery_age

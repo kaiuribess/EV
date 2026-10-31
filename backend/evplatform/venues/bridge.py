@@ -33,11 +33,13 @@ class VerifiedVenueMapping(BaseModel):
     canonical_market_id: str
     canonical_outcome: str
     native_instrument_id: str
+    native_exchange_index: int | None = Field(default=None, ge=0)
     native_outcome: str
     settlement_fingerprint: str = Field(min_length=1)
     mapping_evidence: str = Field(min_length=1)
     verified: bool = False
     fee_schedule_verified: bool = False
+    fee_assumption_approved: bool = False
     canonical_payout_usd: Decimal = Decimal("1")
     native_payout_usd: Decimal | None = None
     native_quantity_unit: str = "unknown"
@@ -90,13 +92,14 @@ class NativeExecutionVenue(ExecutionVenue):
         self._private_sequences = SequenceTracker()
         self._confirmed_filled: dict[str, Decimal] = {}
         self._private_cancelled: set[str] = set()
+        self.bound_exchange_index: int | None = None
         # Runtime injects the current risk, lease, readiness and pricing checks.
         # This runs synchronously after transport pacing, for placements only.
         self.dispatch_guard: Callable[[NativeOrderIntent], None] | None = None
 
     def _mapping(self, order: Order) -> VerifiedVenueMapping:
         mapping = self.mappings.get((order.market_id, order.outcome))
-        if not mapping or not mapping.verified or not mapping.fee_schedule_verified:
+        if not mapping or not mapping.verified or not (mapping.fee_schedule_verified or mapping.fee_assumption_approved):
             raise PreflightRequired("Verified event/outcome/settlement mapping and fee schedule required")
         if order.venue != self.client.venue_id:
             raise PreflightRequired("Order venue does not match the execution adapter")
@@ -205,7 +208,7 @@ class NativeExecutionVenue(ExecutionVenue):
     def _native_mapping(self, intent: NativeOrderIntent) -> VerifiedVenueMapping:
         instrument = intent.instrument
         mapping = self.mappings.get((instrument.canonical_market_id, instrument.outcome))
-        if not mapping or not mapping.verified or not mapping.fee_schedule_verified:
+        if not mapping or not mapping.verified or not (mapping.fee_schedule_verified or mapping.fee_assumption_approved):
             raise PreflightRequired("Reviewed native mapping and fee evidence required")
         if (instrument.venue != self.client.venue_id
                 or mapping.native_instrument_id != instrument.instrument_id
@@ -214,6 +217,10 @@ class NativeExecutionVenue(ExecutionVenue):
                 or mapping.native_payout_usd != instrument.payout_per_unit_usd
                 or mapping.settlement_fingerprint != instrument.settlement_rules_fingerprint):
             raise PreflightRequired("Native intent differs from the reviewed venue mapping")
+        if isinstance(self.client, KalshiClient) and (
+                mapping.native_exchange_index != instrument.exchange_index
+                or (intent.mode == "production" and instrument.exchange_index is None)):
+            raise PreflightRequired("Reviewed Kalshi exchange shard is missing or differs from durable intent")
         return mapping
 
     def _native_preflight(self, intent: NativeOrderIntent):
@@ -224,6 +231,10 @@ class NativeExecutionVenue(ExecutionVenue):
             raise PreflightRequired("Current successful native account preflight and explicit enablement required")
         if intent.mode == "production" and not p.geographic_eligibility_verified:
             raise PreflightRequired("Official geographic eligibility verification is required")
+        if isinstance(self.client, KalshiClient) and intent.mode == "production" and (
+                intent.instrument.exchange_index is None
+                or intent.instrument.exchange_index != self.bound_exchange_index):
+            raise PreflightRequired("Kalshi account and durable order shard are not bound")
 
     def build_native_request(self, intent: NativeOrderIntent) -> dict:
         """Reviewable exact native request; performs no I/O or authorization."""
@@ -297,7 +308,8 @@ class NativeExecutionVenue(ExecutionVenue):
                                       status="unknown", reason="Resolve native identity before cancellation")
         try:
             if isinstance(self.client, KalshiClient):
-                await self.client.cancel_order(native_order_id, market_ticker=intent.instrument.instrument_id)
+                await self.client.cancel_order(native_order_id, market_ticker=intent.instrument.instrument_id,
+                    exchange_index=intent.instrument.exchange_index)
             elif isinstance(self.client, ProphetXClient):
                 await self.client.cancel_order(native_order_id, external_id=intent.client_order_id)
                 return normalize_prophetx_cancel(native_order_id, intent)
@@ -361,7 +373,10 @@ class NativeExecutionVenue(ExecutionVenue):
         rows, seen, cursor = [], set(), None
         for _ in range(20):
             if isinstance(self.client, KalshiClient):
-                params = {"limit": 200, **({"cursor": cursor} if cursor else {})}
+                params = {"limit": 200, "ticker": intent.instrument.instrument_id, "subaccount": 0,
+                          **({"exchange_index": intent.instrument.exchange_index}
+                             if intent.instrument.exchange_index is not None else {}),
+                          **({"cursor": cursor} if cursor else {})}
                 page = await self.client.reconcile_account(**params)
                 entries, cursor = page.get("orders"), page.get("cursor")
                 finished = cursor == ""

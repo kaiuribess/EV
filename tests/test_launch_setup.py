@@ -2,6 +2,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+import time
 
 from fastapi.testclient import TestClient
 import pytest
@@ -29,7 +30,8 @@ class RunningWorker:
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    result = Engine(Settings(_env_file=None, database_path=str(tmp_path / "offline.db")))
+    result = Engine(Settings(_env_file=None, database_path=str(tmp_path / "offline.db"),
+                             data_dir=str(tmp_path / "data")))
     register_external(result.registry, result)
     return result
 
@@ -46,10 +48,24 @@ def test_all_registered_native_monitors_appear_without_launch_profile(engine):
     assert report["activation"]["scope_digest"] is None
     assert not report["safe_to_arm"] and not report["profile_draft"]["can_prepare"]
     assert report["scope"]["profile_count"] == 0
+    assert report["external_inventory"]["loaded_count"] == 0
     assert report["launch_scope"] == []
     assert not account(report)["profile_configured"]
     assert report["pricing"] == engine.settings.pricing.model_dump(mode="json")
     assert all(row["status"] == "pending" for row in report["requirements"])
+
+
+def test_external_inventory_is_visible_but_not_an_oms_order_or_verified_account(engine):
+    engine.native.external_positions = (SimpleNamespace(venue="novig", account_fingerprint="a" * 64,
+        cost_usd=Decimal(".97175")),)
+    engine.native.pending_external_orders = (SimpleNamespace(venue="kalshi"),)
+    report = launch_setup(engine)
+    assert report["external_inventory"]["loaded_count"] == 1
+    assert report["external_inventory"]["unsettled_cost_usd"] == "0.97175"
+    assert report["external_inventory"]["account_reconciled"] is False
+    assert report["external_inventory"]["pending_order_count"] == 1
+    assert report["external_inventory"]["pending_venues"] == ["kalshi"]
+    assert report["safe_to_arm"] is False
 
 
 def test_future_native_monitor_registration_needs_no_dashboard_name_change(engine):
@@ -133,6 +149,44 @@ def test_pricing_launch_check_only_requires_scoped_books_and_profile(engine, mar
     requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
     assert requirements["pricing.profiles"]["status"] == "passed"
     engine.settings.pricing.profile_freshness_rules = rules[:1]
+    requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
+    assert requirements["pricing.profiles"]["status"] == "pending"
+
+
+def test_approved_trusted_pilot_does_not_require_strict_source_ttl_rules(engine, market):
+    market = market.model_copy(update={"sport": "football", "league": "NFL",
+        "market_type": "player_prop", "player": "Reviewed Player", "player_id": "player-1",
+        "statistic": "receptions", "line": Decimal("3.5"), "outcomes": ("over", "under"),
+        "status": "scheduled", "start_time": utcnow()+timedelta(hours=2),
+        "settlement": market.settlement.model_copy(update={"period": "FULL", "overtime": "included"}),
+        "extensions": {"normal_outcome_reviewed": True, "reviewed_normal_rule_id": "rule-nfl-2026"}})
+    profile, *_ = ready_fixture("production")
+    engine.native.profile = profile.model_copy(update={"venue": "novig", "market_ids": (market.id,),
+        "provider_ids": ("parlay_rest",), "settlement_policy": "novig_ioc_win_loss_halt_on_exception"})
+    engine.markets[market.id] = market
+    selector = {"sport": "football", "league": "NFL", "market_type": "player_prop",
+        "statistic": "receptions"}
+    research_profile = ReferenceProfile(selectors=(selector,), weights_percent={
+        "fanduel": Decimal(25), "draftkings": Decimal(25),
+        "caesars": Decimal(25), "bet365": Decimal(25)},
+        min_distinct_books=3, status="research_only", live_execution_allowed=False)
+    pilot = {"enabled": True, "owner_approved": True, "provider_id": "parlay_rest",
+        "trusted_books": ["fanduel", "draftkings", "caesars", "bet365"],
+        "min_distinct_books": 3, "accept_unknown_active_status": True,
+        "accept_unknown_quote_observation_age": True, "max_indicator_age_ms": 30000,
+        "independent_crosscheck": "two_distinct_books",
+        "uncertainty_margin_probability": "0.01", "max_debit_usd": "5",
+        "max_loss_usd": "5", "approval_evidence": "owner scoped source approval",
+        "market_scope": {"venue": "novig", "sport": "football", "league": "NFL",
+            "market_type": "player_prop", "statistics": ["receptions"],
+            "reviewed_normal_rule_id": "rule-nfl-2026"}}
+    engine.settings.pricing = PricingConfig(reference_quality_mode="trusted_provider",
+        normal_outcome_policy="winner_only_binary", reference_profile_mode="strict",
+        reference_profiles={"pilot_research_weights": research_profile},
+        enabled_reference_profiles=["pilot_research_weights"], trusted_pilot_policy=pilot)
+    requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
+    assert requirements["pricing.profiles"]["status"] == "passed"
+    market.extensions["reviewed_normal_rule_id"] = "unreviewed-change"
     requirements = {row["code"]: row for row in launch_setup(engine)["requirements"]}
     assert requirements["pricing.profiles"]["status"] == "pending"
 
@@ -232,6 +286,36 @@ async def test_preprofile_account_probe_is_diagnostic_only(engine, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_novig_preprofile_probe_includes_reviewed_external_inventory(engine, monkeypatch):
+    from evplatform.venues import account_probe
+
+    record = engine.registry.records["novig"]
+    record.enabled = True
+    record.health = {"authenticated": True}
+    record.plugin.task = RunningWorker()
+    client = SimpleNamespace(settings=SimpleNamespace(environment="production"))
+    record.plugin.client = client
+    external = SimpleNamespace(venue="novig")
+    other_venue = SimpleNamespace(venue="kalshi")
+    engine.native.external_positions = (external, other_venue)
+    expected = NativeAccountSnapshot(venue="novig", environment="production",
+        observed_at=utcnow(), identity_verified=True, account_fingerprint="a" * 64,
+        balance_usd=Decimal("24.02825"), cash_available_verified=True,
+        reconciled=True, external_position_count=1, external_cost_usd=Decimal(".97175"))
+
+    async def fake_probe(probed_client, **kwargs):
+        assert probed_client is client
+        assert kwargs["external_positions"] == (external,)
+        return expected
+
+    monkeypatch.setattr(account_probe, "probe_native_account", fake_probe)
+    result = await engine.native.probe_monitor_account("novig")
+    assert result["inventory_reconciled"] is True
+    assert result["balance_usd"] == "24.02825"
+    assert result["usable_for_execution"] is False
+
+
+@pytest.mark.asyncio
 async def test_preprofile_probe_requires_authenticated_monitor_and_redacts_errors(engine, monkeypatch):
     from evplatform.venues import account_probe
 
@@ -302,7 +386,8 @@ def test_invalid_limits_do_not_echo_values(tmp_path, contents):
 
 
 def native_app(tmp_path):
-    app = create_app(Settings(_env_file=None, mode="production", database_path=str(tmp_path / "api.db")))
+    app = create_app(Settings(_env_file=None, mode="production", database_path=str(tmp_path / "api.db"),
+                              data_dir=str(tmp_path / "data")))
     return app
 
 
@@ -319,6 +404,79 @@ def test_setup_endpoint_is_read_only_with_unapplied_limits(tmp_path, monkeypatch
         assert client.get("/api/native/orders").json()["orders"] == []
 
 
+def test_recurring_live_button_uses_existing_controller_and_saved_scope(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from scripts import watch_native_recurring
+
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        calls = []
+        monkeypatch.setattr(engine.native, "profile_for", lambda venue:
+            SimpleNamespace(validation_pilot=False) if venue == "prophetx" else None)
+        monkeypatch.setattr(engine.native, "report", lambda venue:
+            SimpleNamespace(profile_digest="a" * 64))
+
+        def guarded_tick(url):
+            calls.append(url)
+            engine.risk.auto_trade = True
+            engine.risk.kill_switch = False
+            return "armed"
+
+        monkeypatch.setattr(watch_native_recurring, "tick", guarded_tick)
+        route = "/api/launch/recurring/activate"
+        monkeypatch.setattr(engine.native, "profile_for", lambda venue:
+            SimpleNamespace(validation_pilot=True))
+        assert client.post(route, headers=HEADERS, json={"venue": "prophetx",
+            "expected_launch_digest": "a" * 64}).status_code == 409
+        monkeypatch.setattr(engine.native, "profile_for", lambda venue:
+            SimpleNamespace(validation_pilot=False) if venue == "prophetx" else None)
+        assert client.post(route, json={"venue": "prophetx",
+            "expected_launch_digest": "a" * 64}).status_code == 403
+        assert client.post(route, headers=HEADERS, json={"venue": "prophetx",
+            "expected_launch_digest": "b" * 64}).status_code == 409
+        assert not calls and engine.risk.kill_switch
+        response = client.post(route, headers=HEADERS, json={"venue": "prophetx",
+            "expected_launch_digest": "a" * 64})
+        assert response.status_code == 200 and response.json()["phase"] == "armed"
+        assert len(calls) == 1 and calls[0].startswith("http://127.0.0.1:")
+        assert engine.risk.auto_trade and not engine.risk.kill_switch
+
+
+def test_operator_can_edit_limits_draft_without_arming_or_changing_runtime_risk(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        limits = ready_fixture("production")[0].limits.model_dump(mode="json")
+        limits["max_order_stake_usd"] = "1"
+        before = engine.risk.config.model_dump(mode="json")
+        assert client.post("/api/launch/limits-draft", json=limits).status_code == 403
+        response = client.post("/api/launch/limits-draft", headers=HEADERS, json=limits)
+        assert response.status_code == 200
+        assert response.json()["applied"] is False
+        report = client.get("/api/launch/setup").json()
+        assert report["risk_policy"]["source"] == "saved_operator_draft"
+        assert report["risk_policy"]["values"]["max_order_stake_usd"] == "1"
+        assert not report["risk_policy"]["applied"]
+        assert engine.risk.config.model_dump(mode="json") == before
+        assert not engine.risk.auto_trade and engine.risk.kill_switch
+        assert client.get("/api/native/orders").json()["orders"] == []
+        engine.risk.kill_switch = False
+        assert client.post("/api/launch/limits-draft", headers=HEADERS, json=limits).status_code == 409
+
+
+def test_limits_draft_rejects_incoherent_or_extra_fields(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        limits = ready_fixture("production")[0].limits.model_dump(mode="json")
+        limits["max_order_stake_usd"] = "9999"
+        assert client.post("/api/launch/limits-draft", headers=HEADERS, json=limits).status_code == 422
+        limits.pop("max_order_stake_usd")
+        limits["secret"] = "do-not-save"
+        assert client.post("/api/launch/limits-draft", headers=HEADERS, json=limits).status_code == 422
+        assert not (tmp_path / "data" / "operator_launch_limits.json").exists()
+
+
 def test_manual_native_api_fails_closed_without_launch_profile(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with TestClient(native_app(tmp_path)) as client:
@@ -327,7 +485,9 @@ def test_manual_native_api_fails_closed_without_launch_profile(tmp_path, monkeyp
         response = client.post("/api/native/manual/preview", headers=HEADERS, json=body)
         assert response.status_code == 409
         assert client.post("/api/native/manual/submit", headers=HEADERS,
-                           json={"review_token": "invented"}).status_code == 409
+                           json={"review_token": "invented", "terms_digest": "0" * 64,
+                                 "proposal_digest": "0" * 64,
+                                 "approved_max_cost_usd": "1"}).status_code == 409
         assert client.get("/api/native/orders").json()["orders"] == []
 
 
@@ -350,7 +510,8 @@ def test_review_digest_mismatch_rejected_before_changing_stop(tmp_path, monkeypa
         engine.settings.live_enabled = True
         engine.risk.kill_switch = True
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "b"*64})
+            "kill_switch": False, "expected_launch_digest": "b"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 409
         assert engine.risk.kill_switch and not engine.risk.auto_trade
 
@@ -374,7 +535,8 @@ def test_gate_change_during_reset_restores_saved_emergency_stop(tmp_path, monkey
                 engine.native.report = lambda *args: failed
         engine.storage.save_config = interrupted_save
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "a"*64})
+            "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 409
         assert engine.risk.kill_switch and not engine.risk.auto_trade
         assert saved == [("kill_switch", False), ("kill_switch", True)]
@@ -389,10 +551,112 @@ def test_matching_review_digest_allows_operator_control_in_offline_fixture(tmp_p
         engine.settings.live_enabled = True
         engine.risk.kill_switch = True
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "a"*64})
+            "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 200
         assert not engine.risk.kill_switch and engine.risk.auto_trade
         assert client.get("/api/native/orders").json()["orders"] == []
+
+
+def test_native_activation_requires_an_explicit_24_hour_or_shorter_lease(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": True, "profile_digest": "a"*64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        for expiry in (None, (utcnow()-timedelta(seconds=1)).isoformat(),
+                       (utcnow()+timedelta(hours=25)).isoformat()):
+            body = {"auto_trade": True, "kill_switch": False, "expected_launch_digest": "a"*64}
+            if expiry is not None:
+                body["authorization_expires_at"] = expiry
+            assert client.post("/api/control", headers=HEADERS, json=body).status_code == 409
+            assert engine.risk.kill_switch and not engine.risk.auto_trade
+
+
+def test_native_authorization_expiry_keeps_research_engine_running(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": True, "profile_digest": "a"*64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        response = client.post("/api/control", headers=HEADERS, json={
+            "auto_trade": True, "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(seconds=1)).isoformat()})
+        assert response.status_code == 200
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not engine.risk.kill_switch:
+            time.sleep(.1)
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        assert engine.risk.native_authorization_expires_at is None
+        assert client.get("/api/health").json()["status"] == "running"
+
+
+def test_owner_can_release_stop_for_one_manual_order_without_enabling_automation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": True, "profile_digest": "a" * 64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        engine.risk.kill_switch = True
+        assert client.post("/api/control", headers=HEADERS,
+            json={"auto_trade": False, "kill_switch": False}).status_code == 409
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        response = client.post("/api/control", headers=HEADERS,
+            json={"auto_trade": False, "kill_switch": False,
+                  "expected_launch_digest": "a" * 64,
+                  "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
+        assert response.status_code == 200
+        assert not engine.risk.kill_switch and not engine.risk.auto_trade
+
+
+def test_unready_owner_can_release_stop_only_into_short_lived_standby(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": False, "profile_digest": "a" * 64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        engine.risk.halt("Offline test stop")
+        expires = (utcnow()+timedelta(seconds=1)).isoformat()
+        body = {"auto_trade": False, "kill_switch": False,
+                "expected_launch_digest": "a" * 64, "authorization_expires_at": expires}
+        assert client.post("/api/control", headers=HEADERS, json=body).status_code == 200
+        assert not engine.risk.kill_switch and not engine.risk.auto_trade
+        with pytest.raises(ValueError, match="Automatic trading is disabled"):
+            engine.risk.check_enabled()
+        with pytest.raises(ValueError, match="release gate has unresolved checks"):
+            engine.native.require_preflight(SimpleNamespace(id="offline-intent", execution_origin="manual"),
+                                            preview_only=True)
+        assert client.post("/api/control", headers=HEADERS,
+            json={**body, "auto_trade": True}).status_code == 409
+        assert not engine.risk.kill_switch and not engine.risk.auto_trade
+        assert client.get("/api/native/orders").json()["orders"] == []
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not engine.risk.kill_switch:
+            time.sleep(.1)
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        assert client.get("/api/health").json()["status"] == "running"
+
+
+def test_unready_standby_release_requires_matching_digest_and_bounded_expiry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        report = engine.native.report().model_copy(update={"safe_to_arm": False, "profile_digest": "a" * 64})
+        engine.native.report = lambda *args: report
+        engine.settings.live_enabled = True
+        engine.risk.halt("Offline test stop")
+        body = {"auto_trade": False, "kill_switch": False,
+                "expected_launch_digest": "a" * 64,
+                "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()}
+        for invalid in ({**body, "expected_launch_digest": "b" * 64},
+                        {**body, "authorization_expires_at": None},
+                        {**body, "authorization_expires_at": (utcnow()+timedelta(hours=25)).isoformat()}):
+            assert client.post("/api/control", headers=HEADERS, json=invalid).status_code == 409
+            assert engine.risk.kill_switch and not engine.risk.auto_trade
 
 
 def test_activation_failure_cannot_erase_new_safety_halt(tmp_path, monkeypatch):
@@ -412,7 +676,8 @@ def test_activation_failure_cannot_erase_new_safety_halt(tmp_path, monkeypatch):
                 engine.native.report = lambda *args: base
         engine.storage.save_config = interrupted_save
         response = client.post("/api/control", headers=HEADERS, json={"auto_trade": True,
-            "kill_switch": False, "expected_launch_digest": "a"*64})
+            "kill_switch": False, "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat()})
         assert response.status_code == 409
         assert engine.risk.kill_switch and engine.risk.kill_reason == "OFFLINE new safety halt"
         assert not engine.risk.auto_trade

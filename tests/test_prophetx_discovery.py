@@ -1,5 +1,6 @@
 """Read-only catalog diagnostics never grant market or order authorization."""
 import asyncio
+from collections import defaultdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -9,8 +10,11 @@ import pytest
 from evplatform.api import create_app
 from evplatform.core.config import Settings
 from evplatform.integrations.prophetx_discovery import (
-    open_event_ids, summarize_batched_markets, summarize_events, summarize_markets)
+    active_tournament_ids, open_event_ids, summarize_batched_markets,
+    summarize_events, summarize_markets, summarize_tournaments)
 from evplatform.plugins.external import NativeMonitor, ProphetXMonitorConfig
+from evplatform.venues.common import VenueHTTPError
+from evplatform.venues.prophetx import ProphetXSettings
 
 
 def test_catalog_summaries_are_bounded_allowlists():
@@ -31,6 +35,20 @@ def test_catalog_summaries_are_bounded_allowlists():
     assert markets["markets"][0]["selection_review"][0]["strike_id"] == "test"
     assert markets["markets"][0]["selection_review_truncated"] is False
     assert markets["mapping_verified"] is False and "private" not in str(markets)
+
+
+def test_active_tournament_catalog_uses_exact_names_and_redacts_payload():
+    payload = {"data": {"tournaments": [
+        {"id": 31, "name": "NFL", "secret_key": "hidden"},
+        {"id": 132, "name": "NBA"}, {"id": 109, "name": "MLB"},
+        {"id": 234, "name": "NHL"}, {"id": 233, "name": "NFL Preseason"}]}}
+    assert active_tournament_ids(payload, ["NFL", "NBA", "MLB", "NHL"]) == {
+        "NFL": 31, "NBA": 132, "MLB": 109, "NHL": 234}
+    summary = summarize_tournaments(payload)
+    assert summary["total"] == 5 and "hidden" not in str(summary)
+    with pytest.raises(ValueError):
+        active_tournament_ids({"data": {"tournaments": [
+            {"id": 31, "name": "NFL"}, {"id": 99, "name": "NFL"}]}}, ["NFL"])
 
 
 def test_market_review_exposes_bounded_public_strike_fields_without_prices_or_private_metadata():
@@ -111,9 +129,13 @@ async def test_native_monitor_discovery_uses_existing_client_and_keeps_last_good
         async def discover_events(self, **kwargs):
             assert kwargs == {"tournament_id": 132}
             if self.fail:
-                raise RuntimeError("read failed")
+                raise VenueHTTPError("prophetx", 429)
             return {"data": {"sport_events": [{"event_id": 123, "name": "A at B",
                 "status": "not_started", "scheduled": "2026-10-22T02:00:00Z"}]}}
+
+        async def discover_markets(self, event_ids):
+            assert event_ids == ["123"]
+            return {"data": {"123": []}}
 
     client = Client()
     monitor = SimpleNamespace(client=client,
@@ -124,6 +146,45 @@ async def test_native_monitor_discovery_uses_existing_client_and_keeps_last_good
     client.fail = True
     await NativeMonitor._refresh_discovery(monitor)
     assert monitor.discovered_event_ids == ["123"] and monitor.discovery_status == "read_failed"
+    assert monitor.discovery_error_type == "VenueHTTPError:429"
+
+
+def test_prophetx_catalog_pacing_keeps_headroom_below_published_one_rps_tier():
+    assert ProphetXSettings().requests_per_second == 0.5
+
+
+@pytest.mark.asyncio
+async def test_catalog_discovers_one_actual_player_prop_subtype_for_read_only_stream(monkeypatch):
+    from evplatform.venues.prophetx_market_data import ProphetXMarketData
+
+    fixed = datetime(2026, 10, 22, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: fixed)
+
+    class Client:
+        public_market_data = ProphetXMarketData()
+
+        async def discover_events(self, **kwargs):
+            return {"data": {"sport_events": [{"event_id": 123, "name": "A at B",
+                "status": "not_started", "scheduled": "2026-10-22T02:00:00Z"}]}}
+
+        async def discover_markets(self, event_ids):
+            assert event_ids == ["123"]
+            return {"data": {"123": [
+                {"id": 219, "sub_type": "moneyline", "status": "active", "selections": []},
+                {"id": 300, "sub_type": "player_total_points", "status": "active",
+                 "selections": [[{"strike_id": "s1", "outcome_id": 1}], []]},
+                {"id": 301, "sub_type": "player_total_rebounds", "status": "active",
+                 "selections": [[{"strike_id": "s2", "outcome_id": 2}], []]},
+            ]}}
+
+    monitor = SimpleNamespace(client=Client(), context=SimpleNamespace(config={
+        "discovery_tournament_ids": [132], "max_discovered_events": 5,
+        "max_discovered_prop_subscriptions": 1}), discovery_status="disabled", discovered_event_ids=[])
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovery_status == "current"
+    assert monitor.discovered_prop_subtypes == {"123": ["player_total_points"]}
+    assert len(monitor.client.public_market_data.catalog) == 3
+    assert monitor.client.public_market_data.snapshot(now=fixed, connected=True)["levels"] == []
 
 
 def test_prophetx_discovery_config_rejects_duplicate_or_invalid_tournaments():
@@ -132,6 +193,101 @@ def test_prophetx_discovery_config_rejects_duplicate_or_invalid_tournaments():
         ProphetXMonitorConfig(discovery_tournament_ids=[132, 132])
     with pytest.raises(ValueError):
         ProphetXMonitorConfig(discovery_tournament_ids=[0])
+    with pytest.raises(ValueError):
+        ProphetXMonitorConfig(discovery_leagues=["NFL", "NFL"])
+    assert ProphetXMonitorConfig(discovery_leagues=["NBA", "NCAAF", "NCAABM", "UFC",
+        "ATP", "WTA"]).discovery_leagues[-1] == "WTA"
+
+
+def test_current_tournament_names_map_to_exact_canonical_leagues():
+    from evplatform.integrations.prophetx_discovery import active_tournament_options
+    catalog = {"data": {"tournaments": [
+        {"id": 132, "name": "NBA"}, {"id": 27653, "name": "College Football"},
+        {"id": 648, "name": "College Basketball"}, {"id": 1500000003, "name": "UFC"},
+        {"id": 2613, "name": "ATP Basel"}, {"id": 3103, "name": "ATP Vienna"},
+        {"id": 3165, "name": "WTA Pan Pacific Open"},
+        {"id": 5065, "name": "ATP Challenger Men Singles"},
+        {"id": 1600000234, "name": "Golf Markets"}]}}
+    assert active_tournament_options(catalog, ["NBA", "NCAAF", "NCAABM", "UFC",
+        "ATP", "WTA"]) == [("NBA", 132), ("NCAAF", 27653),
+        ("NCAABM", 648), ("UFC", 1500000003), ("ATP", 2613),
+        ("ATP", 3103), ("WTA", 3165)]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tournaments_include_source_rich_nfl_and_retain_pinned_nba(monkeypatch):
+    from evplatform.venues.prophetx_market_data import ProphetXMarketData
+    fixed = datetime(2026, 10, 23, 18, tzinfo=timezone.utc)
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: fixed)
+    async def no_matching_side_effects(_):
+        return []
+    monkeypatch.setattr(NativeMonitor, "_refresh_research_matches", no_matching_side_effects)
+    calls = []
+    nfl = {"event_id": 31_001, "name": "Pittsburgh Steelers at New Orleans Saints",
+           "scheduled": "2026-10-25T13:30:00Z", "status": "not_started"}
+    nba = {"event_id": 132_001, "name": "Away at Home",
+           "scheduled": "2026-10-24T00:00:00Z", "status": "not_started"}
+
+    class Client:
+        public_market_data = ProphetXMarketData()
+        async def discover_sports(self, *, active_events_only):
+            assert active_events_only is True
+            return {"data": {"tournaments": [
+                {"id": 31, "name": "NFL"}, {"id": 132, "name": "NBA"},
+                {"id": 109, "name": "MLB"}, {"id": 234, "name": "NHL"}]}}
+
+        async def discover_events(self, *, tournament_id):
+            calls.append(tournament_id)
+            return {"data": {"sport_events": {31: [nfl], 132: [nba]}.get(tournament_id, [])}}
+
+        async def discover_markets(self, event_ids):
+            return {"data": {event_id: [] for event_id in event_ids}}
+
+    source = SimpleNamespace(event_name=nfl["name"], league="NFL",
+                             start_time=datetime(2026, 10, 25, 13, 30, tzinfo=timezone.utc))
+    engine = SimpleNamespace(consensus_estimates={"source": {"independent_book_count": 5}},
+                             markets={"source": source})
+    monitor = SimpleNamespace(client=Client(), engine=engine,
+        context=SimpleNamespace(config={"discovery_tournament_ids": [132],
+            "discovery_leagues": ["NFL", "NBA", "MLB", "NHL"],
+            "discovery_lookahead_hours": 96, "max_discovered_events": 2,
+            "max_discovered_prop_subscriptions": 0}),
+        discovery_status="disabled", discovered_event_ids=[])
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovery_status == "current" and calls == [132, 31, 109, 234]
+    assert set(monitor.discovered_event_ids) == {str(nfl["event_id"]), str(nba["event_id"])}
+    assert monitor.research_events[str(nfl["event_id"])]["league"] == "NFL"
+    assert monitor.discovered_tournaments == {"NFL": 31, "NBA": 132, "MLB": 109, "NHL": 234}
+    monitor._subscribed_event_ids = [str(nba["event_id"])]
+    await NativeMonitor._refresh_discovery(monitor, preserve_scope=True)
+    assert monitor.discovered_event_ids == [str(nba["event_id"])]
+
+
+@pytest.mark.asyncio
+async def test_tournament_read_failure_keeps_pinned_discovery(monkeypatch):
+    fixed = datetime(2026, 10, 23, 18, tzinfo=timezone.utc)
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: fixed)
+
+    class Client:
+        async def discover_sports(self, *, active_events_only):
+            raise RuntimeError("catalog unavailable")
+
+        async def discover_events(self, *, tournament_id):
+            assert tournament_id == 132
+            return {"data": {"sport_events": [{"event_id": 123,
+                "name": "Away at Home", "scheduled": "2026-10-24T00:00:00Z",
+                "status": "not_started"}]}}
+
+        async def discover_markets(self, event_ids):
+            return {"data": {event_id: [] for event_id in event_ids}}
+
+    monitor = SimpleNamespace(client=Client(), context=SimpleNamespace(config={
+        "discovery_tournament_ids": [132], "discovery_leagues": ["NFL", "NBA"],
+        "max_discovered_events": 5}), discovery_status="disabled", discovered_event_ids=[])
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovered_event_ids == ["123"]
+    assert monitor.discovery_status == "current"
+    assert monitor.discovery_error_type == "RuntimeError"
 
 
 @pytest.mark.asyncio
@@ -141,7 +297,7 @@ async def test_periodic_discovery_changes_stream_scope_only_after_success(monkey
     async def one_cycle(_):
         nonlocal sleeps
         sleeps += 1
-        if sleeps > 1:
+        if sleeps > 12:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
@@ -156,15 +312,88 @@ async def test_periodic_discovery_changes_stream_scope_only_after_success(monkey
     async def refresh():
         monitor.discovered_event_ids = ["200"]
         monitor.discovery_status = "current"
+    async def rematch():
+        return []
 
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_interval_seconds": 60, "event_ids": ["100"], "prop_subtypes": {}}),
         discovered_event_ids=["100"], _subscribed_event_ids=["100"],
-        discovery_status="current", _refresh_discovery=refresh)
+        discovery_status="current", _refresh_discovery=refresh,
+        _refresh_research_matches=rematch)
     with pytest.raises(asyncio.CancelledError):
         await NativeMonitor._discover_periodically(monitor)
     assert client.calls == [(["100", "200"], {})]
     assert monitor._subscribed_event_ids == ["100", "200"]
+
+
+@pytest.mark.asyncio
+async def test_recovered_catalog_reconnects_with_events_after_startup_read_failure():
+    class Client:
+        def __init__(self):
+            self.calls = []
+            self.public_market_data = SimpleNamespace(catalog_at=None)
+
+        async def stream_updates(self):
+            yield {"type": "snapshot_required"}
+
+        async def subscribe(self, events, props):
+            self.calls.append((events, props))
+
+    async def observe(*args):
+        return None
+
+    client = Client()
+    async def refresh(*, preserve_scope=False):
+        assert preserve_scope is True
+        monitor.discovery_status = "current"
+        monitor.discovered_event_ids = ["123"]
+        monitor.discovered_prop_subtypes = {"123": ["player_total_points"]}
+        client.public_market_data.catalog_at = datetime(2026, 10, 22, tzinfo=timezone.utc)
+
+    monitor = SimpleNamespace(client=client, manifest=SimpleNamespace(name="prophetx",
+        capabilities={"native_event_forwarding": True}), context=SimpleNamespace(config={
+        "event_ids": [], "prop_subtypes": {}, "discovery_tournament_ids": [132]}),
+        engine=SimpleNamespace(native=SimpleNamespace(on_frame=observe),
+            metrics=SimpleNamespace(counters=defaultdict(int))),
+        discovery_status="read_failed", discovered_event_ids=[], discovered_prop_subtypes={},
+        _subscribed_event_ids=[], _subscribed_prop_subtypes={}, _refresh_discovery=refresh, frames=0)
+    await NativeMonitor._run(monitor)
+    await monitor.recovery_task
+    assert client.calls == [(["123"], {"123": ["player_total_points"]})]
+    assert monitor._subscribed_event_ids == ["123"]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_catalog_refresh_does_not_block_talaria_message_loop():
+    refresh_started, release_refresh = asyncio.Event(), asyncio.Event()
+
+    class Client:
+        public_market_data = SimpleNamespace(catalog_at=None)
+
+        async def stream_updates(self):
+            yield {"type": "snapshot_required"}
+            await refresh_started.wait()
+            yield {"event": "pusher:ping"}
+
+    async def refresh(*, preserve_scope=False):
+        assert preserve_scope is True
+        refresh_started.set()
+        await release_refresh.wait()
+        monitor.discovery_status = "read_failed"
+
+    async def observe(*args):
+        return None
+
+    monitor = SimpleNamespace(client=Client(), manifest=SimpleNamespace(name="prophetx",
+        capabilities={"native_event_forwarding": True}), context=SimpleNamespace(config={
+        "event_ids": [], "prop_subtypes": {}, "discovery_tournament_ids": [132]}),
+        engine=SimpleNamespace(native=SimpleNamespace(on_frame=observe),
+            metrics=SimpleNamespace(counters=defaultdict(int))),
+        discovery_status="current", _refresh_discovery=refresh, frames=0)
+    await asyncio.wait_for(NativeMonitor._run(monitor), timeout=1)
+    assert monitor.frames == 2 and not monitor.recovery_task.done()
+    release_refresh.set()
+    await monitor.recovery_task
 
 
 def test_catalog_endpoint_requires_one_scope_and_connected_monitor(tmp_path, monkeypatch):
@@ -172,6 +401,7 @@ def test_catalog_endpoint_requires_one_scope_and_connected_monitor(tmp_path, mon
     app = create_app(Settings(_env_file=None, database_path=str(tmp_path / "catalog.db")))
     with TestClient(app) as client:
         headers = {"X-EV-Control": "local"}
+        assert client.get("/api/native/discovery/prophetx/tournaments").status_code == 409
         assert client.post("/api/native/discovery/prophetx", json={"tournament_id": 132}).status_code == 403
         assert client.post("/api/native/discovery/prophetx", json={}, headers=headers).status_code == 422
         assert client.post("/api/native/discovery/prophetx", json={"tournament_id": 132,

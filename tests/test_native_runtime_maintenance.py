@@ -157,6 +157,6 @@ async def test_narrow_settlement_scope_blocks_second_order_after_settlement(syst
     candidate = order(market)
     runtime.profile = SimpleNamespace(venue="novig", environment="sandbox", account_fingerprint=candidate.account_fingerprint,
         market_ids=(market.id,), strategy_ids=(candidate.strategy,), settlement_policy="novig_ioc_win_loss_halt_on_exception")
-    runtime.report = lambda: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
+    runtime.report = lambda *args, **kwargs: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
     with pytest.raises(RiskRejected, match="only one managed order"):
         runtime.require_preflight(candidate)

@@ -75,10 +75,19 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
     Start-Sleep -Milliseconds 500
 }
 if (-not $ready) { throw "Backend did not become ready. See data\server-$Port.err.log; process ID $($server.Id)." }
-@{ pid = $server.Id; port = $Port; mode = $Mode; url = $dashboardUrl;
+$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+    Where-Object { $_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::1', '::') } | Select-Object -First 1
+$bound = if ($listener) { Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" }
+$expectedCommand = "-m evplatform --mode $Mode --port $Port"
+if (-not $bound -or $bound.CommandLine -notmatch [regex]::Escape($expectedCommand) -or
+    ($bound.ProcessId -ne $server.Id -and $bound.ParentProcessId -ne $server.Id)) {
+    throw "The process listening on port $Port is not the launched EV workspace; runtime ownership was not saved."
+}
+@{ pid = $bound.ProcessId; launcher_pid = $server.Id; started_at = $bound.CreationDate;
+    port = $Port; mode = $Mode; url = $dashboardUrl;
     database_path = $databaseForRuntime } |
     ConvertTo-Json | Set-Content -LiteralPath "data\runtime-$Port.json" -Encoding UTF8
-Write-Host "EV Platform $Mode is running at $dashboardUrl (PID $($server.Id))." -ForegroundColor Green
+Write-Host "EV Platform $Mode is running at $dashboardUrl (PID $($bound.ProcessId))." -ForegroundColor Green
 if ($Mode -in @("demo", "paper")) {
     if ($Mode -eq "paper" -and $env:EV_SAMPLE_FEED_ENABLED -eq "false") {
         Write-Host "Sample odds are OFF; external quotes remain live observations and all paper fills are simulated. Paper automation: $([bool]$AutoTrade)."
@@ -92,6 +101,6 @@ if (-not $NoBrowser) { Start-Process -FilePath $dashboardUrl }
 if (-not $Background) {
     Write-Host "Press Ctrl+C to return to PowerShell; the hidden backend remains running."
     Write-Host "Stop safely with .\stop_local.ps1 -Port $Port."
-    Wait-Process -Id $server.Id
+    Wait-Process -Id $bound.ProcessId
 }
 

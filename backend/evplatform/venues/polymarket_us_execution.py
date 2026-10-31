@@ -100,6 +100,44 @@ def order_body(intent: NativeOrderIntent) -> dict:
             "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC", "synchronousExecution": False}
 
 
+def sdk_preview_request(intent: NativeOrderIntent) -> dict:
+    """Adapt exact local decimals to SDK 2.4.1's numeric quantity field.
+
+    The SDK uses JSON serialization and accepts int/float quantities, whereas
+    the guarded placement transport emits Decimal as an exact JSON number.
+    Refuse a preview if that conversion changes the decimal quantity.
+    """
+    body = order_body(intent)
+    quantity = body["quantity"]
+    sdk_quantity = int(quantity) if quantity == quantity.to_integral_value() else float(quantity)
+    if D(str(sdk_quantity)) != quantity:
+        raise PreflightRequired("Polymarket US SDK cannot preview this exact quantity")
+    return {**body, "quantity": sdk_quantity}
+
+
+def validate_preview(intent: NativeOrderIntent, response: dict) -> dict:
+    """A venue preview validates parameters; it is never a fill or fee quote."""
+    order = response.get("order") if isinstance(response, dict) else None
+    if not isinstance(order, dict):
+        raise PreflightRequired("Polymarket US preview omitted the order")
+    expected_intent = "ORDER_INTENT_BUY_LONG" if intent.instrument.native_outcome == "yes" else "ORDER_INTENT_BUY_SHORT"
+    expected_side = "ORDER_SIDE_BUY" if intent.instrument.native_outcome == "yes" else "ORDER_SIDE_SELL"
+    try:
+        quantity = D(str(order.get("quantity")))
+        price = amount(order.get("price"), "preview limit")
+    except (ArithmeticError, ReconciliationError, ValueError, TypeError):
+        raise PreflightRequired("Polymarket US preview has invalid price or quantity") from None
+    if (not quantity.is_finite() or quantity != intent.quantity or price != yes_price(intent)
+            or order.get("marketSlug") != intent.instrument.instrument_id
+            or order.get("intent") != expected_intent or order.get("side") != expected_side
+            or order.get("outcomeSide") != f"OUTCOME_SIDE_{intent.instrument.native_outcome.upper()}"
+            or order.get("type") != "ORDER_TYPE_LIMIT" or order.get("tif") != IOC
+            or order.get("state") not in {"ORDER_STATE_PENDING_NEW", "ORDER_STATE_PENDING_RISK", "ORDER_STATE_NEW"}):
+        raise PreflightRequired("Polymarket US preview differs from reviewed order terms")
+    return {"market_slug": order["marketSlug"], "intent": expected_intent,
+            "state": order.get("state"), "parameter_check_only": True}
+
+
 def encode_exact_json(value) -> bytes:
     """Emit documented JSON numbers without converting native decimals to float."""
     if isinstance(value, D):
@@ -284,6 +322,11 @@ class PolymarketUSExecutionVenue:
     def build_native_request(self, intent):
         self._mapping(intent)
         return order_body(intent)
+
+    async def preview_native_request(self, intent):
+        self._scope_check()
+        self._mapping(intent)
+        return validate_preview(intent, await self.client.preview_order(sdk_preview_request(intent)))
 
     def bind_native_intent(self, order_id, intent):
         self._mapping(intent)

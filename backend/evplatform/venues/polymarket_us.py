@@ -13,6 +13,7 @@ import binascii
 import json
 import re
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import AsyncIterator, Literal
 from uuid import UUID, uuid4
@@ -88,12 +89,17 @@ class PolymarketUSClient(NativeTransport):
         super().__init__(settings or PolymarketUSSettings(), client)
         self._key = None
         self.authenticated = False
+        self.private_auth_failure: str | None = None
         self.reason = "Read-only personal US API monitor; native execution is unsupported"
         self.market_slugs: list[str] = []
         self.private_updates = True
         self.account_snapshot: dict | None = None
         self.books: dict[str, dict] = {}
         self.book_received_at: dict[str, float] = {}
+        self.rest_books: dict[str, dict] = {}
+        self.rest_book_received_at: dict[str, float] = {}
+        self._public_sdk = None
+        self._private_sdk = None
         self.market_messages = 0
         self.private_messages = 0
         self.heartbeat_messages = 0
@@ -171,9 +177,34 @@ class PolymarketUSClient(NativeTransport):
         # Failure never falls back to treating a configured key as account proof.
         return await self._get("/v1/rfqs/user-id", private=True)
 
+    async def preview_order(self, request: dict) -> dict:
+        """Use the official retail SDK's non-placement preview endpoint only.
+
+        The central executor owns order creation. Keeping this method on the
+        monitor's allowlisted surface makes a preview incapable of falling
+        through to placement or cancellation.
+        """
+        if not self.authenticated or not isinstance(request, dict):
+            raise VenueError("Authenticated Polymarket US order preview required")
+        if self._private_sdk is None:
+            from polymarket_us import AsyncPolymarketUS
+            self._private_sdk = AsyncPolymarketUS(
+                key_id=self.settings.api_key_id, secret_key=self.settings.secret_key,
+                max_retries=0)
+        from polymarket_us.errors import PolymarketUSError
+        try:
+            result = await self._private_sdk.orders.preview({"request": request})
+        except PolymarketUSError as exc:
+            status = getattr(exc, "status_code", None)
+            raise VenueError(f"Polymarket US order preview failed ({status or type(exc).__name__})") from None
+        if not isinstance(result, dict) or not isinstance(result.get("order"), dict):
+            raise VenueError("Invalid Polymarket US order preview response")
+        return result
+
     async def connect(self):
         self._closed = False
         self.authenticated = False
+        self.private_auth_failure = None
         self.health = "connecting"
         try:
             self.account_snapshot = await self.account_balances()
@@ -231,7 +262,50 @@ class PolymarketUSClient(NativeTransport):
 
     async def fetch_snapshot(self, market_slug: str):
         validated_slugs([market_slug])
-        return await self._get(f"/v1/markets/{market_slug}/book")
+        sdk = self._public_client()
+        result = await self._public_read(sdk.markets.book, market_slug)
+        data = result.get("marketData") if isinstance(result, dict) else None
+        if not isinstance(data, dict) or data.get("marketSlug") != market_slug:
+            raise VenueError("Polymarket US SDK returned a mismatched public book")
+        # Public REST is a separate, timestamped baseline. It never refreshes
+        # or impersonates the authenticated WebSocket book.
+        self.rest_books[market_slug] = data
+        self.rest_book_received_at[market_slug] = time.time()
+        return result
+
+    async def _public_read(self, method, slug: str):
+        """Share the adapter's read budget with SDK calls; never auto-retry 429."""
+        from polymarket_us.errors import RateLimitError
+
+        async with self._request_lock:
+            wait = self._next_request - time.monotonic()
+            while wait > 0:
+                await asyncio.sleep(wait)
+                wait = self._next_request - time.monotonic()
+            # The public gateway rejected the former unpaced batch. One read
+            # per second is a conservative local cap, not a claimed venue tier.
+            self._next_request = time.monotonic() + max(1.0, 1/self.settings.requests_per_second)
+            self.request_count += 1
+            try:
+                return await method(slug)
+            except RateLimitError:
+                self.error_count += 1
+                self._next_request = time.monotonic() + 30
+                raise VenueError("Polymarket US public read rate limited") from None
+
+    def _public_client(self):
+        if self._public_sdk is None:
+            from polymarket_us import AsyncPolymarketUS
+            self._public_sdk = AsyncPolymarketUS(max_retries=0)
+        return self._public_sdk
+
+    async def public_market_metadata(self, market_slug: str) -> dict:
+        validated_slugs([market_slug])
+        result = await self._public_read(self._public_client().markets.retrieve_by_slug, market_slug)
+        market = result.get("market", result) if isinstance(result, dict) else None
+        if not isinstance(market, dict) or market.get("slug") != market_slug:
+            raise VenueError("Polymarket US SDK returned a mismatched public market")
+        return market
 
     async def configure_subscriptions(self, config):
         parsed = PolymarketUSMonitorConfig.model_validate(config)
@@ -292,6 +366,19 @@ class PolymarketUSClient(NativeTransport):
             slug = alias(data, "marketSlug", "market_slug")
             if slug not in self.market_slugs or not isinstance(data.get("bids"), list) or not isinstance(data.get("offers"), list):
                 raise VenueError("Unexpected Polymarket US market snapshot identity")
+            stamp = alias(data, "transactTime", "transact_time")
+            try:
+                observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                if observed.tzinfo is None:
+                    raise ValueError("Naive market-data clock")
+                previous = self.books.get(slug)
+                if previous is not None:
+                    old_stamp = alias(previous, "transactTime", "transact_time")
+                    old = datetime.fromisoformat(old_stamp.replace("Z", "+00:00"))
+                    if observed.astimezone(timezone.utc) <= old.astimezone(timezone.utc):
+                        return "out_of_order"
+            except (AttributeError, TypeError, ValueError):
+                raise VenueError("Invalid Polymarket US book timestamp") from None
             for row in data["bids"] + data["offers"]:
                 if not isinstance(row, dict) or not isinstance(row.get("px"), dict) or row["px"].get("currency") != "USD":
                     raise VenueError("Invalid Polymarket US book currency")
@@ -371,6 +458,8 @@ class PolymarketUSClient(NativeTransport):
                 if channel == "markets":
                     self.books.clear()
                     self.book_received_at.clear()
+                    self.rest_books.clear()
+                    self.rest_book_received_at.clear()
             if self._closed:
                 return
             self.error_count += 1
@@ -397,6 +486,8 @@ class PolymarketUSClient(NativeTransport):
         self._subscription_evidence[channel] = {}
         self.books.clear()
         self.book_received_at.clear()
+        self.rest_books.clear()
+        self.rest_book_received_at.clear()
         self.error_count += 1
         self.health = "error"
         self.reason = "Polymarket US monitor worker stopped unexpectedly; restart and review logs"
@@ -437,12 +528,21 @@ class PolymarketUSClient(NativeTransport):
         self.account_snapshot = None
         self.books.clear()
         self.book_received_at.clear()
+        self.rest_books.clear()
+        self.rest_book_received_at.clear()
         self._ready = {}
         self._subscription_evidence = {}
+        if self._public_sdk is not None:
+            await self._public_sdk.close()
+            self._public_sdk = None
+        if self._private_sdk is not None:
+            await self._private_sdk.close()
+            self._private_sdk = None
         await super().disconnect()
 
     def health_check(self):
         return {**super().health_check(), "authenticated": self.authenticated,
+                "private_auth_failure": self.private_auth_failure,
                 "streaming": bool(self._ready) and all(self._ready.values()), "reason": self.reason,
                 "read_only": True, "execution_supported": False, "reconciled": False,
                 "configured_markets": len(self.market_slugs), "monitored_books": len(self.books),

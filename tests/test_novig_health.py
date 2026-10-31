@@ -1,4 +1,5 @@
 """Offline Novig connection health checks; no credentials or network access."""
+import asyncio
 import json
 from decimal import Decimal
 
@@ -352,6 +353,128 @@ async def test_private_heartbeat_gap_invalidates_and_reconnects_from_fresh_snaps
         assert native.health_check()["streaming"] is True
         assert native.health_check()["errors"] == 1
         assert backoffs == [0]
+    finally:
+        await updates.aclose()
+
+
+async def test_book_gap_resnapshots_on_same_socket_and_blocks_old_depth(native, monkeypatch):
+    outcome = "opposing"
+    first = {"nonce": 1, "subscribed": {"markets": {MONITOR_OPEN: "book"}},
+        "snapshot": {MONITOR_OPEN: {"lifecycle": {"seq": 1, "status": "OPEN"},
+            "book": {"seq": 1, "orders": {outcome: [
+                {"orderId": "old-order", "price": "0.4", "qty": 8}]}}}}}
+    missing_remove = {"delta": {MONITOR_OPEN: {"book": {"seq": 2,
+        "deltas": [{"kind": "remove", "orderId": "unseen-order", "reason": "fill"}]}}}}
+    fresh = {"nonce": 2, "snapshot": {MONITOR_OPEN: {
+        "lifecycle": {"seq": 4, "status": "OPEN"},
+        "book": {"seq": 9, "orders": {outcome: [
+            {"orderId": "fresh-order", "price": "0.35", "qty": 12}]}}}}}
+    changed = {"delta": {MONITOR_OPEN: {"book": {"seq": 10,
+        "deltas": [{"kind": "add", "orderId": "another-order", "outcomeId": outcome,
+                    "price": "0.36", "qty": 3}]}}}}
+    socket = Socket([first, missing_remove, fresh, changed])
+    native.selection["markets"] = {MONITOR_OPEN: "book"}
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *args, **kwargs: socket)
+    updates = native.stream_updates()
+    try:
+        assert await anext(updates) == first
+        assert native.book.asks(MONITOR_OPEN, outcome) == [(Decimal("0.6"), 8)]
+        invalidation = await anext(updates)
+        assert invalidation["type"] == "transport_invalidated"
+        assert native.health_check()["streaming"] is False
+        assert native.book.asks(MONITOR_OPEN, outcome) == []
+        assert await anext(updates) == fresh
+        assert socket.sent[1] == {"nonce": 2, "snapshot": native.selection}
+        assert native.health_check()["streaming"] is True
+        assert native.book.asks(MONITOR_OPEN, outcome) == [(Decimal("0.65"), 12)]
+        assert await anext(updates) == changed
+        assert native.book.asks(MONITOR_OPEN, outcome) == [(Decimal("0.64"), 3), (Decimal("0.65"), 12)]
+        assert native.health_check()["sequence_gap_counts"] == {"book": 1}
+        assert native.health_check()["reconnects"] == 0
+    finally:
+        await updates.aclose()
+    assert native.book.asks(MONITOR_OPEN, outcome) == []
+
+
+async def test_book_resnapshot_timeout_is_absolute_despite_continuing_heartbeats(native, monkeypatch):
+    first = {"nonce": 1, "subscribed": {"markets": {MONITOR_OPEN: "book"}},
+        "snapshot": {MONITOR_OPEN: {"lifecycle": {"seq": 1, "status": "OPEN"},
+            "book": {"seq": 1, "orders": {"opposing": [
+                {"orderId": "known", "price": "0.4", "qty": 8}]}}}}}
+    gap = {"delta": {MONITOR_OPEN: {"book": {"seq": 2,
+        "deltas": [{"kind": "remove", "orderId": "unseen"}]}}}}
+
+    class HeartbeatSocket(Socket):
+        async def __anext__(self):
+            try:
+                return json.dumps(next(self.frames))
+            except StopIteration:
+                await asyncio.sleep(0.005)
+                return json.dumps({"heartbeat": {"ts": 1757894415123}})
+
+    first_socket = HeartbeatSocket([first, gap])
+    sessions = iter([first_socket, Socket([first])])
+    native.selection["markets"] = {MONITOR_OPEN: "book"}
+    native.settings.timeout_seconds = 0.05
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *args, **kwargs: next(sessions))
+    async def immediate_backoff(_failures):
+        return None
+    monkeypatch.setattr(native, "_backoff", immediate_backoff)
+    updates = native.stream_updates()
+    try:
+        assert await anext(updates) == first
+        assert (await anext(updates))["reason"] == "resyncing"
+        assert native.book.asks(MONITOR_OPEN, "opposing") == []
+        # Heartbeats arrive faster than each socket read timeout. They must not
+        # postpone recovery forever when nonce 2 never receives its snapshot.
+        invalidation = await asyncio.wait_for(anext(updates), timeout=1)
+        assert invalidation["reason"] == "reconnecting"
+        assert native.book.asks(MONITOR_OPEN, "opposing") == []
+        assert await asyncio.wait_for(anext(updates), timeout=1) == first
+        assert native.book.asks(MONITOR_OPEN, "opposing") == [(Decimal("0.6"), 8)]
+        assert first_socket.sent[1]["snapshot"] == native.selection
+    finally:
+        await updates.aclose()
+
+
+async def test_disconnected_novig_book_cannot_remain_executable(native):
+    native.book.apply({"snapshot": {MONITOR_OPEN: {
+        "lifecycle": {"seq": 1, "status": "OPEN"},
+        "book": {"seq": 1, "orders": {"opposing": [
+            {"orderId": "resting", "price": "0.4", "qty": 8}]}}}}})
+    assert native.book.asks(MONITOR_OPEN, "opposing")
+    await native.disconnect()
+    assert native.book.asks(MONITOR_OPEN, "opposing") == []
+    assert native.health_check()["streaming"] is False
+
+
+async def test_rejected_book_resnapshot_reconnects_and_resubscribes(native, monkeypatch):
+    initial = {"nonce": 1, "subscribed": {"markets": {MONITOR_OPEN: "book"}},
+        "snapshot": {MONITOR_OPEN: {"lifecycle": {"seq": 1, "status": "OPEN"},
+            "book": {"seq": 1, "orders": {"opposing": [
+                {"orderId": "known", "price": "0.4", "qty": 8}]}}}}}
+    gap = {"delta": {MONITOR_OPEN: {"book": {"seq": 2,
+        "deltas": [{"kind": "remove", "orderId": "unknown"}]}}}}
+    first = Socket([initial, gap, {"nonce": 2, "error": {"code": "RATE_LIMIT_EXCEEDED"}}])
+    second = Socket([initial])
+    sockets = iter([first, second])
+    native.selection["markets"] = {MONITOR_OPEN: "book"}
+    monkeypatch.setattr(novig_module, "ws_connect", lambda *args, **kwargs: next(sockets))
+
+    async def immediate_backoff(failures):
+        return None
+    monkeypatch.setattr(native, "_backoff", immediate_backoff)
+    updates = native.stream_updates()
+    try:
+        assert await anext(updates) == initial
+        assert (await anext(updates))["type"] == "transport_invalidated"
+        assert native.book.asks(MONITOR_OPEN, "opposing") == []
+        assert (await anext(updates))["reason"] == "reconnecting"
+        assert native.book.asks(MONITOR_OPEN, "opposing") == []
+        assert await anext(updates) == initial
+        assert first.sent[1]["snapshot"] == native.selection
+        assert second.sent[0]["subscribe"] == native.selection
+        assert native.book.asks(MONITOR_OPEN, "opposing") == [(Decimal("0.6"), 8)]
     finally:
         await updates.aclose()
 

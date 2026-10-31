@@ -19,7 +19,7 @@ from decimal import Decimal
 import hashlib
 import math
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from ..core.models import utcnow
 from ..core.native_accounting import NativeOrderIntent
@@ -33,17 +33,32 @@ from .reconciliation import (
 class ProphetXAccountReview(BaseModel):
     """Operator-reviewed account facts; never populated by a successful login.
 
-    `history_created_from` must precede the account's first possible order.
-    The provider does not expose LEC in its balance response, so funding scope
-    needs separate account evidence. This review does not authorize trading.
+    Complete-history reviews start before the first possible order. A separate
+    current-empty-inventory review can instead use a recent reviewed baseline
+    plus all subsequent order updates and fresh zero-exposure wallet balances.
+    Neither route can infer absent LEC from `get_balance`; funding scope needs
+    separate account evidence. This review does not authorize trading.
     """
     model_config = ConfigDict(extra="forbid", frozen=True)
     account_fingerprint: str = Field(min_length=64, max_length=64)
-    history_created_from: AwareDatetime
-    history_scope_evidence: str = Field(min_length=16)
+    history_created_from: AwareDatetime | None = None
+    history_scope_evidence: str = ""
+    current_inventory_reviewed_at: AwareDatetime | None = None
+    current_inventory_scope_evidence: str = ""
     funded_cash_only: bool = False
     funding_scope_evidence: str = Field(min_length=16)
     valid_until: AwareDatetime
+
+    @model_validator(mode="after")
+    def one_inventory_basis(self):
+        complete = self.history_created_from is not None
+        current = self.current_inventory_reviewed_at is not None
+        if complete == current:
+            raise ValueError("Exactly one ProphetX inventory review basis is required")
+        evidence = self.history_scope_evidence if complete else self.current_inventory_scope_evidence
+        if len(evidence.strip()) < 16:
+            raise ValueError("Account-specific inventory review evidence is required")
+        return self
 
 
 @dataclass(frozen=True)
@@ -84,18 +99,21 @@ def reporting_cursor(data: dict, *, endpoint: str, collection: str) -> tuple[str
     """Interpret the cursor, separately from account/history reconciliation.
 
     The wallet guide documents an absent final cursor. The authenticated order
-    history service also returns an empty orders array with an explicit null
-    cursor. Support that observed representation only for this endpoint/shape;
-    never generalize it to nonempty pages or another venue's pagination.
+    history service also returns an explicit null cursor on a terminal page,
+    including a short nonempty page. Support that observed representation only
+    for this endpoint and a page below its documented 1,000-row maximum.
+    The caller must still validate the reporting watermark.
     """
     if "next_cursor" not in data:
         return None, "absent"
     cursor = data["next_cursor"]
     if cursor == "":
         return None, "empty_string"
-    if (cursor is None and endpoint == "/v4/mm/get_order_history" and collection == "orders"
-            and data.get("orders") == []):
-        return None, "observed_empty_order_null"
+    if cursor is None and endpoint == "/v4/mm/get_order_history" and collection == "orders":
+        orders = data.get("orders")
+        if isinstance(orders, list) and len(orders) < 1000:
+            return None, ("observed_empty_order_null" if not orders
+                          else "observed_short_order_null")
     if not isinstance(cursor, str) or not cursor.strip():
         raise ReconciliationError("Invalid ProphetX reporting cursor")
     return cursor, None
@@ -144,7 +162,8 @@ async def complete_order_history(client, review: ProphetXAccountReview, *, obser
     now = observed_at or utcnow()
     _, fingerprint = authenticated_identity(client)
     if (review.account_fingerprint != fingerprint or review.valid_until <= now or
-            review.history_created_from >= now or not review.funded_cash_only):
+            review.history_created_from is None or review.history_created_from >= now or
+            not review.funded_cash_only):
         raise ReconciliationError("Current account-specific funded-cash/history review is required")
     start, end = math.floor(review.history_created_from.timestamp()), math.ceil(now.timestamp())
     # The current Trading API permits a 60-day created-at window. Keep exact
