@@ -133,8 +133,10 @@ class ApprovedNativeFamilyRule(StrictRecord):
     # Kalshi's primary rule is parsed against winner, teams and game date by
     # the existing crosswalk. Its secondary clause must match exactly. For
     # ProphetX these are approved exact type|sub_type|period metadata tuples.
-    # Its unqualified NBA Moneyline may instead use the separately reviewed
-    # moneyline|moneyline|default_full_game contract-rule token.
+    # Its unqualified main Moneyline may use a separately reviewed full-game
+    # token. The legacy unprefixed token covers NBA only; another league needs
+    # its own LEAGUE|moneyline|moneyline|default_full_game token and settlement
+    # evidence. A token never supplies a missing strike or event identity.
     allowed_native_rule_texts: tuple[str, ...] = Field(min_length=1)
     max_start_delta_seconds: int = Field(default=0, ge=0, le=30)
     # Explicit native order-grid evidence is reviewed once per family. Current

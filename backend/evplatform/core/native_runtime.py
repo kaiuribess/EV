@@ -257,9 +257,15 @@ class NativeRuntime:
             return 0
         selected = [item for item in matches if item.venue == venue and
             (item.side == "yes" if venue == "kalshi" else item.side == "take")]
-        default_full_game = (venue == "prophetx" and market.league == "NBA"
-            and market.market_type == "moneyline" and
-            "moneyline|moneyline|default_full_game" in rule.allowed_native_rule_texts)
+        # A catalog without a period can be promoted only when this exact
+        # league's normal full-game settlement has its own reviewed token.
+        # Retain the original NBA token for already signed NBA rules.
+        default_token = ("moneyline|moneyline|default_full_game"
+            if market.league == "NBA" else
+            f"{market.league}|moneyline|moneyline|default_full_game")
+        default_full_game = (venue == "prophetx" and market.market_type == "moneyline"
+            and default_token in rule.allowed_native_rule_texts
+            and bool(rule.settlement_evidence_for(market)))
         if (len(selected) != 2 or {item.outcome for item in selected} != set(market.outcomes)
                 or any((item.identity_limitations and not (default_full_game and
                             item.identity_limitations == ("Native period is not explicit in the catalog",)))
@@ -317,13 +323,12 @@ class NativeRuntime:
                 native = monitor.client.public_market_data.catalog.get(
                     (match.native_event_id, match.native_market_id))
                 event = monitor.research_events.get(match.native_event_id)
-                # CFTC filing 61599, Appendix A: NBA contracts include overtime
-                # unless a shorter period is specified. Only the unqualified
-                # main Moneyline shape can use this separately approved token.
-                native_period_rule = ("moneyline|moneyline|default_full_game"
+                # The unqualified main Moneyline shape needs a reviewed
+                # competition-specific default rule when period is omitted.
+                native_period_rule = (default_token
                     if native.get("period") is None and native.get("name") == "Moneyline"
                     and native.get("type") == "moneyline" and native.get("sub_type") == "moneyline"
-                    and market.league == "NBA" else
+                    and default_full_game else
                     f"{native.get('type')}|{native.get('sub_type')}|{native.get('period')}") if isinstance(native, dict) else None
                 try:
                     native_line = Decimal(str(native.get("line"))) if isinstance(native, dict) else None
@@ -339,7 +344,7 @@ class NativeRuntime:
                     and native.get("type") in {None, "moneyline"}
                     and native.get("sub_type") == "moneyline"
                     and (native.get("period") in {"FULL", "full", "full_game"}
-                         or native_period_rule == "moneyline|moneyline|default_full_game"))
+                         or native_period_rule == default_token and default_full_game))
                 if (not isinstance(native, dict) or not isinstance(event, dict)
                         or native.get("status") != "active"
                         or not (exact_moneyline or exact_prop)
@@ -1480,7 +1485,7 @@ class NativeRuntime:
                     if venue == "polymarket_us":
                         adapter.seed_fills(order.venue_order_id, order.intent, self.manager.recovered_fills(order.id))
             self.manager.register(p.venue, adapter)
-        if adapter is not None and p.family_rule is not None:
+        if adapter is not None and getattr(p, "family_rule", None) is not None:
             from ..venues.bridge import VerifiedVenueMapping
             for mapping in self.mapper.mappings:
                 i = mapping.instrument

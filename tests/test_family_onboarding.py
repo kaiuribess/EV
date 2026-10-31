@@ -366,6 +366,20 @@ def test_non_nba_prophetx_family_requires_explicit_full_period_and_league():
     native["period"] = None
     assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 0
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[0])
+    matches = prophetx_matches(market, catalog, events, observed_at=now)
+    assert len(matches) == 2 and all(item.identity_limitations for item in matches)
+    # The NBA default token cannot promote an unqualified NFL market. A
+    # distinct reviewed NFL token and settlement source can do so.
+    profile.family_rule = rule.model_copy(update={"allowed_native_rule_texts": (
+        "moneyline|moneyline|default_full_game",)})
+    assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 0
+    profile.family_rule = rule.model_copy(update={"allowed_native_rule_texts": (
+        "NFL|moneyline|moneyline|default_full_game",)})
+    # A changed reviewed rule is a new launch scope; the old registered
+    # mapping is retained as audit evidence and cannot be rewritten in place.
+    runtime.mapper = NativeBookMapper()
+    assert NativeRuntime.reconcile_family_catalog(runtime, "prophetx", market, matches, monitor) == 2
+    assert NativeRuntime.profile_permits_market(runtime, profile, market.id, TEAMS[0])
 
 
 def test_one_reviewed_prophetx_moneyline_rule_covers_distinct_leagues_without_static_ids():
