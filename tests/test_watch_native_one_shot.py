@@ -274,3 +274,82 @@ def test_temporary_live_quote_gap_does_not_rearm_or_place(monkeypatch, tmp_path)
     assert gate.tick(now=NOW) == "armed"
     assert ("POST", "/api/control") not in calls
     # Per-order preflight in the existing OMS still rejects a stale quote.
+
+
+def test_conditional_pilot_waits_arms_preserves_temporary_gap_and_consumes_order(
+        monkeypatch, tmp_path):
+    orders = []
+    current, calls, status = mock_server(monkeypatch, tmp_path, orders=orders)
+    auth = {**authorization(), "venues": ["prophetx"],
+        "conditional_family_pilot": True, "launch_scope_digest": DIGEST,
+        "account_fingerprint": "a" * 64}
+    gate.AUTH_PATH.write_text(json.dumps(auth), encoding="utf-8")
+    phase = ["waiting_for_qualifying_family_market"]
+    monkeypatch.setattr(gate, "_scope", lambda *args: (phase[0], DIGEST))
+    original_get = gate._get
+    def read(client, path):
+        if path == "/api/readiness":
+            return {"blockers": [{"code": "family.no_current_market"}]}
+        return original_get(client, path)
+    monkeypatch.setattr(gate, "_get", read)
+
+    assert gate.tick(now=NOW) == "waiting_for_qualifying_family_market"
+    assert current["kill_switch"] is True
+    assert json.loads(status.read_text())["arm_attempted"] is False
+    phase[0] = "ready"
+    assert gate.tick(now=NOW) == "armed"
+    assert calls.count(("POST", "/api/control")) == 1
+    phase[0] = "waiting_for_qualifying_family_market"
+    assert gate.tick(now=NOW) == "armed"
+    assert current["auto_trade"] is True and current["kill_switch"] is False
+    assert calls.count(("POST", "/api/control")) == 1
+    orders.append({"id": "durable-oms-attempt", "status": "unknown"})
+    assert gate.tick(now=NOW) == "consumed"
+    assert current["auto_trade"] is False and current["kill_switch"] is True
+    assert json.loads(status.read_text())["phase"] == "consumed"
+
+
+def test_conditional_gap_never_rearms_after_emergency_or_account_failure(monkeypatch, tmp_path):
+    current, calls, status = mock_server(monkeypatch, tmp_path)
+    auth = {**authorization(), "venues": ["prophetx"],
+        "conditional_family_pilot": True, "launch_scope_digest": DIGEST,
+        "account_fingerprint": "a" * 64}
+    gate.AUTH_PATH.write_text(json.dumps(auth), encoding="utf-8")
+    phase = ["ready"]
+    blockers = ["family.no_current_market"]
+    monkeypatch.setattr(gate, "_scope", lambda *args: (phase[0], DIGEST))
+    original_get = gate._get
+    def read(client, path):
+        if path == "/api/readiness":
+            return {"blockers": [{"code": code} for code in blockers]}
+        return original_get(client, path)
+    monkeypatch.setattr(gate, "_get", read)
+
+    assert gate.tick(now=NOW) == "armed"
+    phase[0] = "waiting_for_qualifying_family_market"
+    blockers.append("runtime.account_identity_verified")
+    assert gate.tick(now=NOW) == "interrupted"
+    assert current["kill_switch"] is True
+    phase[0] = "ready"
+    assert gate.tick(now=NOW) == "interrupted"
+    assert calls.count(("POST", "/api/control")) == 2
+    assert json.loads(status.read_text())["arm_attempted"] is True
+
+
+def test_definitive_activation_conflict_preserves_unused_authorization(monkeypatch, tmp_path):
+    current, calls, status = mock_server(monkeypatch, tmp_path)
+    original_control = gate._control
+    first = [True]
+    def conflict_once(client, **kwargs):
+        if first[0] and kwargs["arm"]:
+            first[0] = False
+            request = httpx.Request("POST", "http://127.0.0.1:8002/api/control")
+            response = httpx.Response(409, request=request)
+            raise httpx.HTTPStatusError("Readiness changed", request=request, response=response)
+        return original_control(client, **kwargs)
+    monkeypatch.setattr(gate, "_control", conflict_once)
+    assert gate.tick(now=NOW) == "pending"
+    assert current["kill_switch"] is True
+    assert json.loads(status.read_text())["arm_attempted"] is False
+    assert gate.tick(now=NOW) == "armed"
+    assert calls.count(("POST", "/api/control")) == 1

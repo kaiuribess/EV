@@ -64,6 +64,7 @@ function Invoke-OneShotGate {
     $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
     $recurring = Join-Path $dataDir 'native_recurring_authorization.json'
     $oneShot = Join-Path $dataDir 'native_one_shot_authorization.json'
+    $oneShotStatus = Join-Path $dataDir 'native_one_shot_status.json'
     $gate = if (Test-Path -LiteralPath $oneShot) {
         Join-Path $PSScriptRoot 'watch_native_one_shot.py'
     } elseif (Test-Path -LiteralPath $recurring) {
@@ -75,9 +76,27 @@ function Invoke-OneShotGate {
         Write-SupervisorEvent 'One-shot gate unavailable; research scanner remains running.'
         return
     }
-    & $python $gate --url $baseUrl | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-SupervisorEvent "One-shot gate returned $LASTEXITCODE; inspect its status file."
+    # A one-minute scheduler tick can miss a brief qualified price. Sample the
+    # existing local release gate for part of this tick; the scanner and OMS
+    # still perform their independent per-order checks. No provider API is polled.
+    $rapidPilot = Test-Path -LiteralPath $oneShot
+    $started = Get-Date
+    $sampleLimit = if ($rapidPilot) { 14 } else { 1 }
+    for ($sample = 0; $sample -lt $sampleLimit; $sample++) {
+        & $python $gate --url $baseUrl | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-SupervisorEvent "One-shot gate returned $LASTEXITCODE; inspect its status file."
+            break
+        }
+        if (-not $rapidPilot) { break }
+        try {
+            $phase = (Get-Content -LiteralPath $oneShotStatus -Raw | ConvertFrom-Json).phase
+        } catch {
+            Write-SupervisorEvent 'One-shot status could not be read; rapid sampling stopped.'
+            break
+        }
+        if ($phase -ne 'pending' -or ((Get-Date) - $started).TotalSeconds -ge 52) { break }
+        Start-Sleep -Seconds 3
     }
 }
 

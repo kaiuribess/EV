@@ -245,7 +245,7 @@ def _was_armed(identity: str) -> bool:
 
 
 def _status(phase: str, detail: str, identity: str | None = None,
-            *, arm_attempted: bool = False) -> None:
+            *, arm_attempted: bool = False, reset_attempt: bool = False) -> None:
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     if identity is None:
         try:
@@ -255,7 +255,8 @@ def _status(phase: str, detail: str, identity: str | None = None,
         except (OSError, ValueError):
             pass
     payload = {"phase": phase, "detail": detail, "authorization_id": identity,
-               "arm_attempted": arm_attempted or bool(identity and _was_armed(identity)),
+               "arm_attempted": False if reset_attempt else
+                    arm_attempted or bool(identity and _was_armed(identity)),
                "updated_at": datetime.now(timezone.utc).isoformat()}
     fd, name = tempfile.mkstemp(prefix="native-one-shot-", suffix=".tmp", dir=STATUS_PATH.parent)
     try:
@@ -272,6 +273,38 @@ def _get(client: httpx.Client, path: str) -> dict:
     response = client.get(path)
     response.raise_for_status()
     return response.json()
+
+
+_TEMPORARY_MARKET_BLOCKERS = frozenset({
+    "family.no_current_market", "runtime.native_routing_supported",
+    "runtime.cancellation_races_supported", "runtime.settlement_reconciliation_supported",
+})
+
+
+def _armed_market_gap(client: httpx.Client, setup: dict, authorization: dict,
+                      state: dict, phase: str, expires: datetime) -> bool:
+    """Retain an existing arm only when its sole loss is current market evidence.
+
+    Native per-order preflight still requires a fresh exact book, references,
+    account and location. Any account, feed, profile or risk failure disarms.
+    """
+    if (authorization.get("conditional_family_pilot") is not True
+            or phase not in {"waiting_for_qualifying_family_market", "waiting_for_live_checks"}
+            or state.get("auto_trade") is not True or state.get("kill_switch") is not False
+            or _time(state.get("native_authorization_expires_at")) != expires
+            or (setup.get("activation") or {}).get("scope_digest") != authorization.get("launch_scope_digest")):
+        return False
+    try:
+        report = _get(client, "/api/readiness")
+    except (httpx.HTTPError, ValueError):
+        return False
+    blockers = report.get("blockers")
+    if (not isinstance(blockers, list) or not all(
+            isinstance(row, dict) and isinstance(row.get("code"), str)
+            for row in blockers)):
+        return False
+    codes = {row["code"] for row in blockers}
+    return bool("family.no_current_market" in codes and codes <= _TEMPORARY_MARKET_BLOCKERS)
 
 
 def _control(client: httpx.Client, *, arm: bool, digest: str | None = None,
@@ -331,12 +364,21 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
                 _control(client, arm=False)
             raise
         phase, digest = _scope(setup, state, authorization, now)
-        if phase != "ready" and not (phase == "waiting_for_live_checks"
-                                     and state.get("auto_trade") is True
-                                     and state.get("kill_switch") is False
-                                     and _time(state.get("native_authorization_expires_at")) == expires):
+        legacy_live_gap = (authorization.get("conditional_family_pilot") is not True
+            and phase == "waiting_for_live_checks" and state.get("auto_trade") is True
+            and state.get("kill_switch") is False
+            and _time(state.get("native_authorization_expires_at")) == expires)
+        if phase != "ready" and (legacy_live_gap or _armed_market_gap(
+                client, setup, authorization, state, phase, expires)):
+            _status("armed", "Temporary market checks pending; exact per-order checks remain active",
+                    identity, arm_attempted=True)
+            return "armed"
+        if phase != "ready":
             if (state.get("auto_trade") is True or state.get("kill_switch") is not True) and not check_only:
                 _control(client, arm=False)
+            if _was_armed(identity):
+                _status("interrupted", "A prior arm ended or a non-market safety check failed", identity)
+                return "interrupted"
             _status("pending", phase, identity)
             return phase
         if state.get("auto_trade") is True:
@@ -363,7 +405,10 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code != 409:
                     raise
-                _status("pending", "Readiness changed before activation", identity)
+                # A definitive rejection did not release the stop. A timeout
+                # remains ambiguous and retains the durable arm latch.
+                _status("pending", "Readiness changed before activation", identity,
+                        reset_attempt=True)
                 return "pending"
             if updated.get("auto_trade") is not True or updated.get("kill_switch") is not False:
                 raise ValueError("Live activation was not acknowledged")
