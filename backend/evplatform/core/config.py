@@ -309,6 +309,7 @@ class RiskConfig(BaseModel):
     max_total_exposure: Decimal | None = Field(default=Decimal("200"), gt=0)
     daily_loss_limit: Decimal | None = Field(default=Decimal("50"), gt=0)
     available_cash_only: bool = False
+    cash_policy: Literal["verified_current", "prophetx_exchange_rejection"] = "verified_current"
     block_overlapping_events: bool = False
     block_overlapping_players: bool = False
     duplicate_window_seconds: int = Field(default=30, ge=1)
@@ -337,6 +338,14 @@ class RiskConfig(BaseModel):
             raise ValueError("Uncapped exposure requires authenticated available-cash enforcement")
         if self.max_order_stake is None and self.stake_sizing != "quarter_kelly":
             raise ValueError("No fixed stake cap requires quarter-Kelly sizing")
+        if self.cash_policy == "prophetx_exchange_rejection" and (
+                self.available_cash_only or self.stake_sizing != "capped"
+                or any(value is None for value in (
+                    self.max_order_stake, self.max_event_exposure,
+                    self.max_player_exposure, self.max_venue_exposure,
+                    self.max_correlated_exposure, self.max_total_exposure,
+                    self.daily_loss_limit, self.max_native_daily_debit))):
+            raise ValueError("Exchange-rejection cash policy needs fixed stake and complete monetary caps")
         return self
 
 

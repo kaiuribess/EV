@@ -613,12 +613,16 @@ def test_conditional_prophetx_first_trade_profile_uses_family_without_future_gam
     assert draft["launch_profile"]["limits"]["max_native_order_attempts"] == 1
 
 
-def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatch):
+@pytest.mark.parametrize("fixed_mode", [False, True])
+def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatch, fixed_mode):
     from evplatform.core.risk import RiskConfig, RiskEngine, RiskRejected
     now = utcnow().replace(microsecond=0)
     pricing, scope = approved_config("prophetx")
     market, _ = source_fixture(pricing, now, "conditional-preflight", now+timedelta(hours=3))
-    risk = RiskEngine(RiskConfig(available_cash_only=True, stake_sizing="quarter_kelly",
+    risk = RiskEngine(RiskConfig(available_cash_only=not fixed_mode,
+        stake_sizing="capped" if fixed_mode else "quarter_kelly",
+        cash_policy="prophetx_exchange_rejection" if fixed_mode else "verified_current",
+        max_native_daily_debit=Decimal(20) if fixed_mode else None,
         max_order_stake=Decimal(5), live_stake_authorized=True))
     risk.auto_trade, risk.kill_switch = True, False
     account = "a"*64
@@ -626,14 +630,18 @@ def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatc
         expires_at=now+timedelta(hours=2))
     profile = SimpleNamespace(venue="prophetx", environment="production",
         account_fingerprint=account, market_ids=(), family_rule=rule,
-        strategy_ids=("native_positive_ev",), validation_pilot=True,
+        strategy_ids=("native_positive_ev",), validation_pilot=not fixed_mode,
         settlement_policy="prophetx_funded_cash_win_loss_halt_on_exception",
         min_reference_books=3, max_reference_age_ms=30000, max_orderbook_age_ms=2500,
-        limits=SimpleNamespace(max_native_order_attempts=1,
-            max_order_stake_usd=Decimal(5), max_total_exposure_usd=Decimal(5)),
+        limits=SimpleNamespace(max_native_order_attempts=None if fixed_mode else 1,
+            max_order_stake_usd=Decimal(5), max_total_exposure_usd=Decimal(5),
+            available_cash_only=not fixed_mode,
+            stake_sizing="capped" if fixed_mode else "quarter_kelly",
+            cash_policy="prophetx_exchange_rejection" if fixed_mode else "verified_current"),
         evidence=(SimpleNamespace(expires_at=now+timedelta(minutes=1)),),
         digest=lambda: "OFFLINE-conditional-profile")
-    account_view = SimpleNamespace(cash_available_verified=True, balance_usd=Decimal(49),
+    account_view = SimpleNamespace(cash_available_verified=not fixed_mode,
+        balance_usd=None if fixed_mode else Decimal(49), reconciled=True,
         identity_verified=True, account_fingerprint=account, environment="production")
     adapter = SimpleNamespace(client=object(), preflight=None)
     runtime = SimpleNamespace(report=lambda *_: SimpleNamespace(live_trading_ready=True,
@@ -661,6 +669,14 @@ def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatc
     with pytest.raises(RiskRejected):
         NativeRuntime.require_preflight(runtime, SimpleNamespace(**{**vars(order),
             "reserved_cost": Decimal(6)}))
+    if fixed_mode:
+        account_view.reconciled = False
+        with pytest.raises(RiskRejected, match="initial inventory"):
+            NativeRuntime.require_preflight(runtime, order)
+        account_view.reconciled = True
+        account_view.account_fingerprint = "b" * 64
+        with pytest.raises(RiskRejected, match="account identity"):
+            NativeRuntime.require_preflight(runtime, order)
 
 
 def test_prophetx_owner_approved_two_percent_winnings_assumption_is_not_exchange_verified():
@@ -919,6 +935,7 @@ def test_family_scope_digest_stays_fixed_across_new_fixture_and_checks_live_fact
     legacy["limits"].pop("max_native_order_attempts")
     legacy["limits"].pop("max_native_daily_attempts")
     legacy["limits"].pop("external_exposure_scope")
+    legacy["limits"].pop("cash_policy")
     legacy.pop("validation_pilot")
     assert digest == digest_json(legacy)
     facts = MarketReadiness(market_id="new-fixture-a", identity_verified=True,

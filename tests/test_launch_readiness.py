@@ -218,6 +218,7 @@ def test_legacy_profile_digest_stays_stable_without_pilot():
     legacy["limits"].pop("max_native_daily_attempts")
     legacy["limits"].pop("max_native_daily_debit_usd")
     legacy["limits"].pop("external_exposure_scope")
+    legacy["limits"].pop("cash_policy")
     assert profile.digest() == digest_json(legacy)
 
 
@@ -318,6 +319,17 @@ def test_limits_have_no_implicit_money_authorization():
         LiveLimits.model_validate({**limits().model_dump(), "max_order_stake_usd": "NaN"})
     with pytest.raises(ValidationError):
         LiveLimits.model_validate({**limits().model_dump(), "max_order_stake_usd": "9"})
+
+
+def test_exchange_rejection_cash_policy_needs_explicit_fixed_monetary_caps():
+    base = {**limits().model_dump(), "cash_policy": "prophetx_exchange_rejection",
+            "max_native_daily_debit_usd": "20", "stake_sizing": "capped"}
+    assert LiveLimits.model_validate(base).cash_policy == "prophetx_exchange_rejection"
+    for change in ({"max_native_daily_debit_usd": None}, {"daily_loss_limit_usd": None},
+                   {"stake_sizing": "quarter_kelly"}, {"available_cash_only": True},
+                   {"max_total_exposure_usd": None}):
+        with pytest.raises(ValidationError):
+            LiveLimits.model_validate({**base, **change})
 
 
 def mapping_fixture(market):

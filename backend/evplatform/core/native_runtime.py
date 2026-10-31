@@ -1095,6 +1095,9 @@ class NativeRuntime:
                     getattr(order, "outcome", None)) or
                 order.strategy not in p.strategy_ids):
             raise RiskRejected("Native order is outside the authorized launch scope")
+        reviewed_order_cap = getattr(getattr(p, "limits", None), "max_order_stake_usd", None)
+        if reviewed_order_cap is not None and order.reserved_cost > reviewed_order_cap:
+            raise RiskRejected("Native order exceeds the reviewed per-order debit limit")
         market = getattr(self.engine, "markets", {}).get(order.market_id)
         if hasattr(self.engine, "markets") and market is None:
             raise RiskRejected("Native canonical market is unavailable")
@@ -1129,7 +1132,11 @@ class NativeRuntime:
                 recurring_scope = (not p.validation_pilot and pilot.recurring_authorization
                     and pilot.automatic_followups and pilot.maximum_native_attempts is None
                     and p.limits.max_native_order_attempts is None
-                    and p.limits.available_cash_only and p.limits.stake_sizing == "quarter_kelly")
+                    and (p.limits.available_cash_only and p.limits.stake_sizing == "quarter_kelly"
+                         and getattr(p.limits, "cash_policy", "verified_current") == "verified_current"
+                         or p.venue == "prophetx" and not p.limits.available_cash_only
+                         and p.limits.stake_sizing == "capped"
+                         and getattr(p.limits, "cash_policy", "verified_current") == "prophetx_exchange_rejection"))
                 if (not (manual or automatic or (preview_only and order.execution_origin == "manual"))
                         or not (one_shot_scope or conditional_family_pilot or recurring_scope)
                         or not pilot.enabled or not pilot.owner_approved
@@ -1153,6 +1160,14 @@ class NativeRuntime:
                 for previous in self.engine.risk.native_orders.values()):
             raise RiskRejected(f"Scoped {p.venue.capitalize()} settlement permits only one managed order per native market")
         snapshot = self.account_snapshots.get(order.venue)
+        fixed_exchange_cash = (p.venue == "prophetx" and not p.validation_pilot
+            and getattr(p.limits, "cash_policy", "verified_current") == "prophetx_exchange_rejection"
+            and self.engine.risk.config.cash_policy == "prophetx_exchange_rejection"
+            and not self.engine.risk.config.available_cash_only
+            and self.engine.risk.config.stake_sizing == "capped")
+        if fixed_exchange_cash and (snapshot is None or not snapshot.identity_verified
+                or not snapshot.reconciled or snapshot.account_fingerprint != p.account_fingerprint):
+            raise RiskRejected("Authenticated account identity and initial inventory are required")
         if self.engine.risk.config.available_cash_only and not getattr(snapshot, "cash_available_verified", False):
             raise RiskRejected("Verified spendable account cash is required for the selected exposure policy")
         # Filled costs are already debited from a reconciled available balance.
@@ -1162,7 +1177,8 @@ class NativeRuntime:
                         if o.venue == order.venue and o.mode == order.mode
                         and o.account_fingerprint == order.account_fingerprint and o.status in UNRESOLVED), 0)
         required = reserved + (0 if order.id in self.engine.risk.native_orders else order.reserved_cost)
-        if snapshot is None or snapshot.balance_usd is None or snapshot.balance_usd < required:
+        if not fixed_exchange_cash and (snapshot is None or snapshot.balance_usd is None
+                or snapshot.balance_usd < required):
             raise RiskRejected("Authenticated native cash balance cannot cover reserved exposure")
         if order.venue == "kalshi" and (
                 order.intent.instrument.exchange_index is None
@@ -1682,8 +1698,15 @@ class NativeRuntime:
         account_age = None
         if snapshot and isinstance(snapshot.observed_at, datetime) and snapshot.observed_at.tzinfo is not None:
             account_age = (now-snapshot.observed_at).total_seconds()
+        fixed_exchange_cash = bool(p and p.venue == "prophetx" and not p.validation_pilot
+            and p.limits.cash_policy == "prophetx_exchange_rejection"
+            and engine.risk.config.cash_policy == "prophetx_exchange_rejection")
+        # The fixed-stake mode paces authenticated inventory checks, but a
+        # long-disconnected private channel or old account binding cannot
+        # authorize fresh orders indefinitely.
         account_current = bool(p and snapshot and snapshot.identity_verified and account_age is not None
-            and 0 <= account_age < 30 and snapshot.venue == venue and snapshot.environment == p.environment
+            and 0 <= account_age < (600 if fixed_exchange_cash else 30)
+            and snapshot.venue == venue and snapshot.environment == p.environment
             and snapshot.account_fingerprint == p.account_fingerprint
             and client is not None and client.settings.environment == p.environment
             and venue not in getattr(self, "_account_probes", ())
@@ -1693,7 +1716,7 @@ class NativeRuntime:
                 and snapshot.exchange_index == self._account_exchange_indexes.get(venue))
         # Every installed snapshot must describe the exact durable ledger.
         fences = getattr(self, "_account_snapshot_fences", {})
-        if account_current:
+        if account_current and not fixed_exchange_cash:
             account_current = venue in fences and fences[venue] == self._ledger_fence()
         risk = engine.risk.config
         limits = None
@@ -1706,6 +1729,7 @@ class NativeRuntime:
                     max_venue_exposure_usd=risk.max_venue_exposure, max_correlated_exposure_usd=risk.max_correlated_exposure,
                     max_total_exposure_usd=risk.max_total_exposure, daily_loss_limit_usd=risk.daily_loss_limit,
                     available_cash_only=risk.available_cash_only,
+                    cash_policy=risk.cash_policy,
                     block_overlapping_events=risk.block_overlapping_events,
                     block_overlapping_players=risk.block_overlapping_players,
                     stake_sizing=risk.stake_sizing, unit_size_usd=risk.unit_size_usd,
@@ -2098,7 +2122,11 @@ class NativeRuntime:
             return
         adapter = self.bind_client(p.venue, client)
         last_probe = self._last_account_probes.get(p.venue, 0) if self.portfolio else self.last_account_probe
-        if time.monotonic()-last_probe < (5 if adapter is not None else 20):
+        fixed_exchange_cash = (p.venue == "prophetx" and not getattr(p, "validation_pilot", False)
+            and getattr(getattr(p, "limits", None), "cash_policy", "verified_current") == "prophetx_exchange_rejection"
+            and self.engine.risk.config.cash_policy == "prophetx_exchange_rejection")
+        interval = 300 if fixed_exchange_cash and p.venue in self.account_snapshots else (5 if adapter is not None else 20)
+        if time.monotonic()-last_probe < interval:
             return
         from ..venues.account_probe import probe_native_account
         async def read_account():

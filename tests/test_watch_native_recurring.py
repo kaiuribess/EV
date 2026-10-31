@@ -127,6 +127,28 @@ def test_recurring_scope_rejects_missing_monetary_limit(monkeypatch, tmp_path):
     assert current["kill_switch"] and not current["auto_trade"]
 
 
+def test_prophetx_fixed_stake_requires_its_own_bound_cash_policy(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path)
+    saved = authorization()
+    saved.update(venues=["prophetx"], cash_only=False, stake_sizing="capped",
+        cash_policy="prophetx_exchange_rejection")
+    gate.AUTH_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    current["risk"].update(available_cash_only=False, stake_sizing="capped",
+        cash_policy="prophetx_exchange_rejection")
+    launch["launch_scope"][0]["venue"] = "prophetx"
+    launch["activation"]["by_venue"] = {"prophetx": {
+        "available": True, "scope_digest": DIGEST}}
+    launch["risk_policy"]["values"].update(available_cash_only=False,
+        stake_sizing="capped", cash_policy="prophetx_exchange_rejection")
+    assert gate.tick(now=NOW, check_only=True) == "ready"
+    assert ("POST", "/api/control") not in calls
+    assert gate.tick(now=NOW) == "armed"
+    assert current["auto_trade"] and not current["kill_switch"]
+    launch["risk_policy"]["values"]["cash_policy"] = "verified_current"
+    assert gate.tick(now=NOW) == "blocked"
+    assert current["kill_switch"] and not current["auto_trade"]
+
+
 def test_recurring_lease_selects_one_ready_venue_in_unready_portfolio(monkeypatch, tmp_path):
     current, launch, calls = server(monkeypatch, tmp_path)
     launch["launch_scope"].append({**launch["launch_scope"][0], "venue": "prophetx"})

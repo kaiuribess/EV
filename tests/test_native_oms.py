@@ -110,11 +110,15 @@ class Adapter:
         self.bound_account_fingerprint = "a" * 64
         self.report = None
         self.fail = False
+        self.reject_code = None
         self.bound_account_fingerprint = "a"*64
 
     async def submit_intent(self, intent, authorization):
         assert self.risk.authority.consume(authorization, intent.id)
         self.submissions.append(intent)
+        if self.reject_code:
+            from evplatform.venues.common import ConfirmedOrderRejected
+            raise ConfirmedOrderRejected("prophetx", self.reject_code)
         if self.fail: raise TimeoutError("OFFLINE unknown response")
         return {"native_order_id": "native-"+intent.id}
 
@@ -306,6 +310,19 @@ async def test_unknown_transmission_never_retried_and_survives_restart(system, m
     await manager.start()
     assert risk.native_orders[result.id].status == OrderStatus.UNKNOWN
     assert risk.exposures() == D(".47")
+
+
+async def test_documented_venue_rejection_is_durable_and_does_not_halt(system, market):
+    manager, risk, _, adapter = system
+    adapter.reject_code = "event_not_available"
+    result = await manager.execute(order(market))
+    assert result.status == OrderStatus.REJECTED
+    assert result.reconciliation_complete and result.venue_order_id is None
+    assert result.reason == "Venue rejected placement: event_not_available"
+    assert not risk.kill_switch and len(adapter.submissions) == 1
+    risk.native_orders.clear()
+    await manager.start()
+    assert risk.native_orders[result.id].status == OrderStatus.REJECTED
 
 
 async def test_opposing_position_blocked_across_native_orders(system, market):

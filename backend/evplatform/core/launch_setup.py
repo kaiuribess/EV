@@ -288,10 +288,12 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
     all_accounts_current = (bool(profiles) and len(selected_accounts) == len(profiles)
                             and all(item["account_snapshot"]["current"]
                                     and item["account_snapshot"]["reconciled"]
-                                    and item["account_snapshot"]["cash_available_verified"]
+                                    and (item["account_snapshot"]["cash_available_verified"]
+                                         or profiles[item["venue"]].venue == "prophetx"
+                                         and profiles[item["venue"]].limits.cash_policy == "prophetx_exchange_rejection")
                                     for item in selected_accounts))
-    requirement("account.current", all_accounts_current, "Verify spendable cash and existing exposure",
-        "Use current authenticated account reads, private streams and the shared order ledger; balances are never pooled.", external=True)
+    requirement("account.current", all_accounts_current, "Verify account identity and existing exposure",
+        "Use authenticated account reads, private streams and the shared order ledger. Current verified cash is required unless a reviewed ProphetX fixed-stake exchange-rejection policy applies; that policy does not claim available cash.", external=True)
     for kind, title, detail in (
         ("native_lifecycle", "Validate real order and fill handling", "Retain genuine acknowledgement, partial-fill, cancellation-race, unknown-outcome, fee and sequence-recovery evidence."),
         ("restart_recovery", "Validate recovery after restart", "Retain genuine durable-intent, open-order and position recovery evidence for this build."),

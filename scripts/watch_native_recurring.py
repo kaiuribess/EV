@@ -34,12 +34,17 @@ UNCERTAINTY = Decimal("0.01")
 def _authorization(data: dict, now: datetime) -> tuple[str, datetime, str]:
     issued, expires = shared._time(data.get("issued_at")), shared._time(data.get("expires_at"))
     identity, digest = data.get("authorization_id"), data.get("launch_scope_digest")
+    fixed_cash_mode = (data.get("venues") == ["prophetx"]
+        and data.get("cash_policy") == "prophetx_exchange_rejection"
+        and data.get("cash_only") is False and data.get("stake_sizing") == "capped")
+    verified_cash_mode = (data.get("cash_policy", "verified_current") == "verified_current"
+        and data.get("cash_only") is True and data.get("stake_sizing") == "quarter_kelly")
     if (data.get("schema_version") != 1 or not isinstance(identity, str) or len(identity) < 16
             or not isinstance(digest, str) or len(digest) != 64
             or issued is None or expires is None or issued > now
             or not issued < expires <= issued + timedelta(hours=24)
             or data.get("maximum_native_attempts") is not None
-            or data.get("cash_only") is not True or data.get("stake_sizing") != "quarter_kelly"
+            or not (fixed_cash_mode or verified_cash_mode)
             or shared._money(data.get("unit_size_usd")) != Decimal("5")
             or shared._money(data.get("minimum_ev")) != MIN_EV
             or shared._money(data.get("uncertainty_probability")) != UNCERTAINTY
@@ -55,12 +60,18 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
             or state.get("live_enabled") is not True):
         return "production_workspace_unavailable"
     risk = state.get("risk") or {}
+    fixed_cash_mode = (venues == {"prophetx"}
+        and risk.get("cash_policy") == "prophetx_exchange_rejection"
+        and risk.get("available_cash_only") is False
+        and risk.get("stake_sizing") == "capped")
+    verified_cash_mode = (risk.get("cash_policy", "verified_current") == "verified_current"
+        and risk.get("available_cash_only") is True
+        and risk.get("stake_sizing") == "quarter_kelly")
     if (risk.get("max_native_order_attempts") is not None
-            or risk.get("available_cash_only") is not True
-            or risk.get("stake_sizing") != "quarter_kelly"
+            or not (fixed_cash_mode or verified_cash_mode)
             or risk.get("live_stake_authorized") is not True
             or shared._money(risk.get("unit_size_usd")) != Decimal("5")):
-        return "recurring_cash_kelly_scope_unavailable"
+        return "recurring_approved_cash_sizing_scope_unavailable"
     all_profiles = setup.get("launch_scope") or []
     profiles = [p for p in all_profiles if p.get("venue") in venues]
     policy_state = setup.get("risk_policy") or {}
@@ -69,8 +80,14 @@ def _scope(setup: dict, state: dict, authorized_digest: str, venues: set[str]) -
             or policy_state.get("source") not in {"launch_profile", "launch_portfolio"}
             or policy_state.get("applied") is not True
             or limits.get("max_native_order_attempts") is not None
-            or limits.get("available_cash_only") is not True
-            or limits.get("stake_sizing") != "quarter_kelly"
+            or (not (limits.get("cash_policy") == "prophetx_exchange_rejection"
+                and limits.get("available_cash_only") is False
+                and limits.get("stake_sizing") == "capped"
+                and fixed_cash_mode)
+                and not (limits.get("cash_policy", "verified_current") == "verified_current"
+                and limits.get("available_cash_only") is True
+                and limits.get("stake_sizing") == "quarter_kelly"
+                and verified_cash_mode))
             or shared._money(limits.get("unit_size_usd")) != Decimal("5")):
         return "waiting_for_reviewed_recurring_launch_profile"
     monetary_caps = ("max_order_stake_usd", "max_event_exposure_usd",

@@ -40,6 +40,10 @@ class LiveLimits(StrictRecord):
     max_total_exposure_usd: Decimal | None = Field(gt=0)
     daily_loss_limit_usd: Decimal | None = Field(gt=0)
     available_cash_only: bool = False
+    # This opt-in uses a fixed, approved stake and durable local exposure caps.
+    # It does not assert a current balance; ProphetX may reject insufficient
+    # funds. Every other venue keeps authenticated current cash enforcement.
+    cash_policy: Literal["verified_current", "prophetx_exchange_rejection"] = "verified_current"
     block_overlapping_events: bool = False
     block_overlapping_players: bool = False
     stake_sizing: Literal["capped", "quarter_kelly"] = "capped"
@@ -77,6 +81,11 @@ class LiveLimits(StrictRecord):
             self.max_total_exposure_usd,
         ) if value is not None):
             raise ValueError("Per-order stake cannot exceed an exposure limit")
+        if self.cash_policy == "prophetx_exchange_rejection" and (
+                self.available_cash_only or self.stake_sizing != "capped"
+                or any(value is None for value in (*caps, self.daily_loss_limit_usd,
+                    self.max_native_daily_debit_usd))):
+            raise ValueError("Exchange-rejection cash policy needs fixed stake and complete monetary caps")
         return self
 
 
@@ -272,6 +281,9 @@ class LaunchProfile(StrictRecord):
         if (bool(self.market_ids) == (self.family_rule is not None)
                 or self.family_rule is not None and self.family_rule.scope.venue != self.venue):
             raise ValueError("Launch profile needs either exact markets or one matching approved family rule")
+        if self.limits.cash_policy == "prophetx_exchange_rejection" and (
+                self.venue != "prophetx" or self.validation_pilot):
+            raise ValueError("Exchange-rejection cash policy requires a recurring ProphetX profile")
         if self.validation_pilot and self.family_rule is not None and (
                 self.venue != "prophetx" or self.family_rule.scope.sport != "basketball"
                 or self.family_rule.scope.league != "NBA"
@@ -350,6 +362,8 @@ class LaunchProfile(StrictRecord):
             payload["limits"].pop("max_native_daily_attempts")
         if self.limits.max_native_daily_debit_usd is None:
             payload["limits"].pop("max_native_daily_debit_usd")
+        if self.limits.cash_policy == "verified_current":
+            payload["limits"].pop("cash_policy")
         if self.limits.external_exposure_scope == "global":
             payload["limits"].pop("external_exposure_scope")
         return digest_json(payload)

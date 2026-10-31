@@ -45,6 +45,19 @@ def test_optional_exposure_caps_require_explicit_cash_enforcement():
         LiveLimits.model_validate({**limits.model_dump(), "available_cash_only": False})
 
 
+def test_exchange_rejection_sizing_is_bounded_and_not_cash_verified():
+    config = RiskConfig(cash_policy="prophetx_exchange_rejection", stake_sizing="capped",
+        available_cash_only=False, max_order_stake="5", max_event_exposure="20",
+        max_player_exposure="20", max_venue_exposure="20",
+        max_correlated_exposure="20", max_total_exposure="20",
+        max_native_daily_debit="20", daily_loss_limit="20")
+    assert config.stake_sizing == "capped" and not config.available_cash_only
+    with pytest.raises(ValueError):
+        RiskConfig.model_validate({**config.model_dump(), "max_native_daily_debit": None})
+    with pytest.raises(ValueError):
+        RiskConfig.model_validate({**config.model_dump(), "stake_sizing": "quarter_kelly"})
+
+
 def test_same_game_different_market_blocks_across_accounts(risk, candidate, market, book):
     risk.config.block_overlapping_events = True
     risk.reserve(candidate, market, book, "paper")

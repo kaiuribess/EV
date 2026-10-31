@@ -10,7 +10,7 @@ import pytest
 from evplatform.core.native_runtime import NativeRuntime
 from evplatform.core.models import utcnow
 from evplatform.core.risk import RiskRejected
-from evplatform.venues.common import NativeTradingGate, VenueError
+from evplatform.venues.common import ConfirmedOrderRejected, NativeTradingGate, VenueError, VenueHTTPError
 from evplatform.venues.prophetx import ProphetXClient, ProphetXSettings
 
 
@@ -67,6 +67,28 @@ async def test_production_order_cannot_reuse_location_after_first_dispatch():
         with pytest.raises(VenueError, match="fresh ProphetX location"):
             await client.submit_order(body)
     assert requests.count(("POST", "/partner/v4/mm/submit_order")) == 1
+
+
+@pytest.mark.parametrize("code,exception", [
+    ("event_not_available", ConfirmedOrderRejected),
+    ("invalid_request", ConfirmedOrderRejected),
+    ("order_external_id_existed", VenueHTTPError),
+    ("unrecognized_code", VenueHTTPError),
+])
+async def test_prophetx_documented_http_rejection_is_distinct_from_ambiguous_response(code, exception):
+    def respond(request):
+        assert request.url.path.endswith("/submit_order")
+        return httpx.Response(400, json={"error": code})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = ProphetXClient(ProphetXSettings(environment="sandbox",
+            api_key="fixture-key", secret_key="fixture-secret"), http)
+        client._access_token, client._access_expires = "fixture-token", time.time() + 120
+        client.price_ladder = {-110}
+        client.settings.gate = NativeTradingGate(enabled=True, preflight_valid_until=time.time()+30,
+            account_authorized=True, risk_approval_id="review", durable_intent_id="one-order")
+        body = client.order_body("strike", -110, __import__("decimal").Decimal(1), "one-order")
+        with pytest.raises(exception):
+            await client.submit_order(body)
 
 
 async def test_runtime_location_proof_is_order_bound_and_expires():

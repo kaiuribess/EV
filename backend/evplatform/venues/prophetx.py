@@ -385,8 +385,24 @@ class ProphetXClient(NativeTransport):
             if body.get("price") not in self.price_ladder:
                 raise VenueError("Native price ladder changed before placement")
 
-        return await self.request("POST", "/v4/mm/submit_order", body=body, mutation_id=client_id,
-                                  before_send=dispatch)
+        try:
+            return await self.request("POST", "/v4/mm/submit_order", body=body, mutation_id=client_id,
+                                      before_send=dispatch)
+        except VenueHTTPError as exc:
+            # ProphetX documents these exact HTTP responses as placement
+            # rejections. A duplicate external_id, unrecognized code, timeout,
+            # or server error can conceal an accepted order and stays UNKNOWN.
+            from .common import ConfirmedOrderRejected
+            definite = {"invalid_strike_id", "invalid_quantity", "invalid_external_id",
+                "invalid_aggregator_id", "order_limit_exceeded", "strike_id_invalid",
+                "invalid_price", "order_invalid_profit", "event_not_available",
+                "market_is_only_for_prematch", "supplemental_market_pre_match_only",
+                "sport_event_is_not_booked", "sport_event_competitor_blacklisted",
+                "invalid_request"}
+            if (exc.status_code == 400 and exc.code in definite) or (
+                    exc.status_code == 403 and exc.code == "err_order_placement_disabled"):
+                raise ConfirmedOrderRejected(self.venue_id, exc.code) from None
+            raise
 
     async def cancel_order(self, order_id: str, *, external_id: str) -> dict:
         # 409/425 and eventually consistent 404 are not interpreted as cancellation.
