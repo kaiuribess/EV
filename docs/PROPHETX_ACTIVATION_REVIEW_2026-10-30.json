@@ -1,0 +1,71 @@
+{
+  "status": "pending_family_renewal_and_separate_pilot_authorization",
+  "active_production_profile": false,
+  "venue": "prophetx",
+  "environment": "production",
+  "account_fingerprint": "183b7b166438bfab18cc64bb20072e89a405eac1a04f8bab3ad119cffcc2e57a",
+  "build_id": "ac10895df3202268688c2032c52c86ad1c6c776153a695dd21f652062457ab37",
+  "pricing_digest": "fba24ab837c2db77a25f1f91024abba6371ada00d35e5680e1e288413c1452a5",
+  "mapping_digest": "b1aa2b98a630c9e6f6d284e74e338cf7f52833bab384ae91289cb8c0dbe37d67",
+  "old_profile": {
+    "retained_as_audit_history": true,
+    "family_rule_version": "NBA-MONEYLINE-DEFAULT-20261028",
+    "expired_at": "2026-10-30T16:19:00-07:00",
+    "renewal_required": true
+  },
+  "family_for_separate_renewal": {
+    "sport": "basketball",
+    "league": "NBA",
+    "phase": "pregame",
+    "market_type": "moneyline",
+    "period": "FULL",
+    "outcomes": "two exact full-game winners",
+    "native_rule_text": "moneyline|moneyline|default_full_game",
+    "native_contract_rule_evidence": "CFTC filing 61599 Appendix A, https://www.cftc.gov/filings/ptc/ptc0710269372.pdf",
+    "sportsbook_rule_evidence": "Parlay WebSocket h2h full-game market and separate period keys, https://parlay-api.com/docs/websocket",
+    "no_future_event_ids_hardcoded": true
+  },
+  "approved_bounded_source_and_risk_policy": {
+    "owner_decision": "Approve this bounded policy",
+    "decision_date": "2026-10-30",
+    "placement_authorized_by_this_decision": false,
+    "sportsbooks": ["FanDuel", "DraftKings", "Caesars", "bet365"],
+    "minimum_complete_independent_sportsbooks": 3,
+    "provisional_weight_percent_each": "25",
+    "known_indicator_max_age_seconds": 30,
+    "unknown_selection_observation_age_and_active_status": "explicitly accepted with disclosure",
+    "known_stale_degraded_topped_up_suspended_withdrawn_or_incomplete": "reject",
+    "winning_profit_fee_rate": "0.02 owner assumption, not exchange verified",
+    "normal_payout_uncertainty_deduction": "0.01",
+    "minimum_net_ev_after_fee_and_uncertainty": "0.015",
+    "cash_policy": "prophetx_exchange_rejection",
+    "stake_sizing": "capped_fixed_stake",
+    "maximum_order_debit_usd": "5",
+    "maximum_total_open_exposure_usd": "20",
+    "maximum_daily_new_order_debit_usd": "20",
+    "maximum_daily_realized_loss_usd": "20",
+    "maximum_open_orders": 1,
+    "maximum_new_orders_per_minute": 1,
+    "unit_size_usd_reporting_only": "5"
+  },
+  "separate_conditional_first_order_pilot_for_owner_approval": {
+    "maximum_oms_attempts": 1,
+    "maximum_order_debit_and_loss_usd": "5",
+    "maximum_pilot_exposure_and_daily_debit_and_loss_usd": "5",
+    "same_source_and_fee_policy": true,
+    "same_nba_family": true,
+    "duration_hours": 24,
+    "lifecycle_evidence": "deferred only until a genuine qualifying OMS order",
+    "submitted_or_armed": false
+  },
+  "research_only_until_separately_reviewed": [
+    "NFL", "MLB", "NHL", "NCAAF", "NCAABM", "ATP", "WTA", "UFC",
+    "all in-play phases", "spreads", "totals", "player props"
+  ],
+  "activation_conditions": [
+    "Owner renews the expired NBA full-game family rule and separately approves the conditional one-attempt pilot for this account and build",
+    "An actual current market matches the reviewed family with three eligible complete sportsbook pairs and executable native depth",
+    "Starting authenticated account identity and inventory are reconciled and private order stream remains synchronized",
+    "The official order-specific location check, risk limits, one-use attempt ledger, and emergency stop all pass"
+  ]
+}
