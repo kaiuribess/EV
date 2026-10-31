@@ -192,14 +192,15 @@ if (@($pricing.enabled_reference_profiles).Count -ne $enabled.Count -or $current
 
 # The shared overlap and unit preferences apply to both workspaces. Paper has
 # no authenticated account cash, so its simulated stake stays capped at $5.
-# Native stores the requested quarter-Kelly/cash-only policy, but its separate
-# account and launch gates must still verify cash and authorize any real stake.
+# Native launch profiles own their reviewed sizing and cash policy. Feed setup
+# must preserve that policy across a restart.
 $riskChanges = @{ block_overlapping_events = $true; block_overlapping_players = $true;
     unit_size_usd = '5' }
+$fixedNativeCash = $isNative -and $current.risk.cash_policy -eq 'prophetx_exchange_rejection'
 if ($isPaper) {
     $riskChanges.max_order_stake = '5'
     $riskChanges.daily_loss_limit = $null
-} else {
+} elseif (-not $fixedNativeCash) {
     $riskChanges.available_cash_only = $true
     $riskChanges.stake_sizing = 'quarter_kelly'
     # This script configures shared input feeds. Preserve any stricter native
@@ -215,11 +216,18 @@ try {
     # HTTP client times out. Verify persisted state instead of blindly retrying.
     if (-not $isNative) { throw }
     $after = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 30
+    $cashModeMatches = if ($fixedNativeCash) {
+        $after.risk.cash_policy -eq 'prophetx_exchange_rejection' -and
+        $after.risk.available_cash_only -eq $false -and
+        $after.risk.stake_sizing -eq 'capped'
+    } else {
+        $after.risk.available_cash_only -eq $true -and
+        $after.risk.stake_sizing -eq 'quarter_kelly'
+    }
     if ($after.auto_trade -ne $false -or $after.kill_switch -ne $true -or
         $after.risk.block_overlapping_events -ne $true -or
         $after.risk.block_overlapping_players -ne $true -or
-        $after.risk.available_cash_only -ne $true -or
-        $after.risk.stake_sizing -ne 'quarter_kelly' -or
+        -not $cashModeMatches -or
         [decimal]$after.risk.unit_size_usd -ne [decimal]5) { throw }
     Write-Host 'Verified persisted native risk settings after delayed control response.'
 }
@@ -272,6 +280,10 @@ Write-Host 'Source feeds may need several seconds to authenticate and publish a 
 if ($isPaper) {
     Write-Host 'Paper comparison: Parlay targets plus matched Oddize NBA references; hypothetical offers, capacity and fills; $5 simulated stake cap.'
 } else {
-    Write-Host 'Native risk draft: quarter-Kelly, $5 reporting unit, verified available cash required; real stake authorization remains off.'
+    if ($fixedNativeCash) {
+        Write-Host 'Native risk: reviewed ProphetX fixed-stake exchange-rejection cash policy preserved; $5 reporting unit.'
+    } else {
+        Write-Host 'Native risk: quarter-Kelly, verified available cash, $5 reporting unit.'
+    }
 }
-Write-Host 'Quote active status and settlement equivalence remain unverified. Automatic native orders remain paused.'
+Write-Host "Automatic native orders: $($result.auto_trade). Current source, market and launch checks remain mandatory."
