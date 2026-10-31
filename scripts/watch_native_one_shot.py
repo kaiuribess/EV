@@ -110,18 +110,23 @@ def _authorization(data: dict, now: datetime) -> tuple[datetime, str]:
     return expires, identity
 
 
-def _risk_fits(state: dict) -> bool:
+def _risk_fits(state: dict, *, conditional: bool = False) -> bool:
     risk = state.get("risk") or {}
     names = ("max_order_stake", "max_event_exposure", "max_player_exposure",
              "max_venue_exposure", "max_correlated_exposure", "max_total_exposure",
              "live_max_order_stake")
     if any((value := _money(risk.get(name))) is None or not 0 < value <= CAP for name in names):
         return False
+    fixed_prophetx = (conditional and risk.get("cash_policy") == "prophetx_exchange_rejection"
+        and risk.get("available_cash_only") is False and risk.get("stake_sizing") == "capped"
+        and (daily := _money(risk.get("max_native_daily_debit"))) is not None and daily <= CAP
+        and (loss := _money(risk.get("daily_loss_limit"))) is not None and loss <= CAP)
+    verified_cash = (risk.get("cash_policy", "verified_current") == "verified_current"
+        and risk.get("available_cash_only") is True and risk.get("stake_sizing") == "quarter_kelly")
     return (risk.get("max_native_order_attempts") == 1 and risk.get("max_open_orders") == 1
-            and risk.get("max_orders_per_minute") == 1 and risk.get("available_cash_only") is True
+            and risk.get("max_orders_per_minute") == 1 and (fixed_prophetx or verified_cash)
             and risk.get("block_overlapping_events") is True
             and risk.get("block_overlapping_players") is True
-            and risk.get("stake_sizing") == "quarter_kelly"
             and risk.get("live_stake_authorized") is True
             and _money(risk.get("unit_size_usd")) == CAP)
 
@@ -133,7 +138,7 @@ def _scope(setup: dict, state: dict, authorization: dict | None = None,
     if (state.get("mode") != "production" or state.get("sample_feed_enabled") is not False
             or state.get("live_enabled") is not True):
         return "production_workspace_unavailable", None
-    if not _risk_fits(state):
+    if not _risk_fits(state, conditional=conditional):
         return "one_shot_risk_scope_unavailable", None
     profiles = setup.get("launch_scope") or []
     risk_policy = setup.get("risk_policy") or {}
@@ -144,6 +149,12 @@ def _scope(setup: dict, state: dict, authorization: dict | None = None,
             or limits.get("max_native_order_attempts") != 1
             or (limit := _money(limits.get("max_order_stake_usd"))) is None or not 0 < limit <= CAP):
         return "waiting_for_bounded_launch_profile", None
+    if conditional and state.get("risk", {}).get("cash_policy") == "prophetx_exchange_rejection":
+        if (len(profiles) != 1 or profiles[0].get("venue") != "prophetx"
+                or limits.get("cash_policy") != "prophetx_exchange_rejection"
+                or limits.get("available_cash_only") is not False
+                or limits.get("stake_sizing") != "capped"):
+            return "waiting_for_bounded_launch_profile", None
     if any(p.get("venue") not in VENUES or p.get("environment") != "production"
            or p.get("validation_pilot") is not True
            or p.get("strategy_ids") != ["native_positive_ev"]

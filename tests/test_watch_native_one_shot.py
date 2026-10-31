@@ -208,6 +208,15 @@ def test_conditional_prophetx_family_pilot_waits_for_real_market_and_binds_appro
         "account_fingerprint": "a" * 64}
     assert gate._authorization(auth, NOW)[1] == auth["authorization_id"]
     assert gate._scope(launch, current, auth, NOW) == ("ready", DIGEST)
+    current["risk"].update(cash_policy="prophetx_exchange_rejection",
+        available_cash_only=False, stake_sizing="capped",
+        max_native_daily_debit="5", daily_loss_limit="5")
+    launch["risk_policy"]["values"].update(cash_policy="prophetx_exchange_rejection",
+        available_cash_only=False, stake_sizing="capped")
+    assert gate._scope(launch, current, auth, NOW) == ("ready", DIGEST)
+    launch["risk_policy"]["values"]["cash_policy"] = "verified_current"
+    assert gate._scope(launch, current, auth, NOW)[0] == "waiting_for_bounded_launch_profile"
+    launch["risk_policy"]["values"]["cash_policy"] = "prophetx_exchange_rejection"
     launch["safe_to_arm"] = False
     launch["activation"]["available"] = False
     launch["launch_scope"][0]["markets"] = []
@@ -222,6 +231,20 @@ def test_conditional_prophetx_family_pilot_waits_for_real_market_and_binds_appro
         "conditional_pilot_profile_changed"
     with pytest.raises(ValueError):
         gate._authorization({**auth, "venues": ["kalshi"]}, NOW)
+
+
+def test_conditional_prophetx_fixed_stake_requires_bound_daily_limits():
+    current, launch = state(), setup()
+    current["risk"].update(cash_policy="prophetx_exchange_rejection",
+        available_cash_only=False, stake_sizing="capped",
+        max_native_daily_debit="5", daily_loss_limit="5")
+    assert not gate._risk_fits(current)
+    assert gate._risk_fits(current, conditional=True)
+    current["risk"]["max_native_daily_debit"] = "6"
+    assert not gate._risk_fits(current, conditional=True)
+    current["risk"]["max_native_daily_debit"] = "5"
+    current["risk"]["daily_loss_limit"] = None
+    assert not gate._risk_fits(current, conditional=True)
 
 
 def test_check_only_and_invalid_limits_make_zero_control_calls(monkeypatch, tmp_path):

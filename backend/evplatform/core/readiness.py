@@ -281,9 +281,8 @@ class LaunchProfile(StrictRecord):
         if (bool(self.market_ids) == (self.family_rule is not None)
                 or self.family_rule is not None and self.family_rule.scope.venue != self.venue):
             raise ValueError("Launch profile needs either exact markets or one matching approved family rule")
-        if self.limits.cash_policy == "prophetx_exchange_rejection" and (
-                self.venue != "prophetx" or self.validation_pilot):
-            raise ValueError("Exchange-rejection cash policy requires a recurring ProphetX profile")
+        if self.limits.cash_policy == "prophetx_exchange_rejection" and self.venue != "prophetx":
+            raise ValueError("Exchange-rejection cash policy requires a ProphetX profile")
         if self.validation_pilot and self.family_rule is not None and (
                 self.venue != "prophetx" or self.family_rule.scope.sport != "basketball"
                 or self.family_rule.scope.league != "NBA"
@@ -307,6 +306,11 @@ class LaunchProfile(StrictRecord):
             "novig": "novig_ioc_win_loss_halt_on_exception",
             "prophetx": "prophetx_funded_cash_win_loss_halt_on_exception",
         }
+        fixed_prophetx = (self.venue == "prophetx" and self.family_rule is not None
+            and limits.cash_policy == "prophetx_exchange_rejection"
+            and not limits.available_cash_only and limits.stake_sizing == "capped")
+        verified_cash = (limits.cash_policy == "verified_current"
+            and limits.available_cash_only and limits.stake_sizing == "quarter_kelly")
         if (self.environment != "production"
                 or self.settlement_policy != pilot_settlement.get(self.venue)
                 or any(cap is None or cap > Decimal("5") for cap in caps)
@@ -316,9 +320,9 @@ class LaunchProfile(StrictRecord):
                     or limits.max_native_daily_debit_usd > Decimal("5")))
                 or limits.max_native_order_attempts != 1
                 or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1
-                or not limits.available_cash_only or not limits.block_overlapping_events
+                or not (fixed_prophetx or verified_cash) or not limits.block_overlapping_events
                 or not limits.block_overlapping_players
-                or limits.stake_sizing != "quarter_kelly" or limits.unit_size_usd != Decimal("5")
+                or limits.unit_size_usd != Decimal("5")
                 or set(self.strategy_ids) != {"native_positive_ev"}
                 or self.min_reference_books < 2):
             raise ValueError("Validation pilot requires one at-most-$5 supported-venue attempt with cash and overlap limits")

@@ -611,10 +611,23 @@ def test_conditional_prophetx_first_trade_profile_uses_family_without_future_gam
     assert draft["launch_profile"]["market_ids"] == []
     assert draft["launch_profile"]["limits"]["max_order_stake_usd"] == "5"
     assert draft["launch_profile"]["limits"]["max_native_order_attempts"] == 1
+    fixed_limits = LiveLimits.model_validate({**recurring_limits.model_dump(),
+        **{name: Decimal(20) for name in caps},
+        "cash_policy": "prophetx_exchange_rejection", "available_cash_only": False,
+        "stake_sizing": "capped", "max_native_daily_debit_usd": Decimal(20)})
+    fixed_recurring = LaunchProfile.model_validate({**profile.model_dump(),
+        "validation_pilot": False, "limits": fixed_limits.model_dump()})
+    fixed_draft = prepare(fixed_recurring)
+    assert fixed_draft["launch_profile"]["limits"]["cash_policy"] == "prophetx_exchange_rejection"
+    assert fixed_draft["launch_profile"]["limits"]["available_cash_only"] is False
+    assert fixed_draft["launch_profile"]["limits"]["stake_sizing"] == "capped"
+    assert fixed_draft["launch_profile"]["limits"]["max_order_stake_usd"] == "5"
+    assert fixed_draft["launch_profile"]["limits"]["max_native_order_attempts"] == 1
+    assert fixed_draft["approved"] is False
 
 
-@pytest.mark.parametrize("fixed_mode", [False, True])
-def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatch, fixed_mode):
+@pytest.mark.parametrize("fixed_mode,fixed_pilot", [(False, False), (True, False), (True, True)])
+def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatch, fixed_mode, fixed_pilot):
     from evplatform.core.risk import RiskConfig, RiskEngine, RiskRejected
     now = utcnow().replace(microsecond=0)
     pricing, scope = approved_config("prophetx")
@@ -630,10 +643,10 @@ def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatc
         expires_at=now+timedelta(hours=2))
     profile = SimpleNamespace(venue="prophetx", environment="production",
         account_fingerprint=account, market_ids=(), family_rule=rule,
-        strategy_ids=("native_positive_ev",), validation_pilot=not fixed_mode,
+        strategy_ids=("native_positive_ev",), validation_pilot=fixed_pilot or not fixed_mode,
         settlement_policy="prophetx_funded_cash_win_loss_halt_on_exception",
         min_reference_books=3, max_reference_age_ms=30000, max_orderbook_age_ms=2500,
-        limits=SimpleNamespace(max_native_order_attempts=None if fixed_mode else 1,
+        limits=SimpleNamespace(max_native_order_attempts=1 if fixed_pilot or not fixed_mode else None,
             max_order_stake_usd=Decimal(5), max_total_exposure_usd=Decimal(5),
             available_cash_only=not fixed_mode,
             stake_sizing="capped" if fixed_mode else "quarter_kelly",

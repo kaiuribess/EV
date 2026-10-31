@@ -1160,7 +1160,7 @@ class NativeRuntime:
                 for previous in self.engine.risk.native_orders.values()):
             raise RiskRejected(f"Scoped {p.venue.capitalize()} settlement permits only one managed order per native market")
         snapshot = self.account_snapshots.get(order.venue)
-        fixed_exchange_cash = (p.venue == "prophetx" and not p.validation_pilot
+        fixed_exchange_cash = (p.venue == "prophetx"
             and getattr(p.limits, "cash_policy", "verified_current") == "prophetx_exchange_rejection"
             and self.engine.risk.config.cash_policy == "prophetx_exchange_rejection"
             and not self.engine.risk.config.available_cash_only
@@ -1698,7 +1698,7 @@ class NativeRuntime:
         account_age = None
         if snapshot and isinstance(snapshot.observed_at, datetime) and snapshot.observed_at.tzinfo is not None:
             account_age = (now-snapshot.observed_at).total_seconds()
-        fixed_exchange_cash = bool(p and p.venue == "prophetx" and not p.validation_pilot
+        fixed_exchange_cash = bool(p and p.venue == "prophetx"
             and p.limits.cash_policy == "prophetx_exchange_rejection"
             and engine.risk.config.cash_policy == "prophetx_exchange_rejection")
         # The fixed-stake mode paces authenticated inventory checks, but a
@@ -2122,7 +2122,7 @@ class NativeRuntime:
             return
         adapter = self.bind_client(p.venue, client)
         last_probe = self._last_account_probes.get(p.venue, 0) if self.portfolio else self.last_account_probe
-        fixed_exchange_cash = (p.venue == "prophetx" and not getattr(p, "validation_pilot", False)
+        fixed_exchange_cash = (p.venue == "prophetx"
             and getattr(getattr(p, "limits", None), "cash_policy", "verified_current") == "prophetx_exchange_rejection"
             and self.engine.risk.config.cash_policy == "prophetx_exchange_rejection")
         interval = 300 if fixed_exchange_cash and p.venue in self.account_snapshots else (5 if adapter is not None else 20)

@@ -30,8 +30,12 @@ def prepare(current: LaunchProfile) -> dict:
             or rule.scope.market_type != "moneyline" or rule.scope.league != "NBA"
             or rule.scope.period != "FULL" or current.min_reference_books < 3
             or current.settlement_policy != "prophetx_funded_cash_win_loss_halt_on_exception"
-            or current.limits.stake_sizing != "quarter_kelly"
-            or not current.limits.available_cash_only):
+            or not ((current.limits.stake_sizing == "quarter_kelly"
+                     and current.limits.available_cash_only
+                     and current.limits.cash_policy == "verified_current")
+                    or (current.limits.stake_sizing == "capped"
+                        and not current.limits.available_cash_only
+                        and current.limits.cash_policy == "prophetx_exchange_rejection"))):
         raise ValueError("A reviewed recurring ProphetX NBA moneyline family profile is required")
     limits = current.limits.model_dump(mode="json")
     limits.update({name: str(min(CAP, Decimal(limits[name]))) for name in MONEY_CAPS})
