@@ -241,11 +241,13 @@ def test_cached_account_without_profile_is_not_current_spendable_cash(engine):
     record.plugin.client = SimpleNamespace(settings=SimpleNamespace(environment="production"))
     engine.native.account_snapshots["novig"] = NativeAccountSnapshot(
         venue="novig", environment="production", observed_at=utcnow(), identity_verified=True,
-        account_fingerprint="a"*64, balance_usd=Decimal("25"), cash_available_verified=True, reconciled=True)
+        account_fingerprint="a"*64, balance_usd=Decimal("25"), cash_available_verified=True,
+        reconciled=False, reason="Authenticated inventory incomplete")
     snapshot = account(launch_setup(engine))["account_snapshot"]
     assert snapshot["available"] and not snapshot["current"]
     assert snapshot["balance_usd"] is None
     assert not snapshot["cash_available_verified"]
+    assert snapshot["reason"] == "Authenticated inventory incomplete"
 
 
 @pytest.mark.asyncio
