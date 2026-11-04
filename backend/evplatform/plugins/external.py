@@ -1217,12 +1217,24 @@ class NativeMonitor(Plugin):
                 if market.league == league), default=0) for league in leagues}
             ranked_tournaments = sorted(discovered, key=lambda item: (-league_scores[item[0]],
                 leagues.index(item[0]), discovered.index(item)))
-            tournaments = list(dict.fromkeys([*pinned, *(native_id for _, native_id in ranked_tournaments)]))[:4]
+            # The active catalog can contain every configured league, while a
+            # four-tournament slice silently omitted later sports. Visit one
+            # tournament per league first, then spend the remaining bounded
+            # catalog reads on additional tournaments with source coverage.
+            league_first = [next((native_id for league, native_id in ranked_tournaments
+                if league == requested), None) for requested in leagues]
+            tournaments = list(dict.fromkeys([*pinned,
+                *(native_id for native_id in league_first if native_id is not None),
+                *(native_id for _, native_id in ranked_tournaments)]))[:12]
             labels_by_tournament = {native_id: league for league, native_id in discovered}
             payloads = [await self.client.discover_events(tournament_id=tournament_id)
                         for tournament_id in tournaments]
-            pool = open_event_ids(payloads, now=utcnow(), max_events=50,
-                                  lookahead_hours=config.get("discovery_lookahead_hours", 30))
+            # Keep the per-tournament discovery bound. A global first-50 cap
+            # could consume the entire pool in the first league and make the
+            # later authenticated catalogs invisible to subscription ranking.
+            pool = list(dict.fromkeys(event_id for payload in payloads
+                for event_id in open_event_ids([payload], now=utcnow(), max_events=50,
+                    lookahead_hours=config.get("discovery_lookahead_hours", 30))))
             all_events, ambiguous_ids = {}, set()
             for tournament_id, payload in zip(tournaments, payloads):
                 for row in payload.get("data", {}).get("sport_events", []):
@@ -1254,11 +1266,11 @@ class NativeMonitor(Plugin):
                 # close. The periodic scheduler owns subscription rotation.
                 selected = [event_id for event_id in existing if event_id in all_events]
             else:
-                # Preserve one open event from each explicitly pinned tournament
-                # before using the remaining bounded slots for source-rich leads.
+                # Preserve one open event per discovered tournament before
+                # using remaining bounded slots for source-rich leads.
                 retained = [min((event_id for event_id in pool
                                  if all_events.get(event_id, {}).get("tournament_id") == tournament_id),
-                                key=event_rank, default=None) for tournament_id in pinned]
+                                key=event_rank, default=None) for tournament_id in tournaments]
                 selected = [event_id for event_id in retained if event_id is not None]
                 selected.extend(event_id for event_id in ranked if event_id not in selected)
             selected = selected[:config.get("max_discovered_events", 20)]

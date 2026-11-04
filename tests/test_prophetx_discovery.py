@@ -264,6 +264,49 @@ async def test_dynamic_tournaments_include_source_rich_nfl_and_retain_pinned_nba
 
 
 @pytest.mark.asyncio
+async def test_discovery_covers_every_configured_active_league_with_bounded_subscriptions(monkeypatch):
+    from evplatform.venues.prophetx_market_data import ProphetXMarketData
+
+    fixed = datetime(2026, 10, 23, 18, tzinfo=timezone.utc)
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: fixed)
+    async def no_matching_side_effects(_):
+        return []
+    monkeypatch.setattr(NativeMonitor, "_refresh_research_matches", no_matching_side_effects)
+    leagues = ["NFL", "NBA", "MLB", "NHL", "NCAAF", "NCAABM", "UFC", "ATP", "WTA"]
+    names = ["NFL", "NBA", "MLB", "NHL", "College Football", "College Basketball",
+             "UFC", "ATP Basel", "WTA Vienna"]
+    ids = {index + 100: index for index in range(len(leagues))}
+
+    class Client:
+        public_market_data = ProphetXMarketData()
+        def __init__(self): self.calls = []
+        async def discover_sports(self, *, active_events_only):
+            assert active_events_only
+            return {"data": {"tournaments": [{"id": native_id, "name": names[index]}
+                for native_id, index in ids.items()]}}
+        async def discover_events(self, *, tournament_id):
+            self.calls.append(tournament_id)
+            index = ids[tournament_id]
+            return {"data": {"sport_events": [{"event_id": 1000 + index,
+                "name": f"Away {index} at Home {index}", "status": "not_started",
+                "scheduled": "2026-10-24T00:00:00Z"}]}}
+        async def discover_markets(self, event_ids):
+            return {"data": {event_id: [] for event_id in event_ids}}
+
+    client = Client()
+    monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
+        "discovery_tournament_ids": [101], "discovery_leagues": leagues,
+        "max_discovered_events": 20, "max_discovered_prop_subscriptions": 0}),
+        discovery_status="disabled", discovered_event_ids=[])
+    await NativeMonitor._refresh_discovery(monitor)
+    assert monitor.discovery_status == "current"
+    assert client.calls == [101, 100, 102, 103, 104, 105, 106, 107, 108]
+    assert len(monitor.discovered_event_ids) == len(leagues)
+    assert set(monitor.discovered_tournaments) == set(leagues)
+    assert len(client.calls) <= 12
+
+
+@pytest.mark.asyncio
 async def test_tournament_read_failure_keeps_pinned_discovery(monkeypatch):
     fixed = datetime(2026, 10, 23, 18, tzinfo=timezone.utc)
     monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: fixed)
