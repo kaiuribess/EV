@@ -2125,7 +2125,14 @@ class NativeRuntime:
         fixed_exchange_cash = (p.venue == "prophetx"
             and getattr(getattr(p, "limits", None), "cash_policy", "verified_current") == "prophetx_exchange_rejection"
             and self.engine.risk.config.cash_policy == "prophetx_exchange_rejection")
-        interval = 300 if fixed_exchange_cash and p.venue in self.account_snapshots else (5 if adapter is not None else 20)
+        previous = self.account_snapshots.get(p.venue)
+        # Pace a *completed* ProphetX inventory for five minutes. A failed or
+        # interrupted read must be retried sooner; otherwise its next probe
+        # repeatedly coincides with the five-minute catalog resubscription and
+        # can lose the private-stream identity fence again.
+        interval = (300 if fixed_exchange_cash and previous is not None and previous.reconciled
+            else 30 if fixed_exchange_cash and previous is not None
+            else 5 if adapter is not None else 20)
         if time.monotonic()-last_probe < interval:
             return
         from ..venues.account_probe import probe_native_account

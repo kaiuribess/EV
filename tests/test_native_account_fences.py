@@ -1,5 +1,6 @@
 """Offline concurrent account/settlement lifecycle tests; no native requests."""
 import asyncio
+import time
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -29,6 +30,31 @@ def snapshot(*, reconciled=True):
     return NativeAccountSnapshot(venue="novig", environment="sandbox", account_fingerprint="a"*64,
         identity_verified=True, observed_at=utcnow(), balance_usd="10", cash_available_verified=reconciled,
         reconciled=reconciled, reason="OFFLINE account fixture")
+
+
+async def test_incomplete_prophetx_inventory_retries_before_five_minute_discovery(system, monkeypatch):
+    _, risk, _, adapter = system
+    runtime = runtime_for(system)
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        limits=SimpleNamespace(cash_policy="prophetx_exchange_rejection"))
+    runtime.mapper = SimpleNamespace(mappings=())
+    runtime.engine.registry = SimpleNamespace(records={"prophetx": SimpleNamespace(
+        plugin=SimpleNamespace(client=adapter.client))})
+    risk.config = risk.config.model_copy(update={"cash_policy": "prophetx_exchange_rejection"})
+    risk.kill_switch = True
+    runtime.bind_client = lambda venue, client: adapter
+    runtime.manager.adapters["prophetx"] = adapter
+    runtime.account_snapshots["prophetx"] = snapshot(reconciled=False).model_copy(
+        update={"venue": "prophetx", "reason": "Private fence changed during wallet read"})
+    runtime._last_account_probes["prophetx"] = time.monotonic() - 60
+    probe = AsyncMock(return_value=snapshot().model_copy(update={"venue": "prophetx"}))
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account", probe)
+
+    await runtime.refresh_account()
+
+    assert probe.await_count == 1
+    assert runtime.account_snapshots["prophetx"].reconciled
+    assert risk.kill_switch
 
 
 async def test_kalshi_runtime_read_only_snapshot_loads_without_executable_mapping(system):
@@ -418,7 +444,8 @@ async def test_polymarket_bind_restores_exact_persisted_fill_evidence(system, ma
     runtime.profile = SimpleNamespace(venue="polymarket_us", environment="production")
     runtime.execution_lease.scope = ("polymarket_us", "production")
     runtime.mapper.mappings = [SimpleNamespace(market=market, instrument=instrument,
-                                               fee_bound=SimpleNamespace(verified=True))]
+                                               fee_bound=SimpleNamespace(verified=True,
+                                                                         evidence_kind="exchange_verified"))]
     persisted = ("OFFLINE exact journal marker",)
     manager.recovered_fills = lambda local_id: persisted if local_id == restored.id else ()
     calls = []
