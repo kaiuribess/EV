@@ -97,6 +97,26 @@ def test_recurring_lease_arms_once_and_never_rearms_after_emergency_stop(monkeyp
     assert calls.count(("POST", "/api/control")) == 1
 
 
+def test_expired_one_shot_record_does_not_block_new_recurring_lease(monkeypatch, tmp_path):
+    _, _, calls = server(monkeypatch, tmp_path)
+    one_shot.AUTH_PATH.write_text(json.dumps({"schema_version": 1,
+        "authorization_id": "retired-pilot", "issued_at": (NOW-timedelta(days=2)).isoformat(),
+        "expires_at": (NOW-timedelta(days=1)).isoformat()}), encoding="utf-8")
+    assert gate.tick(now=NOW, check_only=True) == "ready"
+    assert ("POST", "/api/control") not in calls
+
+
+def test_current_or_malformed_one_shot_still_blocks_recurring(monkeypatch, tmp_path):
+    _, _, calls = server(monkeypatch, tmp_path)
+    one_shot.AUTH_PATH.write_text(json.dumps({"schema_version": 1,
+        "authorization_id": "active-pilot", "issued_at": (NOW-timedelta(hours=1)).isoformat(),
+        "expires_at": (NOW+timedelta(hours=1)).isoformat()}), encoding="utf-8")
+    assert gate.tick(now=NOW, check_only=True) == "blocked"
+    one_shot.AUTH_PATH.write_text("{invalid", encoding="utf-8")
+    assert gate.tick(now=NOW, check_only=True) == "blocked"
+    assert ("POST", "/api/control") not in calls
+
+
 def test_recurring_scope_and_uncertain_inventory_block_activation(monkeypatch, tmp_path):
     current, launch, calls = server(monkeypatch, tmp_path)
     launch["pricing"]["trusted_pilot_policy"]["owner_approved"] = False

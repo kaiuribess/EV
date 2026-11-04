@@ -224,9 +224,20 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
             _status("disabled", "No recurring authorization is saved")
             return "disabled"
         if shared.AUTH_PATH.exists():
-            disarm()
-            _status("blocked", "One-shot and recurring authorizations cannot coexist")
-            return "blocked"
+            try:
+                previous = json.loads(shared.AUTH_PATH.read_text(encoding="utf-8"))
+                previous_expiry = shared._time(previous.get("expires_at"))
+                previous_issued = shared._time(previous.get("issued_at"))
+                retired_one_shot = (previous.get("schema_version") == 1
+                    and previous_issued is not None and previous_expiry is not None
+                    and previous_issued < previous_expiry <= previous_issued + timedelta(hours=24)
+                    and previous_expiry <= now)
+            except (OSError, ValueError, TypeError, AttributeError):
+                retired_one_shot = False
+            if not retired_one_shot:
+                disarm()
+                _status("blocked", "Current or invalid one-shot authorization conflicts with recurring")
+                return "blocked"
         try:
             saved = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
             identity, expires, digest = _authorization(saved, now)

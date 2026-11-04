@@ -59,13 +59,36 @@ function Managed-Process-Alive {
     } catch { return $false }
 }
 
+function Test-ExpiredAuthorization([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $authorization = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        if ($authorization.schema_version -ne 1 -or
+            -not [string]$authorization.authorization_id -or
+            -not [string]$authorization.issued_at -or
+            -not [string]$authorization.expires_at) { return $false }
+        $issued = [datetimeoffset]$authorization.issued_at
+        $expires = [datetimeoffset]$authorization.expires_at
+        return ($issued -lt $expires -and $expires -le $issued.AddHours(24) -and
+            $expires -le [datetimeoffset]::UtcNow)
+    } catch { return $false }
+}
+
 function Invoke-OneShotGate {
     if ($Port -ne 8002) { return }
     $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
     $recurring = Join-Path $dataDir 'native_recurring_authorization.json'
     $oneShot = Join-Path $dataDir 'native_one_shot_authorization.json'
     $oneShotStatus = Join-Path $dataDir 'native_one_shot_status.json'
-    $gate = if (Test-Path -LiteralPath $oneShot) {
+    $oneShotCurrent = (Test-Path -LiteralPath $oneShot) -and
+        -not (Test-ExpiredAuthorization $oneShot)
+    $recurringCurrent = (Test-Path -LiteralPath $recurring) -and
+        -not (Test-ExpiredAuthorization $recurring)
+    $gate = if ($oneShotCurrent) {
+        Join-Path $PSScriptRoot 'watch_native_one_shot.py'
+    } elseif ($recurringCurrent) {
+        Join-Path $PSScriptRoot 'watch_native_recurring.py'
+    } elseif (Test-Path -LiteralPath $oneShot) {
         Join-Path $PSScriptRoot 'watch_native_one_shot.py'
     } elseif (Test-Path -LiteralPath $recurring) {
         Join-Path $PSScriptRoot 'watch_native_recurring.py'
@@ -79,7 +102,7 @@ function Invoke-OneShotGate {
     # A one-minute scheduler tick can miss a brief qualified price. Sample the
     # existing local release gate for part of this tick; the scanner and OMS
     # still perform their independent per-order checks. No provider API is polled.
-    $rapidPilot = Test-Path -LiteralPath $oneShot
+    $rapidPilot = $oneShotCurrent
     $started = Get-Date
     $sampleLimit = if ($rapidPilot) { 14 } else { 1 }
     for ($sample = 0; $sample -lt $sampleLimit; $sample++) {
