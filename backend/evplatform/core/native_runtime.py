@@ -2228,8 +2228,26 @@ class NativeRuntime:
                         adapter.bound_exchange_index = snapshot.exchange_index if snapshot.identity_verified else None
                 pending = any(o.venue == p.venue and (not o.reconciliation_complete or o.status == OrderStatus.UNKNOWN)
                               for o in self.engine.risk.native_orders.values())
-                if self.engine.risk.auto_trade and (not snapshot.identity_verified or (not snapshot.reconciled and not pending)):
-                    self.engine.risk.halt("Native account inventory differs from the managed order ledger")
+                if self.engine.risk.auto_trade and (not snapshot.identity_verified
+                        or snapshot.account_fingerprint != getattr(p, "account_fingerprint", snapshot.account_fingerprint)
+                        or (not snapshot.reconciled and not pending)):
+                    # ProphetX's funded-cash profile may see a temporarily
+                    # incomplete reporting/private watermark despite an empty
+                    # local account. Its unreconciled snapshot remains installed
+                    # so *every* order preflight is blocked until a complete
+                    # authenticated read succeeds. Do not consume a bounded
+                    # recurring lease for this read-only lag. A foreign account
+                    # or any managed/tracked exposure still needs an emergency
+                    # stop rather than a speculative retry.
+                    empty_prophetx_read = (p.venue == "prophetx"
+                        and p.limits.cash_policy == "prophetx_exchange_rejection"
+                        and snapshot.identity_verified
+                        and snapshot.account_fingerprint == getattr(p, "account_fingerprint", snapshot.account_fingerprint)
+                        and not snapshot.reconciled
+                        and not any(o.venue == p.venue for o in self.engine.risk.native_orders.values())
+                        and not any(row.venue == p.venue for row in self.external_positions))
+                    if not empty_prophetx_read:
+                        self.engine.risk.halt("Native account inventory differs from the managed order ledger")
         except asyncio.CancelledError:
             self.invalidate_account(p.venue)
             raise

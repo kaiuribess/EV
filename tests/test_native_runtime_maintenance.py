@@ -75,6 +75,77 @@ async def test_empty_prophetx_account_probe_failure_blocks_orders_without_consum
     assert not risk.kill_switch
 
 
+async def test_empty_prophetx_incomplete_inventory_blocks_orders_without_emergency_stop(system, monkeypatch):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint="a" * 64,
+        limits=SimpleNamespace(cash_policy="prophetx_exchange_rejection"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    risk.kill_switch = False
+    snapshot = SimpleNamespace(identity_verified=True, reconciled=False,
+        account_fingerprint="a" * 64, reason="OFFLINE reporting watermark lag")
+    probe = AsyncMock(return_value=snapshot)
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account", probe)
+    await runtime.refresh_account()
+    assert runtime.account_snapshots["prophetx"] is snapshot
+    assert not runtime.account_snapshots["prophetx"].reconciled
+    assert not risk.kill_switch and risk.auto_trade
+    snapshot = SimpleNamespace(identity_verified=True, reconciled=True,
+        account_fingerprint="a" * 64, reason="")
+    probe.return_value = snapshot
+    runtime.last_account_probe = 0
+    await runtime.refresh_account()
+    assert runtime.account_snapshots["prophetx"] is snapshot
+    assert not risk.kill_switch and risk.auto_trade
+
+
+async def test_prophetx_incomplete_inventory_with_exposure_still_halts(system, monkeypatch):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint="a" * 64,
+        limits=SimpleNamespace(cash_policy="prophetx_exchange_rejection"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    runtime.external_positions = (SimpleNamespace(venue="prophetx"),)
+    risk.kill_switch = False
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account",
+        AsyncMock(return_value=SimpleNamespace(identity_verified=True, reconciled=False,
+            account_fingerprint="a" * 64, reason="OFFLINE unresolved inventory")))
+    await runtime.refresh_account()
+    assert risk.kill_switch and not risk.auto_trade
+
+
+async def test_prophetx_foreign_account_still_halts_without_local_exposure(system, monkeypatch):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint="a" * 64,
+        limits=SimpleNamespace(cash_policy="prophetx_exchange_rejection"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    risk.kill_switch = False
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account",
+        AsyncMock(return_value=SimpleNamespace(identity_verified=True, reconciled=True,
+            account_fingerprint="b" * 64, reason="")))
+    await runtime.refresh_account()
+    assert risk.kill_switch and not risk.auto_trade
+
+
 async def test_prophetx_account_probe_failure_with_external_exposure_halts(system, monkeypatch):
     manager, risk, _, adapter = system
     runtime = runtime_for(system)
