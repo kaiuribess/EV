@@ -91,17 +91,21 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 # not assert that the account has no older settled history.
                 query_to = math.ceil(now.timestamp())
                 query_from = query_to - 60 * 86400 + 1
-                for attempt in range(2):
+                # The reporting store can trail the matching/private stream by
+                # tens of seconds. A lagging page is never enough on its own:
+                # its watermark must eventually cover this probe's start while
+                # the wallet and private-stream fence remain unchanged.
+                for attempt in range(5):
                     try:
                         histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
                             params={"status": status, "from": query_from, "to": query_to},
-                            observed_at=observed_at)
+                            observed_at=observed_at,
+                            max_age=timedelta(seconds=30))
                             for status in ("open", "inactive")]
                     except ReconciliationError as exc:
-                        if attempt == 0 and str(exc) == "Reporting watermark is stale or in the future":
+                        if attempt < 4 and str(exc) == "Reporting watermark is stale or in the future":
                             # A lagging report may catch up during the existing
-                            # bounded retry. Never accept the stale page or
-                            # extend its ten-second source-age requirement.
+                            # bounded retry. Never accept a stale page.
                             await asyncio.sleep(5)
                             query_to = math.ceil(utcnow().timestamp())
                             query_from = query_to - 60 * 86400 + 1
@@ -116,7 +120,7 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                         blockers.append("ProphetX active-order history is not empty")
                         break
                     watermark = min(history.last_synced_at for history in histories)
-                    if watermark < now and attempt == 0:
+                    if watermark < now and attempt < 4:
                         # Reporting replicates behind the private order stream.
                         # One paced retry lets its watermark cover this probe;
                         # the unchanged wallet and private fence remain required.

@@ -2156,7 +2156,7 @@ class NativeRuntime:
                 **({"adapter": adapter} if p.venue == "polymarket_us" else {}),
                 **({"management_client": record.plugin.management_client}
                    if p.venue == "novig" and getattr(record.plugin, "management_client", None) else {})),
-                timeout=35 if p.venue == "prophetx" else 20)
+                timeout=75 if p.venue == "prophetx" else 20)
             return snapshot, token, exchange_index
 
         def unchanged(token):
