@@ -73,6 +73,7 @@ class NativeRuntime:
         self.candidates = {}
         self.signals = {}
         self.account_snapshots = {}
+        self.account_probe_errors = {}
         self.external_positions = ()
         self.pending_external_orders = ()
         self.resolved_external_orders = ()
@@ -2205,6 +2206,7 @@ class NativeRuntime:
                     self._last_account_probes.pop(p.venue, None)
                     return
                 self.account_snapshots[p.venue] = snapshot
+                self.account_probe_errors.pop(p.venue, None)
                 # Start the next paced account read after this one finishes.
                 # ProphetX's two-sided REST inventory check can take longer
                 # than the former start-to-start interval.
@@ -2224,10 +2226,17 @@ class NativeRuntime:
         except asyncio.CancelledError:
             self.invalidate_account(p.venue)
             raise
-        except Exception:
+        except Exception as exc:
             self.invalidate_account(p.venue)
-            if self.engine.risk.auto_trade:
-                self.engine.risk.halt("Native account inventory probe failed")
+            # A failed read removes every order's account prerequisite. With
+            # no owned or tracked exposure, keep the bounded recurring lease
+            # alive so a later authenticated read can restore eligibility.
+            # Existing exposure needs immediate reconciliation and still halts.
+            self.account_probe_errors[p.venue] = type(exc).__name__
+            outstanding = (any(o.venue == p.venue for o in self.engine.risk.native_orders.values())
+                or any(row.venue == p.venue for row in self.external_positions))
+            if self.engine.risk.auto_trade and outstanding:
+                self.engine.risk.halt("Native account inventory probe failed with existing exposure")
         finally:
             self._account_probes.discard(p.venue)
 

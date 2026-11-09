@@ -160,7 +160,9 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
                 "balance_usd": str(snapshot.balance_usd) if current and snapshot.cash_available_verified
                     and snapshot.balance_usd is not None else None,
                 "observed_at": snapshot.observed_at.isoformat() if snapshot else None,
-                "reason": snapshot.reason if snapshot else "No current authenticated account snapshot",
+                "reason": snapshot.reason if snapshot else
+                    ("Authenticated account probe failed (" + native.account_probe_errors[venue] + ")"
+                     if venue in native.account_probe_errors else "No current authenticated account snapshot"),
             },
             "diagnostic_account": native.diagnostic_account(venue),
             "settlement_policy": profile.settlement_policy if profile else None,
