@@ -29,6 +29,31 @@ AUTH_PATH = shared.ROOT / "data" / "native_recurring_authorization.json"
 STATUS_PATH = shared.ROOT / "data" / "native_recurring_status.json"
 MIN_EV = Decimal("0.015")
 UNCERTAINTY = Decimal("0.01")
+_QUIET_FAMILY_BLOCKERS = frozenset({
+    "family.no_current_market", "runtime.settlement_reconciliation_supported",
+    "arming.paused", "arming.kill_switch",
+})
+
+
+def _quiet_family_standby(client: httpx.Client, setup: dict, digest: str) -> bool:
+    """Allow initial arming only when a missing current market is the sole gap."""
+    profiles = setup.get("launch_scope") or []
+    if (len(profiles) != 1 or profiles[0].get("venue") != "prophetx"
+            or profiles[0].get("validation_pilot") is not False
+            or profiles[0].get("owner_approved_recurring_lifecycle_deferral") is not True
+            or not isinstance(profiles[0].get("family_rule"), dict)):
+        return False
+    try:
+        report = shared._get(client, "/api/readiness")
+    except (httpx.HTTPError, ValueError):
+        return False
+    blockers = report.get("blockers")
+    if (report.get("profile_digest") != digest or not isinstance(blockers, list)
+            or not all(isinstance(row, dict) and isinstance(row.get("code"), str)
+                       for row in blockers)):
+        return False
+    codes = {row["code"] for row in blockers}
+    return "family.no_current_market" in codes and codes <= _QUIET_FAMILY_BLOCKERS
 
 
 def _authorization(data: dict, now: datetime) -> tuple[str, datetime, str]:
@@ -274,6 +299,8 @@ def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
                 return "blocked"
             _status("armed", "Monitoring reviewed recurring markets", identity, arm_attempted=True)
             return "armed"
+        if phase == "waiting_for_live_checks" and _quiet_family_standby(client, setup, digest):
+            phase = "ready"
         if phase != "ready":
             disarm()
             _status("pending", phase, identity)

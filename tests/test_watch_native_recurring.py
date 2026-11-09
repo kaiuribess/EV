@@ -1,5 +1,6 @@
 """A recurring lease cannot skip the launch gate or revive an emergency stop."""
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import json
 import subprocess
 import sys
@@ -8,6 +9,7 @@ import httpx
 
 from scripts import watch_native_one_shot as one_shot
 from scripts import watch_native_recurring as gate
+from evplatform.core.readiness import ApprovedNativeFamilyRule
 from tests.test_watch_native_one_shot import state, setup, DIGEST
 from tests.test_family_onboarding import approved_config, family_rule, source_fixture
 
@@ -16,6 +18,22 @@ from tests.test_family_onboarding import approved_config, family_rule, source_fi
 # family rule, so a fixed 2026 date makes this fixture expire over time.
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 CLIENT = httpx.Client
+
+
+def prophetx_rule(scope):
+    return ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-px-standby-v1",
+        approved_by="fixture", approval_evidence="OFFLINE reviewed full-game winner rule",
+        approved_at=NOW-timedelta(minutes=1), expires_at=NOW+timedelta(hours=2),
+        allowed_native_rule_texts=("moneyline|moneyline|default_full_game",),
+        quantity_step=Decimal(1), minimum_quantity=Decimal(1),
+        minimum_order_cost_usd=Decimal(1), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE order-grid fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE owner assumed winnings fee",
+        prophetx_native_settlement_evidence="OFFLINE full-game settlement fixture",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE native book timestamp fixture")
 
 
 def authorization():
@@ -56,7 +74,8 @@ def recurring_setup(*, ready=True):
     return result
 
 
-def server(monkeypatch, tmp_path, *, armed=False, ready=True, orders=None):
+def server(monkeypatch, tmp_path, *, armed=False, ready=True, orders=None,
+           readiness_blockers=None):
     auth = tmp_path / "recurring.json"
     auth.write_text(json.dumps(authorization()), encoding="utf-8")
     monkeypatch.setattr(gate, "AUTH_PATH", auth)
@@ -64,6 +83,8 @@ def server(monkeypatch, tmp_path, *, armed=False, ready=True, orders=None):
     monkeypatch.setattr(one_shot, "AUTH_PATH", tmp_path / "missing-one-shot.json")
     monkeypatch.setattr(one_shot, "LOCK_PATH", tmp_path / "controller.lock")
     current, launch, calls = recurring_state(armed=armed), recurring_setup(ready=ready), []
+    readiness = {"profile_digest": DIGEST, "blockers": [
+        {"code": code} for code in (readiness_blockers or [])]}
     def handle(request):
         calls.append((request.method, request.url.path))
         if request.url.path == "/api/control":
@@ -78,6 +99,7 @@ def server(monkeypatch, tmp_path, *, armed=False, ready=True, orders=None):
             return httpx.Response(200, json=current)
         return httpx.Response(200, json={
             "/api/state": current, "/api/launch/setup": launch,
+            "/api/readiness": readiness,
             "/api/native/orders": {"orders": orders or []}}[request.url.path])
     monkeypatch.setattr(gate.httpx, "Client", lambda **kwargs: CLIENT(
         transport=httpx.MockTransport(handle), **kwargs))
@@ -220,6 +242,45 @@ def test_recurring_family_scope_arms_without_a_static_market_list(monkeypatch, t
     current["markets"] = [later.model_dump(mode="json")]
     assert gate.tick(now=NOW) == "armed"
     assert calls.count(("POST", "/api/control")) == 1
+
+
+def test_reviewed_recurring_family_arms_during_quiet_market(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path, readiness_blockers=[
+        "family.no_current_market", "runtime.settlement_reconciliation_supported",
+        "arming.paused", "arming.kill_switch"])
+    config, scope = approved_config("prophetx")
+    rule = prophetx_rule(scope)
+    launch["launch_scope"][0].update(venue="prophetx",
+        owner_approved_recurring_lifecycle_deferral=True,
+        family_rule=rule.model_dump(mode="json"), markets=[])
+    launch["activation"]["by_venue"] = {"prophetx": {"available": False, "scope_digest": DIGEST}}
+    launch["pricing"] = config.model_dump(mode="json")
+    saved = authorization()
+    saved["venues"] = ["prophetx"]
+    gate.AUTH_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    assert gate.tick(now=NOW, check_only=True) == "ready"
+    assert not calls.count(("POST", "/api/control"))
+    assert gate.tick(now=NOW) == "armed"
+    assert current["auto_trade"] and not current["kill_switch"]
+    assert calls.count(("POST", "/api/control")) == 1
+
+
+def test_quiet_family_standby_rejects_missing_account_or_changed_digest(monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path, readiness_blockers=[
+        "family.no_current_market", "runtime.settlement_reconciliation_supported",
+        "runtime.account_identity_verified"])
+    config, scope = approved_config("prophetx")
+    launch["launch_scope"][0].update(venue="prophetx",
+        owner_approved_recurring_lifecycle_deferral=True,
+        family_rule=prophetx_rule(scope).model_dump(mode="json"), markets=[])
+    launch["activation"]["by_venue"] = {"prophetx": {"available": False, "scope_digest": DIGEST}}
+    launch["pricing"] = config.model_dump(mode="json")
+    saved = authorization()
+    saved["venues"] = ["prophetx"]
+    gate.AUTH_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    assert gate.tick(now=NOW) == "waiting_for_live_checks"
+    assert current["kill_switch"] and not current["auto_trade"]
+    assert not calls.count(("POST", "/api/control"))
 
 
 def test_armed_family_stays_armed_when_no_market_current(monkeypatch, tmp_path):

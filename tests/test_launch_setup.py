@@ -11,7 +11,7 @@ from evplatform.api import create_app
 from evplatform.core.config import PricingConfig, Settings
 from evplatform.core.launch_setup import launch_setup, operator_limits_draft
 from evplatform.core.models import utcnow
-from evplatform.core.readiness import LiveLimits
+from evplatform.core.readiness import LiveLimits, ReadinessBlocker
 from evplatform.core.reference_profiles import ReferenceFreshnessRule, ReferenceProfile
 from evplatform.engine import Engine
 from evplatform.plugins.external import register_external
@@ -574,6 +574,39 @@ def test_native_activation_requires_an_explicit_24_hour_or_shorter_lease(tmp_pat
                 body["authorization_expires_at"] = expiry
             assert client.post("/api/control", headers=HEADERS, json=body).status_code == 409
             assert engine.risk.kill_switch and not engine.risk.auto_trade
+
+
+def test_reviewed_prophetx_family_can_arm_quiet_standby_but_not_account_failure(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with TestClient(native_app(tmp_path)) as client:
+        engine = client.app.state.engine
+        profile = SimpleNamespace(validation_pilot=False,
+            owner_approved_recurring_lifecycle_deferral=True, family_rule=object())
+        engine.native.profiles_by_venue = lambda: {"prophetx": profile}
+        engine.native.profile_for = lambda venue: profile if venue == "prophetx" else None
+        base = engine.native.report()
+        def blocker(code):
+            return ReadinessBlocker(code=code, category="technical", scope="prophetx",
+                message="OFFLINE fixture", action="Wait for genuine evidence")
+        report = base.model_copy(update={"safe_to_arm": False, "profile_digest": "a"*64,
+            "blockers": (blocker("family.no_current_market"),
+                blocker("runtime.settlement_reconciliation_supported"))})
+        engine.native.report = lambda *args, **kwargs: report
+        engine.settings.live_enabled = True
+        body = {"auto_trade": True, "kill_switch": False,
+            "expected_launch_digest": "a"*64,
+            "authorization_expires_at": (utcnow()+timedelta(minutes=5)).isoformat(),
+            "native_venues": ["prophetx"]}
+        assert client.post("/api/control", headers=HEADERS, json=body).status_code == 200
+        assert engine.risk.auto_trade and not engine.risk.kill_switch
+        assert client.get("/api/native/orders").json()["orders"] == []
+
+        assert client.post("/api/control", headers=HEADERS,
+            json={"auto_trade": False, "kill_switch": True}).status_code == 200
+        report = report.model_copy(update={"blockers": (*report.blockers,
+            blocker("runtime.account_identity_verified"))})
+        assert client.post("/api/control", headers=HEADERS, json=body).status_code == 409
+        assert not engine.risk.auto_trade and engine.risk.kill_switch
 
 
 def test_native_authorization_expiry_keeps_research_engine_running(tmp_path, monkeypatch):

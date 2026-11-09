@@ -212,6 +212,8 @@ def launch_setup(engine, *, limits_draft=None, limits_error=None):
             "markets": scoped_markets, "strategy_ids": list(profile.strategy_ids),
             "provider_ids": list(profile.provider_ids), "settlement_policy": profile.settlement_policy,
             "validation_pilot": profile.validation_pilot,
+            "owner_approved_recurring_lifecycle_deferral":
+                profile.owner_approved_recurring_lifecycle_deferral,
             "family_rule": profile.family_rule.model_dump(mode="json") if profile.family_rule else None})
     requirements = []
 

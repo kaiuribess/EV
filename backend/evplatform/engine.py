@@ -1022,6 +1022,23 @@ class Engine:
                     raise ValueError("Native execution venues are missing, duplicated or unreviewed")
             if self.risk.auto_trade and selected_venues != self.risk.native_enabled_venues:
                 raise ValueError("Pause native automation before changing its venue scope")
+        def reviewed_family_standby(report):
+            # An approved recurring family can be armed during a quiet market
+            # interval. This only defers *current market* facts: every actual
+            # order still passes the complete market, settlement, account and
+            # location preflight under the OMS lock.
+            if (auto_trade is not True or kill_switch is not False
+                    or selected_venues != frozenset({"prophetx"})):
+                return False
+            profile = self.native.profile_for("prophetx")
+            if (profile is None or profile.validation_pilot
+                    or not profile.owner_approved_recurring_lifecycle_deferral
+                    or profile.family_rule is None):
+                return False
+            codes = {item.code for item in report.blockers}
+            return ("family.no_current_market" in codes and codes <= {
+                "family.no_current_market", "runtime.settlement_reconciliation_supported",
+                "arming.paused", "arming.kill_switch"})
         def check_native_activation():
             if self.settings.mode in {"demo", "paper"} or not (auto_trade or kill_switch is False):
                 return
@@ -1040,7 +1057,8 @@ class Engine:
                 report = self.native.report()
             if (expected_launch_digest is None or expected_launch_digest != report.profile_digest):
                 raise ValueError("The reviewed launch scope changed; refresh and review before enabling")
-            if not self.settings.live_enabled or (not standby_release and not report.safe_to_arm):
+            if not self.settings.live_enabled or (not standby_release and not report.safe_to_arm
+                    and not reviewed_family_standby(report)):
                 raise ValueError("Native execution requires explicit enablement and all launch checks passing")
 
         # Reject an invalid combined enable/reset before modifying or persisting
