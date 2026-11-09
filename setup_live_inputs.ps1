@@ -7,6 +7,10 @@ $baseUrl = "http://127.0.0.1:$Port"
 $headers = @{ 'X-EV-Control' = 'local' }
 $sports = @('basketball_nba', 'americanfootball_nfl', 'icehockey_nhl', 'baseball_mlb')
 $books = @('pinnacle', 'fanduel', 'draftkings', 'caesars', 'betonline', 'bet365')
+# Parlay currently marks Pinnacle suppressed. A suppressed key rejects the
+# entire filtered WebSocket subscription, so keep it out of stream filters;
+# REST may still retain its separately timestamped research observations.
+$streamBooks = @($books | Where-Object { $_ -ne 'pinnacle' })
 
 $state = Invoke-RestMethod -Uri "$baseUrl/api/state" -TimeoutSec 10
 $native = Invoke-RestMethod -Uri "$baseUrl/api/native/orders" -TimeoutSec 10
@@ -61,17 +65,17 @@ function Configure-Input {
 # the same backend-only Parlay credential. A complete board does not establish
 # quote-specific active status, settlement equivalence or EV.
 Configure-Input 'parlay_ws' @{
-    sports = $sports; bookmakers = $books; stream_kinds = @('prop'); markets = @();
+    sports = $sports; bookmakers = $streamBooks; stream_kinds = @('prop'); markets = @();
     stream_limit = 1000; max_age_seconds = 30; account_tier = 'unknown'
 }
 Configure-Input 'parlay_game_ws' @{
-    sports = $sports; bookmakers = $books; stream_kinds = @('game');
+    sports = $sports; bookmakers = $streamBooks; stream_kinds = @('game');
     markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000; max_age_seconds = 600;
     baseline_refresh_seconds = 300; include_props = $false; account_tier = 'unknown'
 }
 if ($isPaper) {
     Configure-Input 'parlay_paper_input' @{
-        sports = $sports; bookmakers = $books; stream_kinds = @('game');
+        sports = $sports; bookmakers = $streamBooks; stream_kinds = @('game');
         markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000;
         max_age_seconds = 600; max_poll_age_seconds = 180;
         include_props = $false; account_tier = 'unknown'
