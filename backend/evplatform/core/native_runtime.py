@@ -1488,7 +1488,10 @@ class NativeRuntime:
                 fee_assumption_approved=m.fee_bound.evidence_kind == "owner_approved_assumption",
                 native_payout_usd=m.instrument.payout_per_unit_usd, native_quantity_unit=m.instrument.quantity_unit)
                 for m in self.mapper.mappings if m.instrument.venue == p.venue]
-            if not mappings: return None
+            # A reviewed family may be armed before its next fixture exists.
+            # Bind the real venue client now; dynamic mappings are installed
+            # only after each future market passes the exact family rule.
+            if not mappings and p.family_rule is None: return None
             if venue == "polymarket_us":
                 from ..venues.polymarket_us_execution import PolymarketUSExecutionVenue
                 adapter = PolymarketUSExecutionVenue(client, self.engine.risk.authority, mappings=mappings)

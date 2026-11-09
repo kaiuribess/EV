@@ -1,11 +1,13 @@
 """A declared supported settlement scope is never live account certification."""
 from datetime import timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from evplatform.core.config import RiskConfig
 from evplatform.core.models import utcnow
+from evplatform.core.native_runtime import NativeRuntime
 from evplatform.core.risk import RiskEngine
 from evplatform.venues.bridge import NativeExecutionVenue, VerifiedVenueMapping
 from evplatform.venues.prophetx import ProphetXClient, ProphetXSettings
@@ -13,6 +15,23 @@ from evplatform.venues.prophetx_financial import ProphetXAccountReview
 from evplatform.venues.prophetx_settlement import supports_prophetx_settlement_scope
 from test_launch_readiness import ready_fixture
 from test_native_book_normalization import mapping
+
+
+async def test_reviewed_family_binds_prophetx_adapter_before_future_market_exists():
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: pytest.fail("No network"))) as http:
+        client = ProphetXClient(ProphetXSettings(), http)
+        adapters = {}
+        profile = SimpleNamespace(venue="prophetx", environment=client.settings.environment,
+                                  family_rule=object())
+        runtime = SimpleNamespace(profile_for=lambda venue: profile,
+            mapper=SimpleNamespace(mappings=[]), owns_execution_lease=lambda: True,
+            manager=SimpleNamespace(adapters=adapters,
+                register=lambda venue, adapter: adapters.setdefault(venue, adapter)),
+            engine=SimpleNamespace(risk=SimpleNamespace(authority=object(), native_orders={})),
+            dispatch_guard=lambda intent: None)
+        adapter = NativeRuntime.bind_client(runtime, "prophetx", client)
+        assert adapter is adapters["prophetx"]
+        assert adapter.client is client and adapter.mappings == {}
 
 
 async def test_scope_requires_reviewed_cash_history_exact_mapping_and_current_fee(market):
