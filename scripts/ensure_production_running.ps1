@@ -102,20 +102,26 @@ function Invoke-OneShotGate {
     # A one-minute scheduler tick can miss a brief qualified price. Sample the
     # existing local release gate for part of this tick; the scanner and OMS
     # still perform their independent per-order checks. No provider API is polled.
-    $rapidPilot = $oneShotCurrent
+    # Both conditional first orders and reviewed recurring family scopes can
+    # have short-lived qualified prices. Sample only the local release gate;
+    # this does not poll a paid provider or submit an order itself.
+    $rapidGate = $oneShotCurrent -or $recurringCurrent
+    $statusPath = if ($oneShotCurrent) { $oneShotStatus } else {
+        Join-Path $dataDir 'native_recurring_status.json'
+    }
     $started = Get-Date
-    $sampleLimit = if ($rapidPilot) { 14 } else { 1 }
+    $sampleLimit = if ($rapidGate) { 14 } else { 1 }
     for ($sample = 0; $sample -lt $sampleLimit; $sample++) {
         & $python $gate --url $baseUrl | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-SupervisorEvent "One-shot gate returned $LASTEXITCODE; inspect its status file."
             break
         }
-        if (-not $rapidPilot) { break }
+        if (-not $rapidGate) { break }
         try {
-            $phase = (Get-Content -LiteralPath $oneShotStatus -Raw | ConvertFrom-Json).phase
+            $phase = (Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json).phase
         } catch {
-            Write-SupervisorEvent 'One-shot status could not be read; rapid sampling stopped.'
+            Write-SupervisorEvent 'Native release status could not be read; rapid sampling stopped.'
             break
         }
         if ($phase -ne 'pending' -or ((Get-Date) - $started).TotalSeconds -ge 52) { break }
