@@ -274,6 +274,10 @@ class LaunchProfile(StrictRecord):
     # narrow validation pilot; current account, market, quote and risk checks
     # remain mandatory at every stage of the order.
     validation_pilot: bool = False
+    # Explicitly reviewed, bounded ProphetX recurring scope may defer only
+    # historical OMS lifecycle certificates. Current account, market, private
+    # stream, location, reconciliation and per-order checks remain mandatory.
+    owner_approved_recurring_lifecycle_deferral: bool = False
     evidence: tuple[LaunchEvidence, ...] = ()
 
     @model_validator(mode="after")
@@ -291,6 +295,29 @@ class LaunchProfile(StrictRecord):
                 or self.family_rule.scope.additional_competitions
                 or self.min_reference_books < 3):
             raise ValueError("Conditional validation pilot requires a reviewed ProphetX NBA full-game moneyline family")
+        if self.owner_approved_recurring_lifecycle_deferral:
+            limits = self.limits
+            if (self.validation_pilot or self.environment != "production" or self.venue != "prophetx"
+                    or self.family_rule is None or self.family_rule.scope.sport != "basketball"
+                    or self.family_rule.scope.league != "NBA"
+                    or self.family_rule.scope.market_type != "moneyline"
+                    or self.family_rule.scope.period != "FULL"
+                    or self.family_rule.scope.phase != "pregame"
+                    or self.family_rule.scope.additional_competitions or self.min_reference_books < 3
+                    or self.provider_ids != ("parlay_game_ws",)
+                    or self.strategy_ids != ("native_positive_ev",)
+                    or self.settlement_policy != "prophetx_funded_cash_win_loss_halt_on_exception"
+                    or limits.cash_policy != "prophetx_exchange_rejection"
+                    or limits.available_cash_only or limits.stake_sizing != "capped"
+                    or limits.max_native_order_attempts is not None
+                    or limits.max_order_stake_usd > Decimal("5")
+                    or limits.max_total_exposure_usd > Decimal("20")
+                    or limits.max_native_daily_debit_usd is None
+                    or limits.max_native_daily_debit_usd > Decimal("20")
+                    or limits.daily_loss_limit_usd is None
+                    or limits.daily_loss_limit_usd > Decimal("20")
+                    or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1):
+                raise ValueError("Recurring lifecycle deferral requires the reviewed bounded ProphetX NBA scope")
         return self
 
     @model_validator(mode="after")
@@ -342,6 +369,8 @@ class LaunchProfile(StrictRecord):
         # pilot must not invalidate unrelated reviewed accounts/evidence.
         if not self.validation_pilot:
             payload.pop("validation_pilot")
+        if not self.owner_approved_recurring_lifecycle_deferral:
+            payload.pop("owner_approved_recurring_lifecycle_deferral")
         if self.family_rule is None:
             payload.pop("family_rule")
         else:
@@ -667,7 +696,8 @@ def evaluate_readiness(profile: LaunchProfile | None, runtime: RuntimeReadiness,
                 # A fresh, account/order-bound location result is required by
                 # the ProphetX preflight immediately before every submission.
                 continue
-            if (pilot and runtime.native_pilot_prior_attempts == 0
+            if ((pilot and runtime.native_pilot_prior_attempts == 0
+                    or profile.owner_approved_recurring_lifecycle_deferral)
                     and kind in {"native_lifecycle", "restart_recovery", "settlement_reconciliation"}
                     and not any(e.kind == kind for e in profile.evidence)):
                 continue

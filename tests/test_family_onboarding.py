@@ -701,6 +701,41 @@ def test_conditional_prophetx_first_trade_profile_uses_family_without_future_gam
     assert fixed_draft["launch_profile"]["limits"]["max_native_order_attempts"] == 1
     assert fixed_draft["approved"] is False
 
+    # The owner may defer only historical OMS certificates for this exact,
+    # bounded recurring family. Every other sport, market phase or wider
+    # monetary scope still needs its own review.
+    bounded = LiveLimits.model_validate({**fixed_limits.model_dump(),
+        "max_order_stake_usd": Decimal(5),
+        "daily_loss_limit_usd": Decimal(20)})
+    recurring = LaunchProfile.model_validate({**fixed_recurring.model_dump(),
+        "limits": bounded.model_dump(),
+        "owner_approved_recurring_lifecycle_deferral": True})
+    assert recurring.digest() != fixed_recurring.model_copy(update={"limits": bounded}).digest()
+    assert recurring.limits.max_native_order_attempts is None
+    for change in ({"venue": "kalshi"}, {"validation_pilot": True},
+                   {"provider_ids": ["parlay_game_ws", "other"]},
+                   {"limits": {**bounded.model_dump(),
+                               "max_order_stake_usd": Decimal("5.01")}},
+                   {"limits": {**bounded.model_dump(),
+                               "max_native_daily_debit_usd": Decimal("20.01")}}):
+        with pytest.raises(ValueError):
+            LaunchProfile.model_validate({**recurring.model_dump(), **change})
+
+    from evplatform.core.readiness import evaluate_readiness
+    from test_launch_readiness import ready_fixture
+    _, runtime_facts, _ = ready_fixture()
+    report = evaluate_readiness(recurring, runtime_facts)
+    codes = {item.code for item in report.blockers}
+    assert not {"evidence.native_lifecycle", "evidence.restart_recovery",
+                "evidence.settlement_reconciliation"} & codes
+    assert "profile.venue_mismatch" in codes  # All current facts still matter.
+    assert "evidence.account_access" in codes
+    failed = ready_fixture()[0].evidence[0].model_copy(update={
+        "kind": "native_lifecycle", "passed": False})
+    failed_report = evaluate_readiness(recurring.model_copy(update={
+        "evidence": (failed,)}), runtime_facts)
+    assert "evidence.native_lifecycle" in {item.code for item in failed_report.blockers}
+
 
 @pytest.mark.parametrize("fixed_mode,fixed_pilot", [(False, False), (True, False), (True, True)])
 def test_conditional_prophetx_pilot_reaches_existing_native_preflight(monkeypatch, fixed_mode, fixed_pilot):
@@ -1026,6 +1061,7 @@ def test_family_scope_digest_stays_fixed_across_new_fixture_and_checks_live_fact
     legacy["limits"].pop("external_exposure_scope")
     legacy["limits"].pop("cash_policy")
     legacy.pop("validation_pilot")
+    legacy.pop("owner_approved_recurring_lifecycle_deferral")
     assert digest == digest_json(legacy)
     facts = MarketReadiness(market_id="new-fixture-a", identity_verified=True,
         provider_mapping_verified=True, venue_mapping_verified=True,
