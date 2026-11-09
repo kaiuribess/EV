@@ -445,6 +445,40 @@ def test_recurring_live_button_uses_existing_controller_and_saved_scope(tmp_path
         assert engine.risk.auto_trade and not engine.risk.kill_switch
 
 
+def test_owner_recurring_switch_issues_scope_only_on_click_and_archives_on_off(tmp_path, monkeypatch):
+    from scripts import watch_native_one_shot, watch_native_recurring
+    from evplatform.core import recurring_switch
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(watch_native_one_shot, "LOCK_PATH", tmp_path / "controller.lock")
+    monkeypatch.setattr(watch_native_recurring, "AUTH_PATH", tmp_path / "data" / "recurring.json")
+    monkeypatch.setattr(watch_native_recurring, "STATUS_PATH", tmp_path / "data" / "status.json")
+    calls = []
+    def issue(_engine, digest):
+        calls.append(("authorize", digest))
+        watch_native_recurring.AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        watch_native_recurring.AUTH_PATH.write_text('{"authorization_id":"offline-owner-click"}')
+        return {"authorization_id": "offline-owner-click", "expires_at": "2099-01-01T00:00:00+00:00"}
+    monkeypatch.setattr(recurring_switch, "issue_prophetx_authorization", issue)
+    monkeypatch.setattr(watch_native_recurring, "tick", lambda url: calls.append(("tick", url)) or "pending")
+    with TestClient(native_app(tmp_path)) as client:
+        path = "/api/launch/recurring/switch"
+        assert client.post(path, json={"enabled": True, "expected_launch_digest": "a" * 64}).status_code == 403
+        assert not calls
+        response = client.post(path, headers=HEADERS,
+            json={"enabled": True, "expected_launch_digest": "a" * 64})
+        assert response.status_code == 200 and response.json()["phase"] == "pending"
+        assert calls[0] == ("authorize", "a" * 64)
+        assert len([call for call in calls if call[0] == "tick"]) == 1
+        assert client.get("/api/native/orders").json()["orders"] == []
+        stopped = client.post(path, headers=HEADERS, json={"enabled": False})
+        assert stopped.status_code == 200 and stopped.json()["phase"] == "disabled"
+        assert not watch_native_recurring.AUTH_PATH.exists()
+        engine = client.app.state.engine
+        assert engine.risk.kill_switch and not engine.risk.auto_trade
+        assert client.get("/api/launch/recurring/status").json()["phase"] == "disabled"
+
+
 def test_operator_can_edit_limits_draft_without_arming_or_changing_runtime_risk(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with TestClient(native_app(tmp_path)) as client:

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -41,6 +42,12 @@ class RecurringActivationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     venue: Literal["prophetx"]
     expected_launch_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RecurringSwitchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+    expected_launch_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ToggleBody(BaseModel):
@@ -474,6 +481,75 @@ def create_app(settings=None):
             raise HTTPException(409, f"Recurring activation remains {phase}")
         return {"phase": phase, "venue": body.venue,
                 "authorization_expires_at": engine.risk.native_authorization_expires_at}
+
+    @app.get("/api/launch/recurring/status")
+    async def recurring_switch_status():
+        from scripts import watch_native_recurring as recurring
+        status = {}
+        try:
+            status = json.loads(recurring.STATUS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        authorization = {}
+        try:
+            authorization = json.loads(recurring.AUTH_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        return {"phase": status.get("phase", "disabled"),
+                "detail": status.get("detail", "No recurring authorization is saved"),
+                "authorization_expires_at": authorization.get("expires_at"),
+                "armed": bool(engine.risk.auto_trade and not engine.risk.kill_switch
+                    and engine.risk.native_enabled_venues == frozenset({"prophetx"})),
+                "kill_reason": engine.risk.kill_reason}
+
+    @app.post("/api/launch/recurring/switch")
+    async def recurring_switch(body: RecurringSwitchBody):
+        """The local owner switch records a fresh 24-hour review, then uses the
+        existing supervised release. Off archives its authorization and stops
+        new orders. Neither action calls a venue placement method.
+        """
+        if engine.settings.mode != "production":
+            raise HTTPException(409, "ProphetX Live requires production")
+        from scripts import watch_native_recurring as recurring
+        from .core.recurring_switch import issue_prophetx_authorization
+        from .core.paths import runtime_data_file
+        from uuid import uuid4
+        if not body.enabled:
+            try:
+                with recurring.shared._single_controller():
+                    await engine.control(auto_trade=False, kill_switch=True)
+                    if recurring.AUTH_PATH.exists():
+                        audit = runtime_data_file("recurring_switch_audit", engine.settings.data_dir)
+                        audit.mkdir(parents=True, exist_ok=True)
+                        recurring.AUTH_PATH.replace(audit / f"{uuid4()}.retired-authorization.json")
+                    recurring._status("disabled", "Owner turned ProphetX Live off")
+            except (OSError, ValueError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return {"phase": "disabled", "armed": False}
+        if not body.expected_launch_digest:
+            raise HTTPException(409, "Refresh the reviewed launch scope before turning Live on")
+        if engine.risk.auto_trade and not engine.risk.kill_switch:
+            return {"phase": "armed", "armed": True,
+                    "authorization_expires_at": engine.risk.native_authorization_expires_at}
+        try:
+            with recurring.shared._single_controller():
+                if recurring.shared.AUTH_PATH.exists():
+                    prior = json.loads(recurring.shared.AUTH_PATH.read_text(encoding="utf-8"))
+                    expiry = recurring.shared._time(prior.get("expires_at"))
+                    if expiry is None or expiry > datetime.now().astimezone():
+                        raise ValueError("A current or invalid one-shot authorization conflicts with recurring Live")
+                async with engine.native._account_probe_lock:
+                    async with engine.native.manager.lock:
+                        authorization = issue_prophetx_authorization(
+                            engine, body.expected_launch_digest)
+                recurring._status("pending", "Owner approved reviewed ProphetX Live scope",
+                                  authorization["authorization_id"])
+            phase = await asyncio.to_thread(recurring.tick,
+                f"http://127.0.0.1:{engine.settings.port}")
+        except (OSError, ValueError, httpx.HTTPError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"phase": phase, "armed": bool(engine.risk.auto_trade and not engine.risk.kill_switch),
+                "authorization_expires_at": authorization["expires_at"]}
 
     @app.post("/api/orders/{order_id}/cancel")
     async def cancel(order_id: str):

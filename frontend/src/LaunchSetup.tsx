@@ -7,6 +7,7 @@ import './LaunchSetup.css'
 import { AccountCash } from './AccountCash'
 
 type Props = { mutate: (path: string, body: Json) => Promise<Json>; notify: (message: string, error?: boolean) => void; disabled: boolean }
+type RecurringStatus = { phase: string; detail: string; authorization_expires_at: string | null; armed: boolean; kill_reason: string }
 const amount = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? money(value) : 'Not configured'
 function Limits({ report, complete = false }: { report: SetupReport; complete?: boolean }) {
   const values = report.risk_policy.values
@@ -111,10 +112,13 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
   const [selectedVenue, setSelectedVenue] = useState('prophetx')
   const [reviewVenue, setReviewVenue] = useState<string | null>(null)
   const [confirmed, setConfirmed] = useState(false)
+  const [recurring, setRecurring] = useState<RecurringStatus | null>(null)
+  const [switchReview, setSwitchReview] = useState<SetupReport | null>(null)
   const mounted = useRef(true)
   const activeRequest = useRef<AbortController | null>(null)
   const busy = useRef(false)
   const dialog = useRef<HTMLDialogElement>(null)
+  const switchDialog = useRef<HTMLDialogElement>(null)
   const fetchReport = useCallback(async () => {
     activeRequest.current?.abort()
     const controller = new AbortController()
@@ -122,11 +126,15 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
     const timeout = setTimeout(() => controller.abort(), 8000)
     setLoading(true)
     try {
-      const result = parseSetupReport(await request('/api/launch/setup', undefined, controller.signal))
+      const [raw, status] = await Promise.all([
+        request('/api/launch/setup', undefined, controller.signal),
+        request('/api/launch/recurring/status', undefined, controller.signal),
+      ])
+      const result = parseSetupReport(raw)
       const received = Date.now()
       if (controller.signal.aborted || !mounted.current) throw new Error('Launch check interrupted. Refresh before continuing.')
       if (!setupIsCurrent(result, received, received, null)) throw new Error('The launch report is stale or has an invalid clock. Refresh before continuing.')
-      setReport(result); setReceivedAt(received); setClock(received); setError(null)
+      setReport(result); setRecurring(status as RecurringStatus); setReceivedAt(received); setClock(received); setError(null)
       return { report: result, receivedAt: received }
     } catch (failure) {
       if (mounted.current && activeRequest.current === controller) {
@@ -144,7 +152,7 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
     const refresh = () => { if (!document.hidden && !busy.current && !activeRequest.current) void fetchReport().catch(() => {}) }
     const visibility = () => {
       setClock(Date.now())
-      if (document.hidden) { activeRequest.current?.abort(); setReceivedAt(null); setReview(null); setReviewVenue(null); setConfirmed(false) }
+       if (document.hidden) { activeRequest.current?.abort(); setReceivedAt(null); setReview(null); setSwitchReview(null); setReviewVenue(null); setConfirmed(false) }
       else refresh()
     }
     refresh()
@@ -157,6 +165,10 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
     if (review && !dialog.current?.open) dialog.current?.showModal()
     else if (!review && dialog.current?.open) dialog.current?.close()
   }, [review])
+  useEffect(() => {
+    if (switchReview && !switchDialog.current?.open) switchDialog.current?.showModal()
+    else if (!switchReview && switchDialog.current?.open) switchDialog.current?.close()
+  }, [switchReview])
   const current = setupIsCurrent(report, receivedAt, clock, error)
   const gate = venueActivationGate(report, receivedAt, clock, selectedVenue, error)
   const prepareReview = async () => {
@@ -207,9 +219,53 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
   const pending = report?.requirements.filter(r => r.status !== 'passed') ?? []
   const pilot = report?.launch_scope.find(scope => scope.venue === selectedVenue)?.validation_pilot === true
   const reviewPilot = review?.launch_scope.find(scope => scope.venue === reviewVenue)?.validation_pilot === true
+  const recurringSession = !!recurring?.authorization_expires_at
+    && Date.parse(recurring.authorization_expires_at) > clock
+    && ['armed', 'pending', 'ready', 'arming', 'waiting_for_live_checks'].includes(recurring.phase)
+  const prophetxScope = report?.launch_scope.find(scope => scope.venue === 'prophetx')
+  const switchAvailable = current && report?.environment === 'production' && !!prophetxScope
+    && prophetxScope.validation_pilot !== true && report.risk_policy.applied
+  const turnOff = async () => {
+    setWorking(true); busy.current = true
+    try {
+      await mutate('/api/launch/recurring/switch', { enabled: false })
+      notify('ProphetX Live is off. Research monitoring continues.')
+      await fetchReport()
+    } catch (failure) { notify(failure instanceof Error ? failure.message : 'Live could not be stopped.', true) }
+    finally { busy.current = false; setWorking(false) }
+  }
+  const turnOn = async () => {
+    if (!switchReview || busy.current) return
+    setWorking(true); busy.current = true
+    try {
+      const fresh = await fetchReport()
+      const reviewed = switchReview.activation.by_venue?.prophetx?.scope_digest
+      const actual = fresh.report.activation.by_venue?.prophetx?.scope_digest
+      if (!reviewed || reviewed !== actual) throw new Error('Launch scope changed. Review it again before turning Live on.')
+      const result = await mutate('/api/launch/recurring/switch', {
+        enabled: true, expected_launch_digest: reviewed,
+      })
+      setSwitchReview(null)
+      notify(result.armed ? 'ProphetX Live is on for up to 24 hours.' : `ProphetX authorization saved; controller is ${String(result.phase)}. No orders can route until checks pass.`)
+      await fetchReport()
+    } catch (failure) {
+      setSwitchReview(null)
+      notify(failure instanceof Error ? failure.message : 'ProphetX Live remains off.', true)
+      void fetchReport().catch(() => {})
+    } finally { busy.current = false; setWorking(false) }
+  }
   return <section className="panel launch-setup" aria-labelledby={id}>
     <header className="setup-header"><div><span className="eyebrow">REAL TRADING SETUP</span><h2 id={id}>{current ? gate.allowed ? 'Ready for your final review' : report?.switches.auto_trade && !report.switches.kill_switch && report.environment === 'production' ? 'Real trading is enabled' : 'Finish setup before real trading' : 'Checking launch readiness'}</h2><p>Connected feeds, verified markets and trading permission are checked separately.</p></div><button className="button quiet" onClick={() => void fetchReport().catch(() => {})} disabled={loading || working}><RefreshCw size={14} className={loading ? 'setup-spin' : ''} />Refresh checks</button></header>
     {error && <div className="setup-alert" role="alert"><TriangleAlert size={18} /><span>{error} Previous facts below are not current approval.</span></div>}
+    {report?.environment === 'production' && <div className="setup-subpanel" aria-label="ProphetX Live switch">
+      <div className="setup-section-title"><h3>ProphetX Live</h3><span className={`setup-pill ${recurring?.armed ? 'good' : ''}`}>{recurring?.armed ? 'ON' : recurringSession ? 'STANDBY' : 'OFF'}</span></div>
+      <p>{recurring?.armed ? 'Recurring real-money orders are enabled only for the reviewed ProphetX scope.' : recurringSession ? 'The owner authorization is saved. The controller is waiting for required launch checks.' : 'Research scanning continues while real-money orders are off.'}</p>
+      <p className="setup-note">{recurring?.detail ?? 'Checking controller state.'}{recurring?.authorization_expires_at && recurringSession ? ` Authorization expires ${new Date(recurring.authorization_expires_at).toLocaleString()}.` : ''}{recurring?.kill_reason && !recurring?.armed ? ` Emergency stop: ${recurring.kill_reason}.` : ''}</p>
+      {!recurring?.armed && <button className="button primary" disabled={disabled || working || loading || !switchAvailable}
+        onClick={() => { if (report) setSwitchReview(report) }}>Review and turn ProphetX Live on</button>}
+      {recurringSession && <button className="button quiet" disabled={disabled || working || loading || !current}
+        onClick={() => void turnOff()}>Turn ProphetX Live off</button>}
+    </div>}
     {!report ? <p className="setup-placeholder">{loading ? 'Reading the local engine’s current accounts and launch requirements…' : 'No current launch information is available.'}</p> : <>
       {!current && !error && <div className="setup-alert"><TriangleAlert size={18} /><span>This snapshot has expired. Refresh before relying on account or readiness facts.</span></div>}
       <div className="setup-counts" aria-label="Real and synthetic signal counts">
@@ -240,6 +296,15 @@ export function LaunchSetup({ mutate, notify, disabled }: Props) {
         <div className="setup-section-title"><h3>What still needs to pass</h3><span>{current ? `${pending.filter(item => !deferredPilotRequirement(report, item.code)).length} blocking · ${pending.filter(item => deferredPilotRequirement(report, item.code)).length} pilot-deferred` : 'Current status unconfirmed'}</span></div><div className="setup-checklist">{report.requirements.map(item => <details key={item.code}><summary>{current && item.status === 'passed' ? <CheckCircle2 size={17} className="good" /> : <LockKeyhole size={16} />}<strong>{item.title}</strong><span>{!current ? 'Unconfirmed' : item.status === 'passed' ? 'Passed' : deferredPilotRequirement(report, item.code) ? 'After pilot' : 'Pending'}</span></summary><p>{item.detail}</p></details>)}</div>
       </div></>}
     <footer className="setup-activation"><div><label className="setup-venue-select">Exchange to enable <select value={selectedVenue} disabled={working} onChange={event => { setSelectedVenue(event.target.value); setReview(null); setReviewVenue(null); setConfirmed(false) }}><option value="prophetx">ProphetX</option><option value="novig">Novig</option><option value="kalshi">Kalshi</option><option value="polymarket_us">Polymarket US</option></select></label><strong>{gate.allowed ? pilot ? 'One-order pilot ready for review' : `${human(selectedVenue)} ready for final review` : `${human(selectedVenue)} trading remains unavailable until checks pass`}</strong><p>{gate.reason}</p><small>{current && report ? `Checked ${new Date(report.checked_at).toLocaleTimeString()}` : 'Awaiting a fresh report'} · No order is placed by this setup report.</small></div><button className="button primary" disabled={disabled || working || loading || !gate.allowed} onClick={() => void prepareReview()}><ShieldCheck size={16} />{working ? 'Checking…' : pilot ? 'Review one-order pilot' : `Enable ${human(selectedVenue)}`}</button></footer>
+    <dialog className="setup-dialog" ref={switchDialog} aria-labelledby={`${id}-live-review`} onCancel={event => { if (working) event.preventDefault(); else setSwitchReview(null) }}>
+      {switchReview && <><header><div><span className="eyebrow">OWNER LIVE SWITCH</span><h2 id={`${id}-live-review`}>Turn ProphetX Live on for 24 hours</h2></div><button className="icon-button" aria-label="Close Live review" disabled={working} onClick={() => setSwitchReview(null)}><X size={19} /></button></header>
+        <p>This action renews only the reviewed ProphetX pregame NBA full-game two-way moneyline family for the account ending {switchReview.launch_scope.find(scope => scope.venue === 'prophetx')?.account_fingerprint.slice(-8)}. Future matching games need no separate approval.</p>
+        <p>Parlay FanDuel, DraftKings, Caesars and bet365: at least three complete books, provisional equal weights. Known stale, degraded, topped-up, suspended, withdrawn or incomplete quotes are rejected. Unknown individual selection age and active status remain disclosed source assumptions.</p>
+        <p>Owner-assumed 2% fee on winning profit; 1% payout uncertainty; minimum 1.5% net EV. $5 maximum order debit and loss; $20 open exposure, daily debit and daily realized loss; one open order and one new order per minute. Current account, location, market, depth and OMS checks still apply.</p>
+        <Limits report={switchReview} complete />
+        <p className="setup-note">The switch records a new expiring authorization. It cannot clear an unresolved account or order failure. Research keeps running when Live is off or expires.</p>
+        <div className="setup-dialog-actions"><button className="button quiet" disabled={working} onClick={() => setSwitchReview(null)}>Keep off</button><button className="button primary" disabled={working || disabled || !current} onClick={() => void turnOn()}>{working ? 'Checking current scope…' : 'Approve scope and turn on'}</button></div></>}
+    </dialog>
     <dialog className="setup-dialog" ref={dialog} aria-labelledby={`${id}-review`} onCancel={event => { if (working) event.preventDefault(); else { setReview(null); setConfirmed(false) } }}>
       {review && <><header><div><span className="eyebrow">FINAL OWNER REVIEW</span><h2 id={`${id}-review`}>{reviewPilot ? `Enable one-order ${human(reviewVenue)} pilot` : `Enable ${human(reviewVenue)} real-money trading`}</h2></div><button className="icon-button" aria-label="Close activation review" disabled={working} onClick={() => setReview(null)}><X size={19} /></button></header><p>{reviewVenue === 'prophetx' && !reviewPilot ? 'Recurring ProphetX automation is bounded by its saved authorization, which cannot exceed 24 hours. Research scanning continues after expiry.' : 'Automation may place real orders only within this reviewed exchange scope for five minutes. Research scanning continues after permission expires.'}</p><div className="setup-review-accounts">{review.launch_scope.filter(scope => scope.venue === reviewVenue).map(scope => <section key={scope.venue}><h3>{human(scope.venue)} · {human(scope.environment)}</h3><p>Account fingerprint <code>{scope.account_fingerprint}</code></p><ul>{scope.markets.map(market => <li key={market.id}><strong>{market.name}</strong><small>{market.id}</small></li>)}</ul><dl><div><dt>Strategies</dt><dd>{scope.strategy_ids.join(', ')}</dd></div><div><dt>Reference providers</dt><dd>{scope.provider_ids.join(', ')}</dd></div><div><dt>Settlement policy</dt><dd>{scope.settlement_policy}</dd></div></dl></section>)}</div><Limits report={review} complete /><p className="setup-note">Positive estimated EV does not guarantee profit. {reviewPilot ? 'This pilot permits one native order attempt and pauses automatic trading after that attempt. The reviewed limits shown above apply.' : reviewVenue === 'prophetx' ? 'The saved recurring authorization, launch profile and central risk engine must all agree before orders can route.' : 'Order submission remains subject to the central risk engine and this five-minute authorization.'}</p><label className="setup-confirmation"><input type="checkbox" checked={confirmed} disabled={working} onChange={e => setConfirmed(e.target.checked)} /><span>I confirm this exchange, its markets and these limits for real-money automation.</span></label>{!dialogCurrent && <p role="alert" className="setup-inline-error">The current checks or reviewed scope changed. Close this review and refresh.</p>}<div className="setup-dialog-actions"><button className="button quiet" disabled={working} onClick={() => setReview(null)}>Keep paused</button><button className="button primary" disabled={!confirmed || !dialogCurrent || disabled || working} onClick={() => void enable()}>{working ? 'Checking current scope…' : reviewPilot ? 'Confirm one-order pilot' : 'Confirm and enable real trading'}</button></div></>}
     </dialog>
