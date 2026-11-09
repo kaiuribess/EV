@@ -1560,6 +1560,8 @@ class NativeRuntime:
                         if fills:
                             await self.manager.record_private_fills(order.id, fills, adapter=adapter)
         if frame.get("type") in {"transport_invalidated", "snapshot_required"}:
+            if venue == "prophetx":
+                self.account_probe_errors[venue] = "NativeTransportInvalidated"
             self.invalidate_account(venue)
             if self.mapper:
                 for market, book in self.mapper.invalidate(venue):
@@ -1578,6 +1580,8 @@ class NativeRuntime:
                 or frame.get("type") in {"fill", "user_order", "market_position"}):
             if self.engine.risk.native_orders:
                 self.dirty_venues.add(venue)
+            if venue == "prophetx":
+                self.account_probe_errors[venue] = "PrivateOrderOrPositionUpdate"
             self.invalidate_account(venue)
         if self.mapper:
             for market, book in self.mapper.process(venue, client, frame):
@@ -2145,6 +2149,7 @@ class NativeRuntime:
             exchange_index = (await self._kalshi_account_exchange_index(client, p)
                 if isinstance(client, KalshiClient) else None)
             async with self.manager.lock:
+                self.account_probe_errors[p.venue] = "ProbeInProgress"
                 self.invalidate_account(p.venue)
                 self.last_account_probe = time.monotonic()
                 self._last_account_probes[p.venue] = self.last_account_probe
@@ -2174,6 +2179,7 @@ class NativeRuntime:
             snapshot, token, exchange_index = await read_account()
             async with self.manager.lock:
                 if not unchanged(token):
+                    self.account_probe_errors[p.venue] = "ProbeDiscardedAfterConcurrentUpdate"
                     self.last_account_probe = 0.0
                     self._last_account_probes.pop(p.venue, None)
                     return
@@ -2202,6 +2208,7 @@ class NativeRuntime:
                 snapshot, token, exchange_index = await read_account()
             async with self.manager.lock:
                 if not unchanged(token):
+                    self.account_probe_errors[p.venue] = "ProbeDiscardedAfterConcurrentUpdate"
                     self.last_account_probe = 0.0
                     self._last_account_probes.pop(p.venue, None)
                     return
