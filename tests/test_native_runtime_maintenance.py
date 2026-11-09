@@ -75,7 +75,9 @@ async def test_empty_prophetx_account_probe_failure_blocks_orders_without_consum
     assert not risk.kill_switch
 
 
-async def test_empty_prophetx_incomplete_inventory_blocks_orders_without_emergency_stop(system, monkeypatch):
+@pytest.mark.parametrize("identity_verified", [True, False])
+async def test_empty_prophetx_incomplete_inventory_blocks_orders_without_emergency_stop(
+        system, monkeypatch, identity_verified):
     manager, risk, _, adapter = system
     runtime = runtime_for(system)
     client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
@@ -88,8 +90,9 @@ async def test_empty_prophetx_incomplete_inventory_blocks_orders_without_emergen
         SimpleNamespace(plugin=SimpleNamespace(client=client))})
     runtime.bind_client = lambda venue, native_client: adapter
     risk.kill_switch = False
-    snapshot = SimpleNamespace(identity_verified=True, reconciled=False,
-        account_fingerprint="a" * 64, reason="OFFLINE reporting watermark lag")
+    snapshot = SimpleNamespace(identity_verified=identity_verified, reconciled=False,
+        account_fingerprint="a" * 64 if identity_verified else "",
+        reason="OFFLINE reporting or authentication gap")
     probe = AsyncMock(return_value=snapshot)
     monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account", probe)
     await runtime.refresh_account()
@@ -124,6 +127,7 @@ async def test_prophetx_incomplete_inventory_with_exposure_still_halts(system, m
             account_fingerprint="a" * 64, reason="OFFLINE unresolved inventory")))
     await runtime.refresh_account()
     assert risk.kill_switch and not risk.auto_trade
+    assert risk.kill_reason == "Native account inventory differs from the managed order ledger"
 
 
 async def test_prophetx_foreign_account_still_halts_without_local_exposure(system, monkeypatch):
@@ -144,6 +148,7 @@ async def test_prophetx_foreign_account_still_halts_without_local_exposure(syste
             account_fingerprint="b" * 64, reason="")))
     await runtime.refresh_account()
     assert risk.kill_switch and not risk.auto_trade
+    assert risk.kill_reason == "Native account identity differs from the reviewed profile"
 
 
 async def test_prophetx_account_probe_failure_with_external_exposure_halts(system, monkeypatch):

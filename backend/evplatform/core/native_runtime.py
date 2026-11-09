@@ -2232,8 +2232,8 @@ class NativeRuntime:
                         or snapshot.account_fingerprint != getattr(p, "account_fingerprint", snapshot.account_fingerprint)
                         or (not snapshot.reconciled and not pending)):
                     # ProphetX's funded-cash profile may see a temporarily
-                    # incomplete reporting/private watermark despite an empty
-                    # local account. Its unreconciled snapshot remains installed
+                    # missing identity or incomplete reporting/private watermark
+                    # despite an empty local account. Its invalid snapshot remains installed
                     # so *every* order preflight is blocked until a complete
                     # authenticated read succeeds. Do not consume a bounded
                     # recurring lease for this read-only lag. A foreign account
@@ -2241,13 +2241,21 @@ class NativeRuntime:
                     # stop rather than a speculative retry.
                     empty_prophetx_read = (p.venue == "prophetx"
                         and p.limits.cash_policy == "prophetx_exchange_rejection"
-                        and snapshot.identity_verified
-                        and snapshot.account_fingerprint == getattr(p, "account_fingerprint", snapshot.account_fingerprint)
-                        and not snapshot.reconciled
+                        # A missing authenticated identity during reconnect is
+                        # unavailable evidence, not a confirmed foreign account.
+                        # A *verified* foreign fingerprint remains a hard stop.
+                        and (not snapshot.identity_verified or
+                             snapshot.account_fingerprint == getattr(p, "account_fingerprint", snapshot.account_fingerprint))
                         and not any(o.venue == p.venue for o in self.engine.risk.native_orders.values())
                         and not any(row.venue == p.venue for row in self.external_positions))
                     if not empty_prophetx_read:
-                        self.engine.risk.halt("Native account inventory differs from the managed order ledger")
+                        if not snapshot.identity_verified:
+                            reason = "Native account identity unavailable with existing exposure"
+                        elif snapshot.account_fingerprint != getattr(p, "account_fingerprint", snapshot.account_fingerprint):
+                            reason = "Native account identity differs from the reviewed profile"
+                        else:
+                            reason = "Native account inventory differs from the managed order ledger"
+                        self.engine.risk.halt(reason)
         except asyncio.CancelledError:
             self.invalidate_account(p.venue)
             raise
