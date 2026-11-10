@@ -25,6 +25,13 @@ STATISTICS = {
     "player_double_double": "double_double", "player_triple_double": "triple_double",
     "player_passing_yards": "passing_yards", "player_rushing_yards": "rushing_yards",
     "player_receiving_yards": "receiving_yards", "player_receptions": "receptions",
+    "player_pass_yds": "passing_yards", "player_pass_tds": "passing_touchdowns",
+    "player_pass_completions": "pass_completions", "player_pass_attempts": "pass_attempts",
+    "player_rush_yds": "rushing_yards", "player_rush_attempts": "rushing_attempts",
+    "player_rec_yds": "receiving_yards", "player_reception_yds": "receiving_yards",
+    "player_kicking_points": "kicking_points", "player_field_goals": "field_goals_made",
+    "player_anytime_td": "anytime_touchdown", "player_first_td": "first_touchdown",
+    "player_1st_td": "first_touchdown",
     "pitcher_strikeouts": "pitcher_strikeouts", "batter_hits": "batter_hits",
     "batter_total_bases": "batter_total_bases", "batter_rbi": "batter_rbi",
     "batter_runs": "batter_runs", "batter_home_runs": "batter_home_runs",
@@ -33,7 +40,10 @@ STATISTICS = {
 BASKETBALL_STATS = {"points", "rebounds", "assists", "threes", "points_rebounds_assists",
                     "points_rebounds", "points_assists", "rebounds_assists", "steals",
                     "blocks", "turnovers", "double_double", "triple_double"}
-FOOTBALL_STATS = {"passing_yards", "rushing_yards", "receiving_yards", "receptions"}
+FOOTBALL_STATS = {"passing_yards", "rushing_yards", "receiving_yards", "receptions",
+                  "passing_touchdowns", "pass_completions", "pass_attempts",
+                  "rushing_attempts", "kicking_points", "field_goals_made", "anytime_touchdown",
+                  "first_touchdown"}
 
 
 def compile_priors(spec: dict, base: PricingConfig | None = None) -> PricingConfig:

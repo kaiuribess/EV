@@ -462,7 +462,7 @@ class ProphetXMonitorConfig(BaseModel):
         description="Upcoming event subscription horizon; does not relax quote freshness or identity matching")
     discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
     max_discovered_events: int = Field(default=20, ge=1, le=50)
-    max_discovered_prop_subscriptions: int = Field(default=100, ge=0, le=400,
+    max_discovered_prop_subscriptions: int = Field(default=400, ge=0, le=400,
         description="Read-only event/subtype prop channels, bounded again by the returned Talaria channel limit")
     account_review: ProphetXAccountReview | None = Field(default=None,
         description="Non-secret account inception/funded-cash evidence; does not authorize orders")
@@ -1193,7 +1193,7 @@ class NativeMonitor(Plugin):
     async def _refresh_discovery_once(self, *, preserve_scope=False):
         from ..integrations.prophetx_discovery import active_tournament_options, open_event_ids
         from ..core.native_research import _aware
-        from ..venues.prophetx_props import PROPHETX_NBA_PROP_SUBTYPES
+        from ..venues.prophetx_props import prophetx_prop_subtypes
         try:
             config = self.context.config
             engine = getattr(self, "engine", None)
@@ -1290,8 +1290,10 @@ class NativeMonitor(Plugin):
                         if not isinstance(row, dict):
                             continue
                         subtype = row.get("sub_type")
+                        reviewed_subtypes = prophetx_prop_subtypes(
+                            str(events[event_id].get("league")))
                         if (row.get("status") == "active" and isinstance(subtype, str)
-                                and subtype.startswith("player_")
+                                and (subtype.startswith("player_") or subtype in reviewed_subtypes)
                                 and (event_id, subtype) not in {(item[-2], item[-1])
                                                                  for item in prop_candidates}):
                             # Some current V4 prop rows omit selections/line.
@@ -1310,16 +1312,15 @@ class NativeMonitor(Plugin):
                                 and row.get("statistic") == market.statistic
                                 and row.get("period") in {"full", "full_game", "FULL"}
                                 and str(row.get("line")) == str(market.line)), default=0)
-                            reviewed_nba = (event.get("tournament_id") == 132
-                                and subtype in PROPHETX_NBA_PROP_SUBTYPES)
-                            family = (PROPHETX_NBA_PROP_SUBTYPES[subtype][0]
-                                if reviewed_nba else subtype.removeprefix("player_total_")
+                            reviewed_prop = subtype in reviewed_subtypes
+                            family = (reviewed_subtypes[subtype][0]
+                                if reviewed_prop else subtype.removeprefix("player_total_")
                                 if subtype.startswith("player_total_") else None)
                             family_score = max((count for market, count in related
                                 if market.statistic == family), default=0)
-                            prop_candidates.append((-int(reviewed_nba), -int(exact >= 3), -exact,
+                            prop_candidates.append((-int(reviewed_prop), -int(exact >= 3), -exact,
                                 -int(family_score >= 3), -family_score, event_id, subtype))
-            configured_prop_cap = config.get("max_discovered_prop_subscriptions", 100)
+            configured_prop_cap = config.get("max_discovered_prop_subscriptions", 400)
             returned_limit = getattr(self.client, "_channel_limit", None)
             prop_cap = min(configured_prop_cap,
                 max(0, int(returned_limit) - len(selected)) if returned_limit is not None

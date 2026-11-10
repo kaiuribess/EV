@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from evplatform.core.native_runtime import NativeRuntime
 from evplatform.venues.prophetx import ProphetXClient, ProphetXSettings
 from evplatform.venues.prophetx_market_data import ProphetXMarketData
@@ -213,6 +215,38 @@ def test_scoped_stream_rejects_one_sided_or_mismatched_prop_thresholds():
     assert data.rejected_frames == 1
     assert data.catalog[("123", "301")]["strikes"] == {}
     assert data.snapshot(now=NOW, connected=True)["current_player_prop_markets"] == 0
+
+
+@pytest.mark.parametrize(("sub_type", "market_name", "statistic", "selections", "line"), [
+    ("player_total_passing_yards", "Jayden Daniels Passing Yards", "passing_yards",
+     ("over 244.5", "under 244.5"), "244.5"),
+    ("player_total_receptions", "Malik Nabers Total Receptions", "receptions",
+     ("over 5.5", "under 5.5"), "5.5"),
+    ("to_score_a_touchdown", "Malik Nabers To Score a Touchdown", "anytime_touchdown",
+     ("YES", "NO"), "0.5"),
+])
+def test_scoped_stream_completes_exact_nfl_prop_identity(
+        sub_type, market_name, statistic, selections, line):
+    native_type = "moneyline" if sub_type == "to_score_a_touchdown" else "total"
+    payload = {"data": {"123": [{"id": 401, "name": market_name,
+        "type": native_type, "sub_type": sub_type, "period": None,
+        "status": "active", "selections": None}]}}
+    data = ProphetXMarketData()
+    data.replace_catalog([payload], ["123"], observed_at=NOW)
+    update = {"event": "v2.market_selections",
+        "scope": {"event_id": 123, "sub_type": sub_type}, "envelope": {"op": "u"},
+        "data": {"sport_event_id": 123, "market_id": 401, "info": {
+            "id": 401, "status": "active", "sequence_number": 1, "selections": [
+                [{"strike_id": "nfl-over", "outcome_id": 12, "name": selections[0],
+                  "price": -110, "value": "8.25", "updated_at": 1792731906663622000}],
+                [{"strike_id": "nfl-under", "outcome_id": 13, "name": selections[1],
+                  "price": 105, "value": "5.50", "updated_at": 1792731906663622000}],
+            ]}}}
+    data.apply(update, received_at=NOW)
+    market = data.catalog[("123", "401")]
+    assert (market["statistic"], market["line"], market["period"]) == (statistic, line, None)
+    assert {row["name"] for row in market["strikes"].values()} == {"Over", "Under"}
+    assert data.snapshot(now=NOW, connected=True)["current_player_prop_markets"] == 1
 
 
 def test_native_research_read_uses_the_existing_monitor_and_never_calls_placement():

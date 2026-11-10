@@ -15,7 +15,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from .models import utcnow
-from .config import NBA_PLAYER_PROP_STATISTICS, TrustedPilotMarketScope
+from .config import (NBA_PLAYER_PROP_STATISTICS, NFL_PLAYER_PROP_STATISTICS,
+                     TrustedPilotMarketScope)
 
 
 Environment = Literal["sandbox", "production"]
@@ -294,6 +295,7 @@ class LaunchProfile(StrictRecord):
                 or self.family_rule.scope.period != "FULL"
                 or self.family_rule.scope.additional_competitions
                 or self.family_rule.scope.additional_player_prop_statistics
+                or self.family_rule.scope.additional_nfl_player_prop_statistics
                 or self.min_reference_books < 3):
             raise ValueError("Conditional validation pilot requires a reviewed ProphetX NBA full-game moneyline family")
         if self.owner_approved_recurring_lifecycle_deferral:
@@ -304,12 +306,20 @@ class LaunchProfile(StrictRecord):
                     or self.family_rule.scope.market_type != "moneyline"
                     or self.family_rule.scope.period != "FULL"
                     or self.family_rule.scope.phase != "pregame"
-                    or self.family_rule.scope.additional_competitions or self.min_reference_books < 3
+                    or frozenset(self.family_rule.scope.additional_competitions) not in {
+                        frozenset(), frozenset({("football", "NFL")})}
+                    or self.min_reference_books < 3
                     or (self.family_rule.scope.additional_player_prop_statistics
                         and set(self.family_rule.scope.additional_player_prop_statistics)
                             != NBA_PLAYER_PROP_STATISTICS)
+                    or (self.family_rule.scope.additional_nfl_player_prop_statistics
+                        and set(self.family_rule.scope.additional_nfl_player_prop_statistics)
+                            != NFL_PLAYER_PROP_STATISTICS)
+                    or bool(self.family_rule.scope.additional_nfl_player_prop_statistics) !=
+                       (("football", "NFL") in self.family_rule.scope.additional_competitions)
                     or self.provider_ids != (("parlay_game_ws", "parlay_ws")
-                        if self.family_rule.scope.additional_player_prop_statistics
+                        if (self.family_rule.scope.additional_player_prop_statistics
+                            or self.family_rule.scope.additional_nfl_player_prop_statistics)
                         else ("parlay_game_ws",))
                     or self.strategy_ids != ("native_positive_ev",)
                     or self.settlement_policy != "prophetx_funded_cash_win_loss_halt_on_exception"

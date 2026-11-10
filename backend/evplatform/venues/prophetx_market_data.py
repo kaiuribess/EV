@@ -186,7 +186,8 @@ class ProphetXMarketData:
             self._reject("selection_shape", frame)
             return
         flat_rows = [row for group in groups for row in group if isinstance(row, dict)]
-        if str(market.get("sub_type", "")).startswith("player_") and not market.get("strikes"):
+        if (native_prop_identity(market.get("name"), market.get("sub_type")) is not None
+                and not market.get("strikes")):
             # V4 frequently omits prop selections. The scoped Talaria payload
             # can complete identity, but only when both native sides, the
             # player title, statistic subtype and one threshold agree.

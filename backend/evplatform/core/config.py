@@ -10,6 +10,9 @@ from .paths import PROJECT_ROOT
 
 PlayerPropStatistic = Literal[
     "receptions", "receiving_yards", "passing_yards", "rushing_yards",
+    "passing_touchdowns", "pass_completions", "pass_attempts", "rushing_attempts",
+    "rushing_receiving_yards", "longest_reception", "kicking_points",
+    "field_goals_made", "anytime_touchdown", "first_touchdown",
     "points", "rebounds", "assists", "threes", "points_rebounds_assists",
     "points_rebounds", "points_assists", "rebounds_assists", "steals", "blocks",
     "turnovers", "double_double", "triple_double", "pra",
@@ -20,6 +23,12 @@ NBA_PLAYER_PROP_STATISTICS = frozenset({
     "points", "rebounds", "assists", "threes", "points_rebounds_assists",
     "points_rebounds", "points_assists", "rebounds_assists", "steals", "blocks",
     "turnovers", "double_double", "triple_double",
+})
+
+NFL_PLAYER_PROP_STATISTICS = frozenset({
+    "receptions", "receiving_yards", "passing_yards", "rushing_yards",
+    "passing_touchdowns", "pass_completions", "pass_attempts", "rushing_attempts",
+    "kicking_points", "field_goals_made", "anytime_touchdown", "first_touchdown",
 })
 
 
@@ -38,6 +47,7 @@ class TrustedPilotMarketScope(BaseModel):
     # exact player-prop questions without turning every other competition or
     # market type into an executable scope. Empty preserves older digests.
     additional_player_prop_statistics: tuple[PlayerPropStatistic, ...] = ()
+    additional_nfl_player_prop_statistics: tuple[PlayerPropStatistic, ...] = ()
     period: Literal["FULL"] = "FULL"
     phase: Literal["pregame", "inplay"] = "pregame"
     reviewed_normal_rule_id: str = Field(min_length=8)
@@ -45,7 +55,8 @@ class TrustedPilotMarketScope(BaseModel):
     # winner and overtime scope. Unknown exceptional settlement stays unknown.
     source_normal_rule_evidence: str | None = None
 
-    @field_validator("statistics", "additional_player_prop_statistics", mode="before")
+    @field_validator("statistics", "additional_player_prop_statistics",
+                     "additional_nfl_player_prop_statistics", mode="before")
     @classmethod
     def canonical_statistics(cls, values):
         return tuple("points_rebounds_assists" if value == "pra" else value
@@ -62,16 +73,20 @@ class TrustedPilotMarketScope(BaseModel):
             payload.pop("additional_competitions", None)
         if not self.additional_player_prop_statistics:
             payload.pop("additional_player_prop_statistics", None)
+        if not self.additional_nfl_player_prop_statistics:
+            payload.pop("additional_nfl_player_prop_statistics", None)
         return payload
 
     @model_validator(mode="after")
     def distinct_statistics(self):
         if (len(set(self.statistics)) != len(self.statistics)
                 or len(set(self.additional_player_prop_statistics)) !=
-                   len(self.additional_player_prop_statistics)):
+                   len(self.additional_player_prop_statistics)
+                or len(set(self.additional_nfl_player_prop_statistics)) !=
+                   len(self.additional_nfl_player_prop_statistics)):
             raise ValueError("Pilot statistics must be distinct")
         supported = {
-            ("football", "NFL"): {"receptions", "receiving_yards", "passing_yards", "rushing_yards"},
+            ("football", "NFL"): NFL_PLAYER_PROP_STATISTICS,
             ("basketball", "NBA"): NBA_PLAYER_PROP_STATISTICS | {"pra"},
             ("baseball", "MLB"): {"pitcher_strikeouts", "hits", "total_bases"},
             ("hockey", "NHL"): {"shots_on_goal", "points"},
@@ -105,6 +120,12 @@ class TrustedPilotMarketScope(BaseModel):
                 or self.market_type != "moneyline" or self.statistics
                 or not set(self.additional_player_prop_statistics) <= NBA_PLAYER_PROP_STATISTICS):
             raise ValueError("Additional player props require the reviewed ProphetX NBA moneyline scope")
+        if self.additional_nfl_player_prop_statistics and (
+                self.venue != "prophetx" or self.sport != "basketball" or self.league != "NBA"
+                or self.market_type != "moneyline" or self.statistics
+                or ("football", "NFL") not in self.additional_competitions
+                or not set(self.additional_nfl_player_prop_statistics) <= NFL_PLAYER_PROP_STATISTICS):
+            raise ValueError("NFL player props require the reviewed ProphetX NBA/NFL moneyline scope")
         return self
 
     def competition_permitted(self, sport: str, league: str) -> bool:
@@ -114,9 +135,11 @@ class TrustedPilotMarketScope(BaseModel):
                            sport: str, league: str) -> bool:
         if market_type == self.market_type and self.competition_permitted(sport, league):
             return market_type != "player_prop" or statistic in self.statistics
-        return bool(market_type == "player_prop"
-            and (sport, league) == (self.sport, self.league)
-            and statistic in self.additional_player_prop_statistics)
+        return bool(market_type == "player_prop" and (
+            ((sport, league) == (self.sport, self.league)
+             and statistic in self.additional_player_prop_statistics)
+            or ((sport, league) == ("football", "NFL")
+                and statistic in self.additional_nfl_player_prop_statistics)))
 
     def matches(self, market) -> bool:
         prop_question = self.question_permitted("player_prop", market.statistic,
@@ -234,7 +257,8 @@ class TrustedPilotPolicy(BaseModel):
             if self.market_scope is not None and self.min_distinct_books < 3:
                 raise ValueError("Dynamic pilot requires at least three distinct sportsbook references")
             additional_props = bool(self.market_scope is not None
-                and self.market_scope.additional_player_prop_statistics)
+                and (self.market_scope.additional_player_prop_statistics
+                     or self.market_scope.additional_nfl_player_prop_statistics))
             if additional_props != bool(self.player_prop_provider_id):
                 raise ValueError("Additional player-prop approval needs its exact provider stream")
             if self.market_scope is not None and self.pregame_only == (self.market_scope.phase == "inplay"):

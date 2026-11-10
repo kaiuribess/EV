@@ -644,6 +644,74 @@ def test_prophetx_nba_moneyline_family_onboards_exact_structured_player_prop():
     assert {item.prop_sub_type for item in runtime.mapper.mappings} == {"player_total_points"}
 
 
+def test_prophetx_combined_family_onboards_exact_nfl_prop_without_fixture_id():
+    from evplatform.venues.prophetx_props import native_prop_rule_token
+
+    now = utcnow().replace(microsecond=0)
+    config, base_scope = approved_config("prophetx")
+    scope = base_scope.model_copy(update={
+        "additional_competitions": (("football", "NFL"),),
+        "additional_nfl_player_prop_statistics": ("passing_yards", "receptions",
+            "anytime_touchdown"),
+        "reviewed_normal_rule_id": "OFFLINE-NBA-NFL-moneyline-props-v1",
+        "source_normal_rule_evidence": "OFFLINE reviewed NBA/NFL moneyline and prop rules",
+    })
+    config = PricingConfig.model_validate({**config.model_dump(mode="json"),
+        "trusted_pilot_policy": {**config.trusted_pilot_policy.model_dump(mode="json"),
+            "market_scope": scope.model_dump(mode="json"),
+            "player_prop_provider_id": "parlay_ws"}})
+    base, _ = source_fixture(config, now, "fixture-nfl-prop-family", now+timedelta(days=1))
+    market = base.model_copy(update={"id": "reviewed:nfl-passing-family",
+        "sport": "football", "league": "NFL", "market_type": "player_prop",
+        "player": "Jayden Daniels", "player_id": "Jayden Daniels",
+        "statistic": "passing_yards", "line": Decimal("244.5"),
+        "outcomes": ("over", "under"),
+        "settlement": base.settlement.model_copy(update={"overtime": "included"}),
+        "extensions": {**base.extensions, "research_only": False,
+            "reviewed_normal_rule_id": scope.reviewed_normal_rule_id,
+            "normal_outcome_reviewed": True}})
+    native = {"name": "Jayden Daniels Passing Yards", "type": "total",
+        "sub_type": "player_total_passing_yards", "period": None,
+        "player_id": "Jayden Daniels", "player_name": "Jayden Daniels",
+        "statistic": "passing_yards", "line": "244.5", "status": "active",
+        "strikes": {
+            "over-strike": {"name": "Over", "outcome_id": "4", "status": "active"},
+            "under-strike": {"name": "Under", "outcome_id": "5", "status": "active"}}}
+    catalog = {("123", "401"): native}
+    events = {"123": {"event_id": 123, "name": market.event_name,
+        "scheduled": market.start_time.isoformat(), "status": "not_started",
+        "tournament_id": 31, "league": "NFL"}}
+    matches = prophetx_matches(market, catalog, events, observed_at=now)
+    assert len(matches) == 2
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-nfl-props-v1",
+        approved_by="fixture", approval_evidence="OFFLINE exact NFL prop fixture",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=1),
+        allowed_native_rule_texts=("moneyline|moneyline|default_full_game",
+            "NFL|moneyline|moneyline|default_full_game",
+            native_prop_rule_token("player_total_passing_yards", "total", None,
+                league="NFL")),
+        quantity_step=Decimal("1"), minimum_quantity=Decimal("1"),
+        minimum_order_cost_usd=Decimal("1"), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE ProphetX integer-dollar minimum fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE owner fee assumption fixture",
+        prophetx_native_settlement_evidence="OFFLINE NBA full-game settlement fixture",
+        additional_native_settlement_evidence={
+            "football:NFL": "OFFLINE NFL full-game participation settlement fixture"},
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE v2 timestamp fixture")
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market}))
+    monitor = SimpleNamespace(research_catalog_at=now, research_events=events,
+        client=SimpleNamespace(public_market_data=SimpleNamespace(catalog=catalog)))
+    assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market, matches,
+        monitor, now=now) == 2
+    assert {item.prop_sub_type for item in runtime.mapper.mappings} == {
+        "player_total_passing_yards"}
+
+
 def test_prophetx_certified_default_full_game_rule_needs_exact_unqualified_moneyline():
     now = utcnow().replace(microsecond=0)
     config, scope = approved_config("prophetx")
