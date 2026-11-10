@@ -75,6 +75,13 @@ def test_owner_switch_issues_24_hour_scope_and_real_account_evidence(tmp_path):
     assert datetime.fromisoformat(result["expires_at"]) == now + timedelta(hours=24)
     assert result["launch_scope_digest"] == engine.native.profile.digest()
     assert engine.native.profile.build_id == "new-build"
+    assert set(engine.native.profile.family_rule.scope.additional_player_prop_statistics) >= {
+        "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers",
+        "points_rebounds", "points_assists", "rebounds_assists",
+        "points_rebounds_assists", "double_double", "triple_double"}
+    assert engine.native.profile.provider_ids == ("parlay_game_ws", "parlay_ws")
+    assert engine.settings.pricing.trusted_pilot_policy.player_prop_provider_id == "parlay_ws"
+    assert engine.settings.pricing.trusted_pilot_policy.market_scope == engine.native.profile.family_rule.scope
     assert [item.kind for item in engine.native.profile.evidence] == [
         "account_access", "risk_authorization"]
     assert engine.native.profile.evidence[0].observed_at == engine.native.account_snapshots["prophetx"].observed_at

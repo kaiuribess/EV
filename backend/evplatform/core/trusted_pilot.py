@@ -38,7 +38,7 @@ def trusted_pilot_reference_check(config: PricingConfig, market: Market,
             or not books <= set(policy.trusted_books)):
         reasons.append("Pilot references are duplicated, insufficient or outside approved books")
     if policy.independent_crosscheck == "two_distinct_books":
-        if providers != {policy.provider_id}:
+        if providers != {policy.provider_for_market(market)}:
             reasons.append("Pilot references are outside the named provider")
     elif policy.independent_crosscheck == "separate_provider":
         if providers != {policy.provider_id, policy.crosscheck_provider_id}:

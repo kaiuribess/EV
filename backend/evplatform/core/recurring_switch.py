@@ -16,6 +16,19 @@ from uuid import uuid4
 
 from .paths import runtime_data_file
 from .readiness import LaunchEvidence, LaunchProfile, digest_json
+from ..venues.prophetx_props import NBA_PROP_STATISTICS, reviewed_nba_prop_rule_tokens
+
+
+NBA_PROP_SCOPE = tuple(sorted(NBA_PROP_STATISTICS))
+NBA_PROP_SOURCE_EVIDENCE = (
+    "Parlay full-game NBA player-prop keys and two-sided line payloads: "
+    "https://parlay-api.com/docs/websocket/player-props; ordinary participation/void rules "
+    "remain bound to the reviewed normal-outcome policy")
+NBA_PROP_NATIVE_EVIDENCE = (
+    "CFTC ProphetX NBA filing 61599 Appendix A: player-stat markets require participation "
+    "and use official statistics including corrections within 48 hours; full-event markets "
+    "include overtime unless a shorter period is specified; "
+    "https://framerusercontent.com/assets/xFIxMV69o6oKsLMzIkdlbTdqrTc.pdf")
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -45,9 +58,12 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
                 rule.scope.period, rule.scope.phase) !=
                 ("basketball", "NBA", "moneyline", "FULL", "pregame")
             or rule.scope.additional_competitions
+            or (rule.scope.additional_player_prop_statistics
+                and tuple(sorted(rule.scope.additional_player_prop_statistics)) != NBA_PROP_SCOPE)
             or rule.prophetx_fee_evidence_kind != "owner_approved_assumption"
             or rule.prophetx_assumed_winnings_profit_rate != Decimal("0.02")
-            or profile.provider_ids != ("parlay_game_ws",)
+            or profile.provider_ids != (("parlay_game_ws", "parlay_ws")
+                if rule.scope.additional_player_prop_statistics else ("parlay_game_ws",))
             or profile.strategy_ids != ("native_positive_ev",)
             or profile.min_reference_books < 3
             or profile.max_reference_age_ms > 30000
@@ -56,6 +72,7 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
             or not policy.recurring_authorization or not policy.automatic_followups
             or policy.market_scope != rule.scope
             or policy.provider_id != "parlay_game_ws"
+            or policy.player_prop_provider_id not in {None, "parlay_ws"}
             or policy.exact_market_id is not None
             or policy.uncertainty_margin_probability != Decimal("0.01")
             or policy.min_distinct_books < 3
@@ -91,6 +108,18 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
         raise ValueError("The approved minimum EV threshold changed")
     if engine.native.mapper is None or profile.mapping_digest != engine.native.mapper.mapping_digest:
         raise ValueError("Native mapping rules changed; review them before turning Live on")
+
+
+def _expanded_nba_scope(scope):
+    evidence = scope.source_normal_rule_evidence or ""
+    if NBA_PROP_SOURCE_EVIDENCE not in evidence:
+        evidence = f"{evidence}; {NBA_PROP_SOURCE_EVIDENCE}".strip("; ")
+    return type(scope).model_validate({
+        **scope.model_dump(mode="json"),
+        "additional_player_prop_statistics": NBA_PROP_SCOPE,
+        "reviewed_normal_rule_id": "PARLAY-NBA-FULL-MONEYLINE-PROPS-20261110",
+        "source_normal_rule_evidence": evidence,
+    })
 
 
 def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime | None = None,
@@ -129,14 +158,34 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
         raise ValueError("Unresolved ProphetX inventory or settlement blocks Live")
     approval_id = str(uuid4())
     expires = now + timedelta(hours=24)
+    expanded_scope = _expanded_nba_scope(profile.family_rule.scope)
+    updated_policy = type(engine.settings.pricing.trusted_pilot_policy).model_validate({
+        **engine.settings.pricing.trusted_pilot_policy.model_dump(mode="json"),
+        "market_scope": expanded_scope.model_dump(mode="json"),
+        "player_prop_provider_id": "parlay_ws",
+        "approval_evidence": f"owner-live-switch:{approval_id}:NBA moneyline and exact full-game props",
+    })
+    updated_pricing = type(engine.settings.pricing).model_validate({
+        **engine.settings.pricing.model_dump(mode="json"),
+        "trusted_pilot_policy": updated_policy.model_dump(mode="json"),
+    })
     updated_rule = type(profile.family_rule).model_validate({
         **profile.family_rule.model_dump(mode="json"),
+        "scope": expanded_scope.model_dump(mode="json"),
+        "rule_version": "NBA-MONEYLINE-AND-PROPS-20261110",
+        "allowed_native_rule_texts": tuple(dict.fromkeys((
+            *profile.family_rule.allowed_native_rule_texts,
+            *reviewed_nba_prop_rule_tokens(),
+        ))),
+        "prophetx_native_settlement_evidence": NBA_PROP_NATIVE_EVIDENCE,
         "approved_by": "local_owner_live_switch",
         "approval_evidence": f"owner-live-switch:{approval_id}",
         "approved_at": now, "expires_at": expires,
     })
     reviewed = profile.model_copy(update={
         "build_id": native.build_id, "family_rule": updated_rule, "evidence": (),
+        "pricing_digest": digest_json(updated_pricing.model_dump(mode="json")),
+        "provider_ids": ("parlay_game_ws", "parlay_ws"),
     })
     digest = reviewed.digest()
     scope_artifact = {
@@ -145,8 +194,8 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
         "profile_digest": digest, "account_fingerprint": profile.account_fingerprint,
         "family_rule": updated_rule.model_dump(mode="json"),
         "limits": profile.limits.model_dump(mode="json"),
-        "pricing_digest": profile.pricing_digest,
-        "source_policy": engine.settings.pricing.trusted_pilot_policy.model_dump(mode="json"),
+        "pricing_digest": reviewed.pricing_digest,
+        "source_policy": updated_policy.model_dump(mode="json"),
     }
     account_artifact = {
         "authorization_id": approval_id, "source": "authenticated_native",
@@ -187,6 +236,10 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
     profile_path = runtime_data_file("launch_profile.json", data_dir)
     _write_json(profile_path, updated.model_dump(mode="json"))
     native.profile = updated
+    engine.settings.pricing = updated_pricing
+    if (getattr(engine, "registry", None) is not None
+            and "positive_ev" in engine.registry.records):
+        engine.registry.configure("positive_ev", updated_pricing.model_dump(mode="json"))
     authorization = {
         "schema_version": 1, "authorization_id": approval_id,
         "issued_at": now.isoformat(), "expires_at": expires.isoformat(),

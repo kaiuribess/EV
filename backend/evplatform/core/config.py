@@ -1,11 +1,26 @@
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .reference_profiles import ReferenceFreshnessRule, ReferenceProfile
 from .paths import PROJECT_ROOT
+
+
+PlayerPropStatistic = Literal[
+    "receptions", "receiving_yards", "passing_yards", "rushing_yards",
+    "points", "rebounds", "assists", "threes", "points_rebounds_assists",
+    "points_rebounds", "points_assists", "rebounds_assists", "steals", "blocks",
+    "turnovers", "double_double", "triple_double", "pra",
+    "pitcher_strikeouts", "hits", "total_bases", "shots_on_goal",
+]
+
+NBA_PLAYER_PROP_STATISTICS = frozenset({
+    "points", "rebounds", "assists", "threes", "points_rebounds_assists",
+    "points_rebounds", "points_assists", "rebounds_assists", "steals", "blocks",
+    "turnovers", "double_double", "triple_double",
+})
 
 
 class TrustedPilotMarketScope(BaseModel):
@@ -18,15 +33,23 @@ class TrustedPilotMarketScope(BaseModel):
     # Opt-in competitions share one reviewed normal-question rule. The
     # primary sport/league remains unchanged for existing signed profiles.
     additional_competitions: tuple[tuple[str, str], ...] = ()
-    statistics: tuple[Literal["receptions", "receiving_yards", "passing_yards", "rushing_yards",
-                              "points", "rebounds", "assists", "threes", "pra",
-                              "pitcher_strikeouts", "hits", "total_bases", "shots_on_goal"], ...] = ()
+    statistics: tuple[PlayerPropStatistic, ...] = ()
+    # A reviewed ProphetX NBA moneyline family can additionally authorize
+    # exact player-prop questions without turning every other competition or
+    # market type into an executable scope. Empty preserves older digests.
+    additional_player_prop_statistics: tuple[PlayerPropStatistic, ...] = ()
     period: Literal["FULL"] = "FULL"
     phase: Literal["pregame", "inplay"] = "pregame"
     reviewed_normal_rule_id: str = Field(min_length=8)
     # A family approval needs an attributable source contract for the ordinary
     # winner and overtime scope. Unknown exceptional settlement stays unknown.
     source_normal_rule_evidence: str | None = None
+
+    @field_validator("statistics", "additional_player_prop_statistics", mode="before")
+    @classmethod
+    def canonical_statistics(cls, values):
+        return tuple("points_rebounds_assists" if value == "pra" else value
+                     for value in (values or ()))
 
     @model_serializer(mode="wrap")
     def serialize_scope(self, handler):
@@ -37,15 +60,19 @@ class TrustedPilotMarketScope(BaseModel):
             payload.pop("phase", None)
         if not self.additional_competitions:
             payload.pop("additional_competitions", None)
+        if not self.additional_player_prop_statistics:
+            payload.pop("additional_player_prop_statistics", None)
         return payload
 
     @model_validator(mode="after")
     def distinct_statistics(self):
-        if len(set(self.statistics)) != len(self.statistics):
+        if (len(set(self.statistics)) != len(self.statistics)
+                or len(set(self.additional_player_prop_statistics)) !=
+                   len(self.additional_player_prop_statistics)):
             raise ValueError("Pilot statistics must be distinct")
         supported = {
             ("football", "NFL"): {"receptions", "receiving_yards", "passing_yards", "rushing_yards"},
-            ("basketball", "NBA"): {"points", "rebounds", "assists", "threes", "pra"},
+            ("basketball", "NBA"): NBA_PLAYER_PROP_STATISTICS | {"pra"},
             ("baseball", "MLB"): {"pitcher_strikeouts", "hits", "total_bases"},
             ("hockey", "NHL"): {"shots_on_goal", "points"},
             ("football", "NCAAF"): set(),
@@ -73,24 +100,40 @@ class TrustedPilotMarketScope(BaseModel):
                     or len(set(competitions)) != len(competitions)
                     or any(pair not in supported for pair in self.additional_competitions)):
                 raise ValueError("Additional competitions require distinct supported ProphetX moneylines")
+        if self.additional_player_prop_statistics and (
+                self.venue != "prophetx" or self.sport != "basketball" or self.league != "NBA"
+                or self.market_type != "moneyline" or self.statistics
+                or not set(self.additional_player_prop_statistics) <= NBA_PLAYER_PROP_STATISTICS):
+            raise ValueError("Additional player props require the reviewed ProphetX NBA moneyline scope")
         return self
 
     def competition_permitted(self, sport: str, league: str) -> bool:
         return (sport, league) in ((self.sport, self.league), *self.additional_competitions)
 
+    def question_permitted(self, market_type: str, statistic: str | None, *,
+                           sport: str, league: str) -> bool:
+        if market_type == self.market_type and self.competition_permitted(sport, league):
+            return market_type != "player_prop" or statistic in self.statistics
+        return bool(market_type == "player_prop"
+            and (sport, league) == (self.sport, self.league)
+            and statistic in self.additional_player_prop_statistics)
+
     def matches(self, market) -> bool:
-        same_question = (market.statistic in self.statistics
+        prop_question = self.question_permitted("player_prop", market.statistic,
+            sport=market.sport, league=market.league)
+        same_question = (prop_question
             and market.player and market.player_id and market.line is not None
             and market.line != market.line.to_integral_value()
-            and set(market.outcomes) == {"over", "under"}) if self.market_type == "player_prop" else (
+            and set(market.outcomes) == {"over", "under"}) if market.market_type == "player_prop" else (
             market.player is None and market.player_id is None and market.statistic is None
             and market.line is None and len(market.participants) == 2
             and set(market.outcomes) == set(market.participants))
         phase_matches = ((self.phase == "pregame" and market.status == "scheduled")
                          or (self.phase == "inplay" and market.status == "live"))
         return bool(phase_matches
-            and self.competition_permitted(market.sport, market.league)
-            and market.market_type == self.market_type and same_question
+            and self.question_permitted(market.market_type, market.statistic,
+                sport=market.sport, league=market.league)
+            and same_question
             and market.settlement.period == self.period
             and market.settlement.overtime == "included"
             and market.extensions.get("reviewed_normal_rule_id") == self.reviewed_normal_rule_id
@@ -106,6 +149,9 @@ class TrustedPilotPolicy(BaseModel):
     exact_market_id: str | None = None
     market_scope: TrustedPilotMarketScope | None = None
     provider_id: str | None = None
+    # Parlay's complete game board and player-prop odds use separate sockets.
+    # This remains absent for legacy moneyline-only approvals.
+    player_prop_provider_id: str | None = None
     crosscheck_provider_id: str | None = None
     trusted_books: list[str] = Field(default_factory=list)
     # Required only for the live multi-book route. These are owner-reviewed
@@ -144,12 +190,18 @@ class TrustedPilotPolicy(BaseModel):
             payload.pop("inplay_max_row_age_ms", None)
         if self.inplay_latency_evidence is None:
             payload.pop("inplay_latency_evidence", None)
+        if self.player_prop_provider_id is None:
+            payload.pop("player_prop_provider_id", None)
         return payload
 
     def cost_ceiling(self) -> Decimal | None:
         """Optional execution cap; reporting unit size never supplies one."""
         caps = [value for value in (self.max_debit_usd, self.max_loss_usd) if value is not None]
         return min(caps) if caps else None
+
+    def provider_for_market(self, market) -> str | None:
+        return (self.player_prop_provider_id if market.market_type == "player_prop"
+                and self.player_prop_provider_id else self.provider_id)
 
     def permits_market(self, market) -> bool:
         return bool(not market.extensions.get("research_only") and (
@@ -181,6 +233,10 @@ class TrustedPilotPolicy(BaseModel):
                 raise ValueError("Approved live weights must cover exactly the trusted books and total 100 percent")
             if self.market_scope is not None and self.min_distinct_books < 3:
                 raise ValueError("Dynamic pilot requires at least three distinct sportsbook references")
+            additional_props = bool(self.market_scope is not None
+                and self.market_scope.additional_player_prop_statistics)
+            if additional_props != bool(self.player_prop_provider_id):
+                raise ValueError("Additional player-prop approval needs its exact provider stream")
             if self.market_scope is not None and self.pregame_only == (self.market_scope.phase == "inplay"):
                 raise ValueError("Approved source phase must match the market-family phase")
             if self.market_scope is not None and self.market_scope.phase == "inplay":

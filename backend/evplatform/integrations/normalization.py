@@ -1088,13 +1088,16 @@ class TrustedSourceProjector:
             full_game_winner = (offer.market_key == "h2h"
                 and (offer.period in {"FULL", "full_game"}
                     or offer.provider == "parlay_game_ws" and offer.period is None)
-                and market.market_type == scope.market_type == "moneyline"
+                and market.market_type == "moneyline"
+                and scope.question_permitted("moneyline", None,
+                    sport=market.sport, league=market.league)
                 and len(market.participants) == 2
                 and set(market.outcomes) == set(market.participants)) if scope is not None else False
             full_game_prop = (offer.period in {"FULL", "full_game"}
-                and market.market_type == scope.market_type == "player_prop"
+                and market.market_type == "player_prop"
                 and market.player and market.player_id
-                and market.statistic in scope.statistics
+                and scope.question_permitted("player_prop", market.statistic,
+                    sport=market.sport, league=market.league)
                 and market.line is not None
                 and market.line != market.line.to_integral_value()
                 and set(market.outcomes) == {"over", "under"}) if scope is not None else False
@@ -1109,7 +1112,8 @@ class TrustedSourceProjector:
                     # The reviewed rule attests ordinary overtime/participation
                     # scope; it never supplies quote freshness or active status.
                     and (full_game_winner or full_game_prop)
-                    and offer.provider in {policy.provider_id, policy.crosscheck_provider_id}
+                    and offer.provider in {policy.provider_for_market(market),
+                                           policy.crosscheck_provider_id}
                     and offer.bookmaker in policy.trusted_books
                     and scope.competition_permitted(market.sport, market.league)
                     and market.settlement.period == "FULL"):

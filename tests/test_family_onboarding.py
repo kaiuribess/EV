@@ -585,6 +585,65 @@ def test_prophetx_prop_family_needs_exact_player_stat_line_and_period():
     assert not NativeRuntime.profile_permits_market(runtime, profile, market.id, "over")
 
 
+def test_prophetx_nba_moneyline_family_onboards_exact_structured_player_prop():
+    from evplatform.venues.prophetx_props import native_prop_rule_token
+
+    now = utcnow().replace(microsecond=0)
+    config, base_scope = approved_config("prophetx")
+    scope = base_scope.model_copy(update={
+        "additional_player_prop_statistics": ("points", "steals", "double_double"),
+        "reviewed_normal_rule_id": "OFFLINE-NBA-moneyline-props-v1",
+        "source_normal_rule_evidence": "OFFLINE reviewed NBA moneyline and player-prop rules",
+    })
+    config = PricingConfig.model_validate({**config.model_dump(mode="json"),
+        "trusted_pilot_policy": {**config.trusted_pilot_policy.model_dump(mode="json"),
+            "market_scope": scope.model_dump(mode="json"),
+            "player_prop_provider_id": "parlay_ws"}})
+    base, _ = source_fixture(config, now, "fixture-nba-prop-family", now+timedelta(days=1))
+    market = base.model_copy(update={"id": "reviewed:nba-points-family",
+        "market_type": "player_prop", "player": "Trae Young", "player_id": "Trae Young",
+        "statistic": "points", "line": Decimal("24.5"), "outcomes": ("over", "under"),
+        "settlement": base.settlement.model_copy(update={"overtime": "included"}),
+        "extensions": {**base.extensions, "research_only": False,
+            "reviewed_normal_rule_id": scope.reviewed_normal_rule_id,
+            "normal_outcome_reviewed": True}})
+    native = {"name": "Trae Young Total Points", "type": "total",
+        "sub_type": "player_total_points", "period": None, "player_id": "Trae Young",
+        "player_name": "Trae Young", "statistic": "points", "line": "24.5",
+        "status": "active", "strikes": {
+            "over-strike": {"name": "Over", "outcome_id": "4", "status": "active"},
+            "under-strike": {"name": "Under", "outcome_id": "5", "status": "active"}}}
+    catalog = {("123", "301"): native}
+    events = {"123": {"event_id": 123, "name": market.event_name,
+        "scheduled": market.start_time.isoformat(), "status": "not_started", "tournament_id": 132}}
+    matches = prophetx_matches(market, catalog, events, observed_at=now)
+    assert len(matches) == 2
+    assert all(item.identity_limitations == ("Native period is not explicit in the catalog",)
+               for item in matches)
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-nba-props-v1",
+        approved_by="fixture", approval_evidence="OFFLINE exact NBA prop fixture",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=1),
+        allowed_native_rule_texts=("moneyline|moneyline|default_full_game",
+            native_prop_rule_token("player_total_points", "total", None)),
+        quantity_step=Decimal("1"), minimum_quantity=Decimal("1"),
+        minimum_order_cost_usd=Decimal("1"), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE ProphetX integer-dollar minimum fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE owner fee assumption fixture",
+        prophetx_native_settlement_evidence="OFFLINE NBA full-game prop participation rule fixture",
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE v2 timestamp fixture")
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market}))
+    monitor = SimpleNamespace(research_catalog_at=now, research_events=events,
+        client=SimpleNamespace(public_market_data=SimpleNamespace(catalog=catalog)))
+    assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market, matches,
+        monitor, now=now) == 2
+    assert {item.prop_sub_type for item in runtime.mapper.mappings} == {"player_total_points"}
+
+
 def test_prophetx_certified_default_full_game_rule_needs_exact_unqualified_moneyline():
     now = utcnow().replace(microsecond=0)
     config, scope = approved_config("prophetx")

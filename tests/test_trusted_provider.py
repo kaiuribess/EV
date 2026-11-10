@@ -759,6 +759,14 @@ def test_prophetx_recurring_scope_requires_reviewed_exact_nfl_moneyline():
         "statistic": "points", "line": Decimal("24.5")})
     assert nba_scope.matches(nba_prop)
     assert not nba_scope.matches(nba_prop.model_copy(update={"statistic": "shots_on_goal"}))
+    combined = TrustedPilotMarketScope(venue="prophetx", sport="basketball", league="NBA",
+        market_type="moneyline", additional_player_prop_statistics=("points", "steals",
+            "points_rebounds", "double_double"), reviewed_normal_rule_id=rule_id)
+    assert combined.matches(market.model_copy(update={"sport": "basketball", "league": "NBA"}))
+    assert combined.matches(nba_prop)
+    assert combined.matches(nba_prop.model_copy(update={"statistic": "steals", "line": Decimal("1.5")}))
+    assert combined.matches(nba_prop.model_copy(update={"statistic": "double_double", "line": Decimal("0.5")}))
+    assert not combined.matches(nba_prop.model_copy(update={"statistic": "blocks"}))
     with pytest.raises(ValueError, match="ProphetX pilot scope"):
         TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
             market_type="player_prop", statistics=("shots_on_goal",), reviewed_normal_rule_id=rule_id)
@@ -1075,6 +1083,11 @@ async def test_provisional_native_estimate_reaches_reference_dashboard_without_o
 def test_source_prop_uses_exact_event_metadata_and_rejects_unknown_period():
     from evplatform.core.profile_import import STATISTICS
     assert STATISTICS["player_points"] == "points"
+    assert STATISTICS["player_points_rebounds"] == "points_rebounds"
+    assert STATISTICS["player_points_assists"] == "points_assists"
+    assert STATISTICS["player_rebounds_assists"] == "rebounds_assists"
+    assert STATISTICS["player_pra"] == "points_rebounds_assists"
+    assert STATISTICS["player_double_double"] == "double_double"
     profile = ReferenceProfile(selectors=(ProfileSelector(sport="basketball", league="NBA",
         market_type="player_prop", statistic="points"),),
         weights_percent={"pinnacle": Decimal(20), "fanduel": Decimal(50),

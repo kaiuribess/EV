@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .prophetx import executable_level
+from .prophetx_props import native_prop_identity, native_prop_outcome
 
 
 class ProphetXMarketData:
@@ -20,6 +21,45 @@ class ProphetXMarketData:
         self.frames = 0
         self.rejected_frames = 0
         self.last_rejection: dict | None = None
+
+    @staticmethod
+    def _enrich_prop_identity(market: dict, rows: list[dict], *, evidence: str) -> bool:
+        """Install a complete native prop identity only from one coherent payload."""
+        parsed = native_prop_identity(market.get("name"), market.get("sub_type"))
+        if parsed is None:
+            return False
+        player, statistic, expected_type = parsed
+        if market.get("type") not in {None, expected_type, "player_prop"}:
+            return False
+        identities: dict[str, dict] = {}
+        outcomes: dict[str, Decimal] = {}
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("strike_id") or row.get("outcome_id") is None:
+                continue
+            result = native_prop_outcome(row.get("name") or row.get("display_name"), statistic)
+            if result is None:
+                continue
+            outcome, line = result
+            strike = str(row["strike_id"])
+            identity = {"outcome_id": str(row["outcome_id"]), "name": outcome.title(),
+                        "native_name": str(row.get("name") or row.get("display_name")),
+                        "status": row.get("status") or "unknown"}
+            if (strike in identities and identities[strike]["outcome_id"] != identity["outcome_id"]
+                    or outcome in outcomes and outcomes[outcome] != line):
+                return False
+            identities[strike], outcomes[outcome] = identity, line
+        if set(outcomes) != {"over", "under"} or len(identities) != 2 or len(set(outcomes.values())) != 1:
+            return False
+        line = next(iter(outcomes.values()))
+        existing = market.get("strikes") or {}
+        if existing and any(strike not in existing or
+                existing[strike].get("outcome_id") != identity["outcome_id"]
+                for strike, identity in identities.items()):
+            return False
+        market.update({"player_id": player, "player_name": player, "statistic": statistic,
+                       "line": str(line), "strikes": identities,
+                       "prop_identity_evidence": evidence})
+        return True
 
     def _reject(self, reason: str, frame: dict):
         data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
@@ -93,6 +133,10 @@ class ProphetXMarketData:
                                     "player_id": market.get("player_id"),
                                     "statistic": market.get("statistic"), "line": market.get("line"),
                                     "strikes": identities}
+                    if isinstance(groups, list):
+                        self._enrich_prop_identity(catalog[key],
+                            [row for group in groups for row in group if isinstance(row, dict)],
+                            evidence="v4_rest_structured_selections")
                     if rest_levels:
                         rest_samples[key] = rest_levels
         if seen != set(event_ids):
@@ -141,6 +185,16 @@ class ProphetXMarketData:
             self.books.pop(subject, None)
             self._reject("selection_shape", frame)
             return
+        flat_rows = [row for group in groups for row in group if isinstance(row, dict)]
+        if str(market.get("sub_type", "")).startswith("player_") and not market.get("strikes"):
+            # V4 frequently omits prop selections. The scoped Talaria payload
+            # can complete identity, but only when both native sides, the
+            # player title, statistic subtype and one threshold agree.
+            if not self._enrich_prop_identity(market, flat_rows,
+                    evidence="scoped_v2_complete_two_sided_selection"):
+                self.books.pop(subject, None)
+                self._reject("incomplete_player_prop_identity", frame)
+                return
         levels = []
         try:
             for group in groups:
@@ -166,7 +220,8 @@ class ProphetXMarketData:
                                     "name": str(row.get("name") or "")[:120], "status": "unknown"}
                         identity_evidence = "scoped_v2_stream_only"
                     else:
-                        identity_evidence = "v4_rest_and_scoped_v2"
+                        identity_evidence = (market.get("prop_identity_evidence")
+                            or "v4_rest_and_scoped_v2")
                     if identity["outcome_id"] != str(row.get("outcome_id")):
                         raise ValueError("Conflicting ProphetX strike/outcome")
                     parsed = executable_level(row)
