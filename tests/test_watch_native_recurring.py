@@ -265,6 +265,29 @@ def test_reviewed_recurring_family_arms_during_quiet_market(monkeypatch, tmp_pat
     assert calls.count(("POST", "/api/control")) == 1
 
 
+def test_quiet_family_uses_same_launch_snapshot_without_slow_readiness_recompute(
+        monkeypatch, tmp_path):
+    current, launch, calls = server(monkeypatch, tmp_path)
+    config, scope = approved_config("prophetx")
+    launch["launch_scope"][0].update(venue="prophetx",
+        owner_approved_recurring_lifecycle_deferral=True,
+        family_rule=prophetx_rule(scope).model_dump(mode="json"), markets=[])
+    launch["activation"]["by_venue"] = {"prophetx": {
+        "available": False, "scope_digest": DIGEST}}
+    launch["pricing"] = config.model_dump(mode="json")
+    launch["accounts"] = [{"venue": "prophetx", "blockers": [
+        {"code": "family.no_current_market"},
+        {"code": "runtime.settlement_reconciliation_supported"},
+        {"code": "arming.paused"}, {"code": "arming.kill_switch"},
+    ]}]
+    saved = authorization()
+    saved["venues"] = ["prophetx"]
+    gate.AUTH_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    assert gate.tick(now=NOW) == "armed"
+    assert current["auto_trade"] and not current["kill_switch"]
+    assert ("GET", "/api/readiness") not in calls
+
+
 def test_quiet_family_standby_rejects_missing_account_or_changed_digest(monkeypatch, tmp_path):
     current, launch, calls = server(monkeypatch, tmp_path, readiness_blockers=[
         "family.no_current_market", "runtime.settlement_reconciliation_supported",
