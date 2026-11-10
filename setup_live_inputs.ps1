@@ -5,7 +5,14 @@ $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $baseUrl = "http://127.0.0.1:$Port"
 $headers = @{ 'X-EV-Control' = 'local' }
-$sports = @('basketball_nba', 'americanfootball_nfl', 'icehockey_nhl', 'baseball_mlb')
+$propSports = @(
+    'basketball_nba', 'americanfootball_nfl', 'icehockey_nhl', 'baseball_mlb'
+)
+$gameSports = @($propSports) + @(
+    'americanfootball_ncaaf', 'basketball_ncaab', 'tennis_atp', 'tennis_wta',
+    'soccer_epl', 'soccer_spain_la_liga', 'soccer_germany_bundesliga',
+    'soccer_italy_serie_a', 'soccer_france_ligue_one', 'soccer_usa_mls'
+)
 $books = @('pinnacle', 'fanduel', 'draftkings', 'caesars', 'betonline', 'bet365')
 # Parlay currently marks Pinnacle suppressed. A suppressed key rejects the
 # entire filtered WebSocket subscription, so keep it out of stream filters;
@@ -65,17 +72,17 @@ function Configure-Input {
 # the same backend-only Parlay credential. A complete board does not establish
 # quote-specific active status, settlement equivalence or EV.
 Configure-Input 'parlay_ws' @{
-    sports = $sports; bookmakers = $streamBooks; stream_kinds = @('prop'); markets = @();
+    sports = $propSports; bookmakers = $streamBooks; stream_kinds = @('prop'); markets = @();
     stream_limit = 1000; max_age_seconds = 30; account_tier = 'unknown'
 }
 Configure-Input 'parlay_game_ws' @{
-    sports = $sports; bookmakers = $streamBooks; stream_kinds = @('game');
+    sports = $gameSports; bookmakers = $streamBooks; stream_kinds = @('game');
     markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000; max_age_seconds = 600;
     baseline_refresh_seconds = 300; include_props = $false; account_tier = 'unknown'
 }
 if ($isPaper) {
     Configure-Input 'parlay_paper_input' @{
-        sports = $sports; bookmakers = $streamBooks; stream_kinds = @('game');
+        sports = $gameSports; bookmakers = $streamBooks; stream_kinds = @('game');
         markets = @('h2h', 'spreads', 'totals'); stream_limit = 1000;
         max_age_seconds = 600; max_poll_age_seconds = 180;
         include_props = $false; account_tier = 'unknown'
@@ -100,7 +107,7 @@ Configure-Input 'oddize_rest' @{
 # Do not filter REST props by last price-change age: unchanged prices remain
 # visible for review, while strict quote-clock/status checks control eligibility.
 Configure-Input 'parlay_rest' @{
-    sports = $sports; bookmakers = $books; markets = @('h2h', 'spreads', 'totals');
+    sports = $propSports; bookmakers = $books; markets = @('h2h', 'spreads', 'totals');
     include_props = $true; props_limit = 5000;
     deduplicate_complete_game_stream = $true; startup_stream_wait_seconds = 12;
     poll_interval_seconds = [double]900; session_request_budget = 80000;
