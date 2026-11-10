@@ -75,9 +75,15 @@ async def test_prophetx_exposure_credit_and_unmatched_clock_do_not_certify_cash(
 async def test_polymarket_balance_and_buying_power_are_separate_reported_values():
     client = Client("polymarket_us", "production", {"balances": [{"currency": "USD",
         "currentBalance": "40", "buyingPower": "70", "balanceReservation": "2",
+        "displayedCash": "25", "displayedBonus": "15", "bonusReservation": "15",
+        "availableToWithdraw": "25",
         "lastUpdated": utcnow().isoformat(), "pendingWithdrawals": [{"bank": "never display"}]}]})
     row = (await MonitorCashService(lambda: {"polymarket_us": client}).refresh())["accounts"]["polymarket_us"]
     assert row["reported_balance_usd"] == "40" and row["reported_buying_power_usd"] == "70"
+    assert row["reported_displayed_cash_usd"] == "25"
+    assert row["reported_displayed_bonus_usd"] == "15"
+    assert row["reported_bonus_reservation_usd"] == "15"
+    assert row["reported_available_to_withdraw_usd"] == "25"
     assert not row["identity_verified"] and not row["cash_available_verified"]
     assert "never display" not in json.dumps(row)
     assert len(client.calls) == 1

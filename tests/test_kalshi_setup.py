@@ -10,6 +10,7 @@ from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
 from evplatform.core.models import utcnow
+from evplatform.core.external_inventory import ReviewedKalshiPosition
 from evplatform.venues.account_probe import probe_native_account
 from evplatform.venues.common import VenueHTTPError
 from evplatform.venues.kalshi import KalshiClient, KalshiSettings
@@ -143,6 +144,46 @@ async def test_absent_scopes_and_location_never_invent_permission():
     result = await account_metadata(omit_scopes=True, omit_expiry=True)
     assert result.api_key_scopes == () and not result.trading_permission_verified
     assert result.geographic_attestation_expires_at is None
+
+
+async def test_reviewed_external_kalshi_position_reconciles_only_exact_shard_and_cost():
+    from decimal import Decimal
+    from evplatform.venues.account_probe import kalshi_account_fingerprint
+    client = KalshiClient(KalshiSettings(environment="production", api_key_id="OFFLINE-key-id",
+                                         private_key_path="unused"))
+    row = ReviewedKalshiPosition(account_fingerprint=kalshi_account_fingerprint("production", "OFFLINE-key-id"),
+        native_order_id="outside", native_market_id="KXSTREAMERAWARDS-TEST", native_outcome_id="yes",
+        sport="other", exchange_index=0, quantity=Decimal("2"), cost_usd=Decimal(".98"),
+        fee_usd=Decimal(".03"), recorded_at=utcnow(),
+        review_artifact="kalshi_external_review_fixture.json", review_sha256="a" * 64)
+    position = {"ticker": row.native_market_id, "exchange_index": 0, "position_fp": "2",
+        "market_exposure_dollars": ".98", "total_traded_dollars": ".98",
+        "fees_paid_dollars": ".03", "realized_pnl_dollars": "0", "last_updated_ts": utcnow().isoformat()}
+    responses = {"/api_keys": {"api_keys": [{"api_key_id": "OFFLINE-key-id", "scopes": ["write::trade"]}]},
+        "/portfolio/balance": {"balance_dollars": "9", "balance_breakdown": [
+            {"exchange_index": 0, "balance": "9"}]},
+        "/portfolio/orders": {"orders": [], "cursor": ""},
+        "/portfolio/positions": {"market_positions": [position], "cursor": ""}}
+    async def request(method, path, **kwargs):
+        assert method == "GET"
+        return responses[path]
+    client.request = request
+    try:
+        result = await probe_native_account(client, exchange_index=0, external_positions=(row,))
+        assert result.reconciled and result.cash_available_verified
+        assert result.balance_usd == Decimal("9") and result.external_cost_usd == Decimal("1.01")
+        position["fees_paid_dollars"] = "0"
+        rejected = await probe_native_account(client, exchange_index=0, external_positions=(row,))
+        assert not rejected.reconciled and not rejected.cash_available_verified
+        position["fees_paid_dollars"] = ".03"
+        responses["/portfolio/balance"] = {"balance_dollars": "0", "balance_breakdown": [
+            {"exchange_index": 3, "balance": "0"}]}
+        responses["/portfolio/positions"] = {"market_positions": [], "cursor": ""}
+        other_shard = await probe_native_account(client, exchange_index=3, external_positions=(row,))
+        assert other_shard.reconciled and other_shard.balance_usd == 0
+        assert other_shard.external_cost_usd == 0
+    finally:
+        await client.disconnect()
 
 
 @pytest.mark.parametrize("seconds", [0, 1, 2_000_000_000])

@@ -1,0 +1,501 @@
+{
+  "schema_version": 1,
+  "market": {
+    "id": "nba-20261022-den-okc-normal-winner",
+    "event_id": "nba-20261022-den-okc",
+    "event_name": "Denver Nuggets at Oklahoma City Thunder",
+    "sport": "basketball",
+    "league": "NBA",
+    "participants": [
+      "Oklahoma City Thunder",
+      "Denver Nuggets"
+    ],
+    "start_time": "2026-10-23T01:30:00Z",
+    "status": "scheduled",
+    "market_type": "moneyline",
+    "player": null,
+    "player_id": null,
+    "statistic": null,
+    "line": null,
+    "outcomes": [
+      "Oklahoma City Thunder",
+      "Denver Nuggets"
+    ],
+    "settlement": {
+      "period": "full_game",
+      "scope": "event",
+      "overtime": "included",
+      "participation": "not_applicable",
+      "void_rule": "sportsbook_exceptional_terms_unverified",
+      "push_rule": "not_applicable",
+      "payout": "1",
+      "currency": "USD",
+      "contract_type": "binary",
+      "contingencies": null
+    },
+    "original_ids": {
+      "oddspapi_rest": "id1100013273682538",
+      "oddize_rest": "202610220OKC"
+    },
+    "extensions": {
+      "review_scope": "normal_completion_identity_only"
+    }
+  },
+  "source_mappings": [
+    {
+      "signature": "3189fecc9af376cfc73b633f5d1ae16f1965419b5d6c8cdd184f773586e1fb85",
+      "market": {
+        "id": "nba-20261022-den-okc-normal-winner",
+        "event_id": "nba-20261022-den-okc",
+        "event_name": "Denver Nuggets at Oklahoma City Thunder",
+        "sport": "basketball",
+        "league": "NBA",
+        "participants": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "start_time": "2026-10-23T01:30:00Z",
+        "status": "scheduled",
+        "market_type": "moneyline",
+        "player": null,
+        "player_id": null,
+        "statistic": null,
+        "line": null,
+        "outcomes": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "settlement": {
+          "period": "full_game",
+          "scope": "event",
+          "overtime": "included",
+          "participation": "not_applicable",
+          "void_rule": "sportsbook_exceptional_terms_unverified",
+          "push_rule": "not_applicable",
+          "payout": "1",
+          "currency": "USD",
+          "contract_type": "binary",
+          "contingencies": null
+        },
+        "original_ids": {
+          "oddspapi_rest": "id1100013273682538",
+          "oddize_rest": "202610220OKC"
+        },
+        "extensions": {
+          "review_scope": "normal_completion_identity_only"
+        }
+      },
+      "outcome_map": {
+        "111": "Oklahoma City Thunder",
+        "112": "Denver Nuggets"
+      },
+      "bookmaker": "pinnacle",
+      "verified": true,
+      "evidence": "2026-10-22 exact DEN-OKC NBA event/outcome review; crosswalk-v10 SHA256 639a9489c4f03277afdca9bea3d94692d0b32f4d6bf91317c9bb21e8574edfd8; source market 111; source exceptional settlement terms remain unverified",
+      "settlement_equivalence_verified": false
+    },
+    {
+      "signature": "a2e92910e3a4a040668b9bf199c20fa9c525135bca283c30225a64e3a11ae58d",
+      "market": {
+        "id": "nba-20261022-den-okc-normal-winner",
+        "event_id": "nba-20261022-den-okc",
+        "event_name": "Denver Nuggets at Oklahoma City Thunder",
+        "sport": "basketball",
+        "league": "NBA",
+        "participants": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "start_time": "2026-10-23T01:30:00Z",
+        "status": "scheduled",
+        "market_type": "moneyline",
+        "player": null,
+        "player_id": null,
+        "statistic": null,
+        "line": null,
+        "outcomes": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "settlement": {
+          "period": "full_game",
+          "scope": "event",
+          "overtime": "included",
+          "participation": "not_applicable",
+          "void_rule": "sportsbook_exceptional_terms_unverified",
+          "push_rule": "not_applicable",
+          "payout": "1",
+          "currency": "USD",
+          "contract_type": "binary",
+          "contingencies": null
+        },
+        "original_ids": {
+          "oddspapi_rest": "id1100013273682538",
+          "oddize_rest": "202610220OKC"
+        },
+        "extensions": {
+          "review_scope": "normal_completion_identity_only"
+        }
+      },
+      "outcome_map": {
+        "111": "Oklahoma City Thunder",
+        "112": "Denver Nuggets"
+      },
+      "bookmaker": "fanduel",
+      "verified": true,
+      "evidence": "2026-10-22 exact DEN-OKC NBA event/outcome review; crosswalk-v10 SHA256 639a9489c4f03277afdca9bea3d94692d0b32f4d6bf91317c9bb21e8574edfd8; source market 111; source exceptional settlement terms remain unverified",
+      "settlement_equivalence_verified": false
+    },
+    {
+      "signature": "e6b5ecbd15356159b0f8c29222c7fcb6a390388bb953ab69fb677d5a6a6be860",
+      "market": {
+        "id": "nba-20261022-den-okc-normal-winner",
+        "event_id": "nba-20261022-den-okc",
+        "event_name": "Denver Nuggets at Oklahoma City Thunder",
+        "sport": "basketball",
+        "league": "NBA",
+        "participants": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "start_time": "2026-10-23T01:30:00Z",
+        "status": "scheduled",
+        "market_type": "moneyline",
+        "player": null,
+        "player_id": null,
+        "statistic": null,
+        "line": null,
+        "outcomes": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "settlement": {
+          "period": "full_game",
+          "scope": "event",
+          "overtime": "included",
+          "participation": "not_applicable",
+          "void_rule": "sportsbook_exceptional_terms_unverified",
+          "push_rule": "not_applicable",
+          "payout": "1",
+          "currency": "USD",
+          "contract_type": "binary",
+          "contingencies": null
+        },
+        "original_ids": {
+          "oddspapi_rest": "id1100013273682538",
+          "oddize_rest": "202610220OKC"
+        },
+        "extensions": {
+          "review_scope": "normal_completion_identity_only"
+        }
+      },
+      "outcome_map": {
+        "DEN": "Denver Nuggets",
+        "OKC": "Oklahoma City Thunder"
+      },
+      "bookmaker": "circa",
+      "verified": true,
+      "evidence": "2026-10-22 exact DEN-OKC NBA event/outcome review; crosswalk-v10 SHA256 639a9489c4f03277afdca9bea3d94692d0b32f4d6bf91317c9bb21e8574edfd8; source market ml; source exceptional settlement terms remain unverified",
+      "settlement_equivalence_verified": false
+    },
+    {
+      "signature": "a6e3f258b8fa609bd03d1d33c51617488d47e5a7a693a568d7ecaac6fae3a33d",
+      "market": {
+        "id": "nba-20261022-den-okc-normal-winner",
+        "event_id": "nba-20261022-den-okc",
+        "event_name": "Denver Nuggets at Oklahoma City Thunder",
+        "sport": "basketball",
+        "league": "NBA",
+        "participants": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "start_time": "2026-10-23T01:30:00Z",
+        "status": "scheduled",
+        "market_type": "moneyline",
+        "player": null,
+        "player_id": null,
+        "statistic": null,
+        "line": null,
+        "outcomes": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "settlement": {
+          "period": "full_game",
+          "scope": "event",
+          "overtime": "included",
+          "participation": "not_applicable",
+          "void_rule": "sportsbook_exceptional_terms_unverified",
+          "push_rule": "not_applicable",
+          "payout": "1",
+          "currency": "USD",
+          "contract_type": "binary",
+          "contingencies": null
+        },
+        "original_ids": {
+          "oddspapi_rest": "id1100013273682538",
+          "oddize_rest": "202610220OKC"
+        },
+        "extensions": {
+          "review_scope": "normal_completion_identity_only"
+        }
+      },
+      "outcome_map": {
+        "111": "Oklahoma City Thunder",
+        "112": "Denver Nuggets"
+      },
+      "bookmaker": "pinnacle",
+      "verified": true,
+      "evidence": "2026-10-22 2026-10-22T19:40:13.575214+00:00 UTC live OddsPapi v4 GET /v4/odds; only bookmakerMarketId changed from prior reviewed Pinnacle NBA 111 offer; same fixture, participants, scheduled start, moneyline incl overtime, player/line/period, two native outcome labels; source quote-observation and exceptional settlement remain unverified",
+      "settlement_equivalence_verified": false
+    }
+  ],
+  "source_identities": {
+    "3189fecc9af376cfc73b633f5d1ae16f1965419b5d6c8cdd184f773586e1fb85": {
+      "provider": "oddspapi_rest",
+      "bookmaker": "pinnacle",
+      "event_id": "id1100013273682538",
+      "market_key": "111",
+      "player_key": null,
+      "line": "0",
+      "period": "result",
+      "outcome_points": {
+        "111": null,
+        "112": null
+      },
+      "context": {
+        "bookmaker_market_id": "line/4/487/1637469558/3775284939/0/moneyline",
+        "native_outcomes": {
+          "111": "home",
+          "112": "away"
+        },
+        "participants": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "participant_ids": [
+          3418,
+          3417
+        ],
+        "scheduled_start": "2026-10-23T01:30:00+00:00",
+        "event_sport": 11,
+        "tournament_id": 132,
+        "event_league": "NBA",
+        "market_catalog": {
+          "marketType": "moneyline",
+          "marketName": "Winner (incl. overtime)",
+          "playerProp": false,
+          "period": "result",
+          "handicap": 0.0
+        }
+      }
+    },
+    "a2e92910e3a4a040668b9bf199c20fa9c525135bca283c30225a64e3a11ae58d": {
+      "provider": "oddspapi_rest",
+      "bookmaker": "fanduel",
+      "event_id": "id1100013273682538",
+      "market_key": "111",
+      "player_key": null,
+      "line": "0",
+      "period": "result",
+      "outcome_points": {
+        "112": null,
+        "111": null
+      },
+      "context": {
+        "bookmaker_market_id": "734.180910683",
+        "native_outcomes": {
+          "112": "237492",
+          "111": "3319741"
+        },
+        "participants": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "participant_ids": [
+          3418,
+          3417
+        ],
+        "scheduled_start": "2026-10-23T01:30:00+00:00",
+        "event_sport": 11,
+        "tournament_id": 132,
+        "event_league": "NBA",
+        "market_catalog": {
+          "marketType": "moneyline",
+          "marketName": "Winner (incl. overtime)",
+          "playerProp": false,
+          "period": "result",
+          "handicap": 0.0
+        }
+      }
+    },
+    "e6b5ecbd15356159b0f8c29222c7fcb6a390388bb953ab69fb677d5a6a6be860": {
+      "provider": "oddize_rest",
+      "bookmaker": "circa",
+      "event_id": "202610220OKC",
+      "market_key": "ml",
+      "player_key": null,
+      "line": null,
+      "period": null,
+      "outcome_points": {
+        "DEN": null,
+        "OKC": null
+      },
+      "context": {
+        "event_sport": "nba",
+        "participants": [
+          "OKC",
+          "DEN"
+        ],
+        "scheduled_start": "2026-10-23T01:30:00+00:00",
+        "subject": null,
+        "subject_type": null,
+        "observation_clock": "oddize_observation",
+        "settlement_rules_provided": false
+      }
+    },
+    "a6e3f258b8fa609bd03d1d33c51617488d47e5a7a693a568d7ecaac6fae3a33d": {
+      "provider": "oddspapi_rest",
+      "bookmaker": "pinnacle",
+      "event_id": "id1100013273682538",
+      "market_key": "111",
+      "player_key": null,
+      "line": "0",
+      "period": "result",
+      "outcome_points": {
+        "111": null,
+        "112": null
+      },
+      "context": {
+        "bookmaker_market_id": "line/4/487/1637469558/3775347026/0/moneyline",
+        "native_outcomes": {
+          "111": "home",
+          "112": "away"
+        },
+        "participants": [
+          "Oklahoma City Thunder",
+          "Denver Nuggets"
+        ],
+        "participant_ids": [
+          3418,
+          3417
+        ],
+        "scheduled_start": "2026-10-23T01:30:00+00:00",
+        "event_sport": 11,
+        "tournament_id": 132,
+        "event_league": "NBA",
+        "market_catalog": {
+          "marketType": "moneyline",
+          "marketName": "Winner (incl. overtime)",
+          "playerProp": false,
+          "period": "result",
+          "handicap": 0.0
+        }
+      }
+    }
+  },
+  "captured_observations": {
+    "3189fecc9af376cfc73b633f5d1ae16f1965419b5d6c8cdd184f773586e1fb85": {
+      "source_time": "2026-10-22T18:09:06.177000+00:00",
+      "provider_time": "2026-10-22T18:09:06.491000+00:00",
+      "source_observed_at": null,
+      "source_price_changed_at": "2026-10-22T18:09:06.177000+00:00",
+      "observation_verified": false,
+      "observation_complete": false,
+      "market_status_verified": true,
+      "source_scope_poll_at": null,
+      "source_scope_is_current": null,
+      "verification_reason": "odds_papi_v4_change_clocks_not_quote_observation",
+      "status": "active",
+      "decimal_odds": {
+        "111": "1.337",
+        "112": "3.62"
+      }
+    },
+    "a2e92910e3a4a040668b9bf199c20fa9c525135bca283c30225a64e3a11ae58d": {
+      "source_time": null,
+      "provider_time": "2026-10-22T18:14:56.898000+00:00",
+      "source_observed_at": null,
+      "source_price_changed_at": null,
+      "observation_verified": false,
+      "observation_complete": false,
+      "market_status_verified": true,
+      "source_scope_poll_at": null,
+      "source_scope_is_current": null,
+      "verification_reason": "current_availability_flags_only_no_quote_observation",
+      "status": "active",
+      "decimal_odds": {
+        "112": "3.6",
+        "111": "1.31"
+      }
+    },
+    "e6b5ecbd15356159b0f8c29222c7fcb6a390388bb953ab69fb677d5a6a6be860": {
+      "source_time": "2026-10-22T18:30:32+00:00",
+      "provider_time": null,
+      "source_observed_at": "2026-10-22T18:30:32+00:00",
+      "source_price_changed_at": null,
+      "observation_verified": true,
+      "observation_complete": true,
+      "market_status_verified": false,
+      "source_scope_poll_at": null,
+      "source_scope_is_current": null,
+      "verification_reason": "oddize_price_observation",
+      "status": "unknown",
+      "decimal_odds": {
+        "DEN": "3.4",
+        "OKC": "1.350877192982456140350877193"
+      }
+    },
+    "a6e3f258b8fa609bd03d1d33c51617488d47e5a7a693a568d7ecaac6fae3a33d": {
+      "source_time": "2026-10-22T19:11:51.300000+00:00",
+      "provider_time": "2026-10-22T19:11:51.620000+00:00",
+      "source_observed_at": null,
+      "source_price_changed_at": "2026-10-22T19:11:51.300000+00:00",
+      "observation_verified": false,
+      "observation_complete": false,
+      "market_status_verified": true,
+      "source_scope_poll_at": null,
+      "source_scope_is_current": null,
+      "verification_reason": "odds_papi_v4_change_clocks_not_quote_observation",
+      "status": "active",
+      "decimal_odds": {
+        "111": "1.343",
+        "112": "3.58"
+      }
+    }
+  },
+  "structural_review": {
+    "schema_version": 1,
+    "canonical_event_id": "nba-20261022-den-okc",
+    "canonical_market_id": "nba-20261022-den-okc-normal-winner",
+    "source_signatures": {
+      "oddspapi_rest/pinnacle": "3189fecc9af376cfc73b633f5d1ae16f1965419b5d6c8cdd184f773586e1fb85",
+      "oddspapi_rest/fanduel": "a2e92910e3a4a040668b9bf199c20fa9c525135bca283c30225a64e3a11ae58d",
+      "oddize_rest/circa": "e6b5ecbd15356159b0f8c29222c7fcb6a390388bb953ab69fb677d5a6a6be860",
+      "oddspapi_rest/pinnacle/replacement_3775347026": "a6e3f258b8fa609bd03d1d33c51617488d47e5a7a693a568d7ecaac6fae3a33d"
+    },
+    "native_venue": "kalshi",
+    "native_event_id": "KXNBAGAME-26OCT22DENOKC",
+    "native_outcomes": {
+      "Denver Nuggets": "KXNBAGAME-26OCT22DENOKC-DEN",
+      "Oklahoma City Thunder": "KXNBAGAME-26OCT22DENOKC-OKC"
+    },
+    "native_rule_sha256": {
+      "KXNBAGAME-26OCT22DENOKC-DEN": "15a24ba192512c61f38f6c82c130c4755d21ca106938971d7c44217496cb6e76",
+      "KXNBAGAME-26OCT22DENOKC-OKC": "d0060e0780e55c72e77781f4b0cb7709c1572029a29256be483706598248a71f"
+    },
+    "native_listing_urls": {
+      "KXNBAGAME-26OCT22DENOKC-DEN": "https://external-api.kalshi.com/trade-api/v2/markets/KXNBAGAME-26OCT22DENOKC-DEN",
+      "KXNBAGAME-26OCT22DENOKC-OKC": "https://external-api.kalshi.com/trade-api/v2/markets/KXNBAGAME-26OCT22DENOKC-OKC"
+    },
+    "review_provenance": "Crosswalk-v10 SHA256 639a9489c4f03277afdca9bea3d94692d0b32f4d6bf91317c9bb21e8574edfd8; source rows from production quarantine and current public Kalshi market listings, reviewed 2026-10-22; Pinnacle native market ID replacement reviewed from sanitized v4 capture 2026-10-22T19:40:13.575214+00:00",
+    "reviewed_at": "2026-10-22T19:40:13.575214+00:00",
+    "normal_completion_agreement": "Both sides identify the full-game Denver versus Oklahoma City winner including overtime for OddsPapi market 111; Oddize ml overtime rule not established.",
+    "exceptional_settlement_difference": "Kalshi postponement within 48 hours follows final result; cancelled/not-started-within-48-hours resolves at fair price. Sportsbook exceptional void/refund terms are not verified.",
+    "source_exceptional_rules_verified": false,
+    "settlement_equivalence_verified": false,
+    "pricing_model_approved": false,
+    "execution_authorized": false
+  }
+}

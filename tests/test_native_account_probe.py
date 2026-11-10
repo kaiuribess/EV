@@ -108,6 +108,33 @@ async def test_unmanaged_position_blocks_inventory_reconciliation():
     assert result.identity_verified and not result.reconciled and result.position_count == 1
 
 
+async def test_exact_reviewed_external_position_reconciles_without_debiting_cash_twice():
+    data = fixtures()
+    data[f"/v3/account/subaccounts/{KEY}/balance"]["balance"] = "24.02825"
+    data["/v3/account/positions"]["positions"] = [
+        {"marketId": "market", "outcomeId": "outcome", "qty": 169, "cost": ".97175"}]
+    external = SimpleNamespace(venue="novig", environment="sandbox",
+        account_fingerprint=novig_wallet_fingerprint("sandbox", KEY),
+        native_market_id="market", native_outcome_id="outcome",
+        quantity=Decimal(169), cost_usd=Decimal(".97175"))
+    async with httpx.AsyncClient() as http:
+        client = NovigClient(NovigSettings(api_key=KEY), client=http)
+        async def request(method, path):
+            assert method == "GET"
+            return data[path]
+        client.request = request
+        result = await probe_native_account(client, external_positions=(external,))
+    assert result.reconciled and result.external_position_count == 1
+    assert result.external_cost_usd == Decimal(".97175")
+    assert result.balance_usd == Decimal("24.02825")
+    data["/v3/account/positions"]["positions"][0]["cost"] = ".97176"
+    async with httpx.AsyncClient() as http:
+        client = NovigClient(NovigSettings(api_key=KEY), client=http)
+        client.request = request
+        changed = await probe_native_account(client, external_positions=(external,))
+    assert not changed.reconciled
+
+
 async def test_unmanaged_resting_order_blocks_inventory_reconciliation():
     data = fixtures()
     data["/v3/account/orders"]["open"] = [{"orderId": "external", "qty": 100, "price": ".6"}]
@@ -166,6 +193,45 @@ async def test_kalshi_authenticated_key_scope_primary_account_and_fractional_cas
     assert str(snapshot.balance_usd) == "100.1234" and not snapshot.trading_permission_verified
     assert all(method == "GET" for method, _, _ in calls)
     assert all(kwargs["params"]["subaccount"] == 0 for _, path, kwargs in calls if path != "/api_keys")
+    assert snapshot.exchange_index is None and not snapshot.cash_available_verified
+
+
+async def test_kalshi_scoped_index_cash_and_paginated_inventory_are_independent_of_aggregate():
+    calls = []
+    async with httpx.AsyncClient() as http:
+        client = KalshiClient(KalshiSettings(api_key_id=KEY), client=http)
+        async def request(method, path, **kwargs):
+            assert method == "GET"
+            calls.append((path, kwargs.get("params")))
+            if path == "/api_keys":
+                return {"api_keys": [{"api_key_id": KEY, "scopes": ["read", "write"]}]}
+            if path == "/portfolio/balance":
+                assert kwargs["params"] == {"subaccount": 0, "exchange_index": 3}
+                return {"balance_dollars": "25.0000", "balance_breakdown": [
+                    {"exchange_index": 3, "balance": "25.0000"}]}
+            if path == "/portfolio/orders": return {"orders": [], "cursor": ""}
+            if path == "/portfolio/positions": return {"market_positions": [], "cursor": ""}
+            pytest.fail("Unexpected endpoint")
+        client.request = request
+        snapshot = await probe_native_account(client, exchange_index=3)
+    assert snapshot.exchange_index == 3 and snapshot.balance_usd == Decimal("25")
+    assert snapshot.reconciled and snapshot.cash_available_verified
+    assert all(params["exchange_index"] == 3 for path, params in calls if path.startswith("/portfolio/"))
+
+
+async def test_kalshi_scoped_balance_breakdown_mismatch_is_rejected():
+    async with httpx.AsyncClient() as http:
+        client = KalshiClient(KalshiSettings(api_key_id=KEY), client=http)
+        async def request(method, path, **kwargs):
+            if path == "/api_keys":
+                return {"api_keys": [{"api_key_id": KEY, "scopes": ["read"]}]}
+            if path == "/portfolio/balance":
+                return {"balance_dollars": "25.0000", "balance_breakdown": [
+                    {"exchange_index": 0, "balance": "25.0000"}]}
+            pytest.fail("Inventory must not be consulted after balance conflict")
+        client.request = request
+        with pytest.raises(ReconciliationError, match="breakdown"):
+            await probe_native_account(client, exchange_index=3)
 
 
 async def test_kalshi_wrong_key_and_nonprimary_binding_not_accepted():
@@ -196,4 +262,4 @@ async def test_prophetx_signed_registration_identity_does_not_claim_inventory_re
         client.request = request
         snapshot = await probe_native_account(client)
     assert snapshot.identity_verified and str(snapshot.balance_usd) == "50.23"
-    assert not snapshot.reconciled and not snapshot.cash_available_verified
+    assert not snapshot.reconciled and snapshot.cash_available_verified

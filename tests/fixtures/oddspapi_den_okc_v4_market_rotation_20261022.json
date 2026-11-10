@@ -1,0 +1,79 @@
+{
+  "captured_at": "2026-10-22T19:40:13.575214+00:00",
+  "endpoint": "GET /v4/odds",
+  "params": {
+    "fixtureId": "id1100013273682538",
+    "bookmakers": "pinnacle",
+    "verbosity": 3
+  },
+  "payload": {
+    "fixtureId": "id1100013273682538",
+    "statusId": 0,
+    "hasOdds": true,
+    "startTime": "2026-10-23T01:30:00.000Z",
+    "participant1Id": 3418,
+    "participant1Name": "Oklahoma City Thunder",
+    "participant2Id": 3417,
+    "participant2Name": "Denver Nuggets",
+    "sportId": 11,
+    "tournamentId": 132,
+    "tournamentName": "NBA",
+    "bookmakerOdds": {
+      "pinnacle": {
+        "bookmakerIsActive": true,
+        "suspended": false,
+        "bookmakerFixtureId": "1637469558",
+        "markets": {
+          "111": {
+            "bookmakerMarketId": "line/4/487/1637469558/3775347026/0/moneyline",
+            "marketActive": true,
+            "outcomes": {
+              "111": {
+                "players": {
+                  "0": {
+                    "active": true,
+                    "bookmakerOutcomeId": "home",
+                    "bookmakerChangedAt": "2026-10-22T19:11:51.300Z",
+                    "changedAt": "2026-10-22T19:11:51.620Z",
+                    "price": 1.343
+                  }
+                }
+              },
+              "112": {
+                "players": {
+                  "0": {
+                    "active": true,
+                    "bookmakerOutcomeId": "away",
+                    "bookmakerChangedAt": "2026-10-22T19:11:51.300Z",
+                    "changedAt": "2026-10-22T19:11:51.620Z",
+                    "price": 3.58
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "metadata": {
+    "market_catalog": {
+      "111": {
+        "marketType": "moneyline",
+        "marketName": "Winner (incl. overtime)",
+        "playerProp": false,
+        "period": "result",
+        "handicap": 0.0
+      }
+    },
+    "fixture_discovery": {
+      "fixtureId": "id1100013273682538",
+      "participant1Id": 3418,
+      "participant2Id": 3417,
+      "participant1Name": "Oklahoma City Thunder",
+      "participant2Name": "Denver Nuggets",
+      "startTime": "2026-10-23T01:30:00+00:00",
+      "tournamentName": "NBA"
+    }
+  }
+}

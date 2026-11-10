@@ -1,0 +1,246 @@
+from datetime import UTC, datetime, timedelta
+import asyncio
+from decimal import Decimal
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from evplatform.integrations.base import ProtocolError, ProviderEnvelope
+from evplatform.core.config import PricingConfig
+from evplatform.integrations.normalization import (TrustedSourceProjector,
+    VerifiedProviderMapper, extract_offers)
+from evplatform.integrations.parlay import ParlayRest
+from evplatform.integrations.parlay_focused_props import (FocusedCreditWindow,
+    exact_parlay_event_id, needs_focused_references)
+from evplatform.plugins.external import ProviderBridge
+
+
+EVENT = "472de3df50fe86e9508e60fc83c21388"
+NOW = datetime(2026, 10, 23, 22, 24, tzinfo=UTC)
+
+
+def row(book="fanduel", **updates):
+    return {"event_id": EVENT, "bookmaker": book,
+        "market_key": "player_receptions", "player": "Aaron Jones", "line": 2.5,
+        "period": "FULL", "home_team": "Minnesota Vikings",
+        "away_team": "Indianapolis Colts", "commence_time": "2026-10-25T17:00:00Z",
+        "over_price": -110, "under_price": -120,
+        "last_update": "2026-10-23T22:23:35Z", **updates}
+
+
+def provider(handler):
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+async def test_focused_novig_prop_scope_uses_free_coverage_and_one_paid_page():
+    calls = []
+
+    def handle(request):
+        assert request.method == "GET"  # focused discovery has no placement path
+        calls.append((request.url.path, dict(request.url.params)))
+        if request.url.path.endswith("/coverage"):
+            return httpx.Response(200, json={"sources": [
+                {"bookmaker": book, "api_visible_rows": 1, "status": "api_visible"}
+                for book in ("fanduel", "draftkings", "caesars")]})
+        return httpx.Response(200, json=[row(book) for book in
+            ("fanduel", "draftkings", "caesars")], headers={
+                "x-result-has-more": "false", "x-requests-last": "3"})
+
+    async with provider(handle) as http:
+        rest = ParlayRest({"enabled": True, "session_request_budget": 3},
+                          client=http, credential="fixture-secret")
+        pages, detail = await rest.fetch_focused_props(event_id=EVENT, player="Aaron Jones",
+            market="player_receptions", line="2.5",
+            bookmakers=["fanduel", "draftkings", "caesars"], limit=200)
+    assert len(calls) == 2 and calls[0][0].endswith("/props/coverage")
+    assert calls[1][0].endswith("/props")
+    assert calls[1][1]["eventId"] == EVENT and calls[1][1]["player"] == "Aaron Jones"
+    assert calls[1][1]["includeSids"] == "true"
+    assert detail["credits_reserved"] == 3 and len(pages) == 1
+    assert rest.quota.provider_reported_cost == 3
+    assert rest.quota.provider_reported_cost_samples == 1
+    offers = extract_offers(pages[0])
+    assert len(offers) == 3 and {o.bookmaker for o in offers} == {
+        "fanduel", "draftkings", "caesars"}
+    assert all(o.prices["over"] > 1 and o.prices["under"] > 1 for o in offers)
+    assert all(o.source_stored_at == datetime(2026, 10, 23, 22, 23, 35, tzinfo=UTC)
+               for o in offers)
+    assert all(not o.observation_verified and not o.market_status_verified for o in offers)
+    assert all(o.verification_reason == "unverified_observation_clock" for o in offers)
+
+
+@pytest.mark.asyncio
+async def test_focused_props_rejects_ignored_event_filter_before_publishing():
+    def handle(request):
+        if request.url.path.endswith("/coverage"):
+            return httpx.Response(200, json={"sources": [
+                {"bookmaker": book, "api_visible_rows": 1, "status": "api_visible"}
+                for book in ("fanduel", "draftkings")]})
+        return httpx.Response(200, json=[row(event_id="02002f0e4dd420f9a66b6f278dafe587")])
+
+    async with provider(handle) as http:
+        rest = ParlayRest({"enabled": True}, client=http, credential="fixture-secret")
+        with pytest.raises(ProtocolError, match="ignored the exact event"):
+            await rest.fetch_focused_props(event_id=EVENT, player="Aaron Jones",
+                market="player_receptions", line="2.5", bookmakers=["fanduel", "draftkings"])
+
+
+@pytest.mark.asyncio
+async def test_focused_props_pages_remain_nonatomic_and_keep_adverse_headers():
+    def handle(request):
+        if request.url.path.endswith("/coverage"):
+            return httpx.Response(200, json={"sources": [
+                {"bookmaker": book, "api_visible_rows": 1, "status": "api_visible"}
+                for book in ("fanduel", "draftkings")]})
+        if request.url.params["offset"] == "0":
+            return httpx.Response(200, json=[row()], headers={
+                "x-result-has-more": "true", "x-next-offset": "1",
+                "x-result-truncated": "true"})
+        return httpx.Response(200, json=[row("draftkings")], headers={
+            "x-result-has-more": "false"})
+
+    async with provider(handle) as http:
+        rest = ParlayRest({"enabled": True, "session_request_budget": 6},
+                          client=http, credential="fixture-secret")
+        pages, detail = await rest.fetch_focused_props(event_id=EVENT, player="Aaron Jones",
+            market="player_receptions", line="2.5", bookmakers=["fanduel", "draftkings"])
+    assert detail["credits_reserved"] == 6 and len(pages) == 2
+    assert all(page.metadata["headers"]["x-result-has-more"] == "true" for page in pages)
+    assert extract_offers(pages[0])[0].verification_reason == "truncated_response"
+    assert extract_offers(pages[1])[0].verification_reason == "paginated_response_not_atomic"
+
+
+def test_rest_collector_observation_and_selection_ids_do_not_verify_active_status():
+    observed = NOW - timedelta(seconds=2)
+    raw = row(last_observed=observed.isoformat(), last_update_type="collector_observation",
+              over_sid="sid-over", under_sid="sid-under")
+    frame = ProviderEnvelope("parlay_rest", "props_snapshot", [raw], NOW, 1)
+    offer, = extract_offers(frame)
+    assert offer.observation_verified and offer.observation_complete
+    assert offer.source_observed_at == observed
+    assert offer.source_selection_ids == {"over": "sid-over", "under": "sid-under"}
+    assert not offer.market_status_verified
+
+
+def test_focused_status_and_opposing_side_fail_closed():
+    suspended, = extract_offers(ProviderEnvelope("parlay_rest", "props_snapshot",
+        [row(status="SUSPENDED")], NOW, 1))
+    assert suspended.status == "suspended" and not suspended.market_status_verified
+    assert VerifiedProviderMapper()(ProviderEnvelope("parlay_rest", "props_snapshot",
+        [row(under_price=None)], NOW, 1)) == []
+
+
+def test_focused_credit_window_deduplicates_and_rolls_off():
+    budget = FocusedCreditWindow(6, 120)
+    scope = (EVENT, "Aaron Jones", "player_receptions", "2.5")
+    assert budget.available(100, scope) == 6
+    budget.charge(100, scope, 3)
+    assert budget.available(101, scope) == 0
+    assert budget.available(221, scope) == 3
+    budget.charge(221, scope, 3)
+    assert budget.available(500, scope) == 0
+    assert budget.available(3700, scope) == 3
+
+
+def test_two_book_fair_research_from_truncated_or_old_rows_still_needs_focus():
+    def quote(book, reason="unverified_observation_clock", age=1):
+        return SimpleNamespace(provider="parlay_rest", bookmaker=book, status="unknown",
+            verification_reason=reason, decimal_odds={"over": Decimal("1.9"), "under": Decimal("1.9")},
+            source_observed_at=None, observation_verified=False,
+            source_stored_at=NOW-timedelta(seconds=age))
+
+    assert needs_focused_references([quote("fanduel", "truncated_response"),
+                                     quote("draftkings", "truncated_response")],
+                                    now=NOW, max_indicator_age_ms=30000)
+    assert needs_focused_references([quote("fanduel", age=61), quote("draftkings", age=61)],
+                                    now=NOW, max_indicator_age_ms=30000)
+    assert not needs_focused_references([quote("fanduel"), quote("draftkings")],
+                                       now=NOW, max_indicator_age_ms=30000)
+    assert needs_focused_references([quote("fanduel"), quote("fanduel")],
+                                    now=NOW, max_indicator_age_ms=30000)
+
+
+def test_exact_event_resolution_never_uses_player_or_team_name_alone():
+    market = SimpleNamespace(participants=("Minnesota Vikings", "Indianapolis Colts"),
+                             start_time=datetime(2026, 10, 25, 17, tzinfo=UTC))
+    correct = {"id": EVENT, "home_team": market.participants[0],
+               "away_team": market.participants[1], "commence_time": market.start_time.isoformat()}
+    assert exact_parlay_event_id(market, [correct]) == EVENT
+    assert exact_parlay_event_id(market, [correct, dict(correct)]) is None
+    assert exact_parlay_event_id(market, [{**correct, "commence_time": "2026-10-25T17:05:00Z"}]) is None
+    assert exact_parlay_event_id(market, [{**correct, "away_team": "Other"}]) is None
+
+
+def test_focused_health_snapshot_reports_live_usage_not_startup_state():
+    bridge = ProviderBridge.__new__(ProviderBridge)
+    bridge.manifest = SimpleNamespace(name="parlay_rest")
+    bridge.engine = SimpleNamespace(registry=SimpleNamespace(records={
+        "parlay_rest": SimpleNamespace(health={"status": "connected",
+            "focused_novig_nfl_props": {"state": "disabled"}})}))
+    bridge.client = SimpleNamespace(quota=SimpleNamespace(stats=lambda: {"requests": 4}))
+    bridge.mapper = SimpleNamespace(mapped_count=7, quarantine=[])
+    bridge._focused_status = {"state": "complete", "pages": 1,
+                              "hourly_credits_reserved": 3}
+    bridge.focused_task = SimpleNamespace(done=lambda: False)
+    result = bridge.health_snapshot()
+    assert result["focused_novig_nfl_props"] == bridge._focused_status
+    assert result["quota"] == {"requests": 4}
+    assert result["mapped_quotes"] == 7
+
+
+@pytest.mark.asyncio
+async def test_focused_fetch_skips_all_parlay_requests_without_opposing_native_bids(monkeypatch):
+    sleeps = 0
+
+    async def one_cycle(_):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
+    async def unexpected_discovery(*_args, **_kwargs):
+        raise AssertionError("Native depth must be checked before Parlay requests")
+    client = SimpleNamespace(config=SimpleNamespace(focused_props_interval_seconds=120),
+        discover_events=unexpected_discovery)
+    native = SimpleNamespace(focused_prop_source_ids=["source"],
+        focused_prop_matches={"source": [SimpleNamespace(native_market_id="native",
+            opposing_outcome_id="other")]},
+        research_book_current=lambda *_args, **_kwargs: True,
+        client=SimpleNamespace(book=SimpleNamespace(asks=lambda *_args: [])))
+    bridge = ProviderBridge.__new__(ProviderBridge)
+    bridge.client = client
+    bridge.engine = SimpleNamespace(markets={"source": SimpleNamespace(id="source")},
+        registry=SimpleNamespace(records={"novig": SimpleNamespace(enabled=True, plugin=native)}))
+    bridge._focused_budget = FocusedCreditWindow(36, 120)
+    bridge._focused_status = {}
+    with pytest.raises(asyncio.CancelledError):
+        await bridge._focused_novig_props_session()
+    assert bridge._focused_status == {"state": "no_current_native_depth", "native_leads": 1}
+
+
+def test_focused_event_lookup_supplies_identity_only_for_exact_prop_rows():
+    bare = {key: value for key, value in row().items()
+            if key not in {"home_team", "away_team", "commence_time"}}
+    mapper = VerifiedProviderMapper()
+    mapper.research_projector = TrustedSourceProjector(lambda: PricingConfig(
+        reference_profile_mode="strict", reference_quality_mode="trusted_provider",
+        multi_book_consensus_enabled=True))
+    context = {"id": EVENT, "home_team": "Minnesota Vikings",
+               "away_team": "Indianapolis Colts", "commence_time": "2026-10-25T17:00:00Z"}
+    frame = ProviderEnvelope("parlay_rest", "props_snapshot",
+        [bare, {**bare, "bookmaker": "draftkings"}], NOW, 1,
+        metadata={"sport": "americanfootball_nfl", "focused_event": context})
+    assert mapper(frame) == []  # no reviewed execution/source mapping
+    assert len(mapper.research_updates) == 2
+    assert len({market.id for market, _ in mapper.research_updates}) == 1
+    assert all(quote.verification_reason == "unverified_observation_clock"
+               and not quote.market_status_verified and not quote.observation_verified
+               for _, quote in mapper.research_updates)
+    wrong = ProviderEnvelope("parlay_rest", "props_snapshot",
+        [{**bare, "event_id": "0"*32}], NOW, 2,
+        metadata={"sport": "americanfootball_nfl", "focused_event": context})
+    mapper(wrong)
+    assert mapper.research_updates == []

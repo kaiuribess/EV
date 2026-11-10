@@ -41,6 +41,14 @@ class DispatchRejected(PreflightRequired):
         super().__init__("Native dispatch rejected before transmission")
 
 
+class ConfirmedOrderRejected(VenueError):
+    """Venue explicitly rejected a submitted request; no order was accepted."""
+
+    def __init__(self, venue: str, code: str):
+        self.venue, self.code = venue, code
+        super().__init__(f"{venue}: order rejected ({code})")
+
+
 class VenueHTTPError(VenueError):
     def __init__(self, venue: str, status_code: int, code: str | None = None):
         self.status_code, self.code = status_code, code
@@ -208,8 +216,9 @@ class NativeTransport:
                 try:
                     error = response.json()
                     candidate = error.get("code")
-                    if candidate is None and isinstance(error.get("error"), dict):
-                        candidate = error["error"].get("code")
+                    if candidate is None:
+                        detail = error.get("error")
+                        candidate = detail.get("code") if isinstance(detail, dict) else detail
                     if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", candidate):
                         code = candidate
                 except (ValueError, AttributeError):

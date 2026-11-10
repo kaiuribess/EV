@@ -45,6 +45,131 @@ async def test_known_pending_ack_blocks_fresh_inventory_without_false_halt(syste
     assert risk.kill_switch
 
 
+async def test_empty_prophetx_account_probe_failure_blocks_orders_without_consuming_lease(system, monkeypatch):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        limits=SimpleNamespace(cash_policy="verified_current"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    risk.kill_switch = False
+    probe = AsyncMock(side_effect=TimeoutError("OFFLINE transient read"))
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account", probe)
+    await runtime.refresh_account()
+    assert not risk.kill_switch and risk.auto_trade
+    assert "prophetx" not in runtime.account_snapshots
+    assert runtime.account_probe_errors["prophetx"] == "TimeoutError"
+
+    snapshot = SimpleNamespace(identity_verified=True, reconciled=True,
+        account_fingerprint="a"*64)
+    probe.side_effect = None
+    probe.return_value = snapshot
+    runtime.last_account_probe = 0
+    await runtime.refresh_account()
+    assert runtime.account_snapshots["prophetx"] is snapshot
+    assert "prophetx" not in runtime.account_probe_errors
+    assert not risk.kill_switch
+
+
+@pytest.mark.parametrize("identity_verified", [True, False])
+async def test_empty_prophetx_incomplete_inventory_blocks_orders_without_emergency_stop(
+        system, monkeypatch, identity_verified):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint="a" * 64,
+        limits=SimpleNamespace(cash_policy="prophetx_exchange_rejection"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    risk.kill_switch = False
+    snapshot = SimpleNamespace(identity_verified=identity_verified, reconciled=False,
+        account_fingerprint="a" * 64 if identity_verified else "",
+        reason="OFFLINE reporting or authentication gap")
+    probe = AsyncMock(return_value=snapshot)
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account", probe)
+    await runtime.refresh_account()
+    assert runtime.account_snapshots["prophetx"] is snapshot
+    assert not runtime.account_snapshots["prophetx"].reconciled
+    assert not risk.kill_switch and risk.auto_trade
+    snapshot = SimpleNamespace(identity_verified=True, reconciled=True,
+        account_fingerprint="a" * 64, reason="")
+    probe.return_value = snapshot
+    runtime.last_account_probe = 0
+    await runtime.refresh_account()
+    assert runtime.account_snapshots["prophetx"] is snapshot
+    assert not risk.kill_switch and risk.auto_trade
+
+
+async def test_prophetx_incomplete_inventory_with_exposure_still_halts(system, monkeypatch):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint="a" * 64,
+        limits=SimpleNamespace(cash_policy="prophetx_exchange_rejection"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    runtime.external_positions = (SimpleNamespace(venue="prophetx"),)
+    risk.kill_switch = False
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account",
+        AsyncMock(return_value=SimpleNamespace(identity_verified=True, reconciled=False,
+            account_fingerprint="a" * 64, reason="OFFLINE unresolved inventory")))
+    await runtime.refresh_account()
+    assert risk.kill_switch and not risk.auto_trade
+    assert risk.kill_reason == "Native account inventory differs from the managed order ledger"
+
+
+async def test_prophetx_foreign_account_still_halts_without_local_exposure(system, monkeypatch):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        account_fingerprint="a" * 64,
+        limits=SimpleNamespace(cash_policy="prophetx_exchange_rejection"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    risk.kill_switch = False
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account",
+        AsyncMock(return_value=SimpleNamespace(identity_verified=True, reconciled=True,
+            account_fingerprint="b" * 64, reason="")))
+    await runtime.refresh_account()
+    assert risk.kill_switch and not risk.auto_trade
+    assert risk.kill_reason == "Native account identity differs from the reviewed profile"
+
+
+async def test_prophetx_account_probe_failure_with_external_exposure_halts(system, monkeypatch):
+    manager, risk, _, adapter = system
+    runtime = runtime_for(system)
+    client = SimpleNamespace(settings=SimpleNamespace(environment="sandbox"))
+    adapter.client = client
+    manager.adapters["prophetx"] = adapter
+    runtime.profile = SimpleNamespace(venue="prophetx", environment="sandbox",
+        limits=SimpleNamespace(cash_policy="verified_current"))
+    runtime.engine.registry = SimpleNamespace(records={"prophetx":
+        SimpleNamespace(plugin=SimpleNamespace(client=client))})
+    runtime.bind_client = lambda venue, native_client: adapter
+    runtime.external_positions = (SimpleNamespace(venue="prophetx"),)
+    risk.kill_switch = False
+    monkeypatch.setattr("evplatform.venues.account_probe.probe_native_account",
+        AsyncMock(side_effect=TimeoutError("OFFLINE transient read")))
+    await runtime.refresh_account()
+    assert risk.kill_switch and not risk.auto_trade
+
+
 async def test_account_reprobed_after_order_reconciliation(system, market):
     manager, risk, _, adapter = system
     runtime = runtime_for(system)
@@ -157,6 +282,6 @@ async def test_narrow_settlement_scope_blocks_second_order_after_settlement(syst
     candidate = order(market)
     runtime.profile = SimpleNamespace(venue="novig", environment="sandbox", account_fingerprint=candidate.account_fingerprint,
         market_ids=(market.id,), strategy_ids=(candidate.strategy,), settlement_policy="novig_ioc_win_loss_halt_on_exception")
-    runtime.report = lambda: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
+    runtime.report = lambda *args, **kwargs: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
     with pytest.raises(RiskRejected, match="only one managed order"):
         runtime.require_preflight(candidate)

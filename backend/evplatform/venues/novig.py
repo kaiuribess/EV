@@ -298,6 +298,8 @@ class NovigClient(NativeTransport):
 
     async def disconnect(self) -> None:
         await super().disconnect()
+        self.book.reset()
+        self.last_message_time = None
         self.authenticated = False
         self.health_reason = "Novig is disconnected"
 
@@ -493,6 +495,9 @@ class NovigClient(NativeTransport):
         while not self._closed:
             self.book.reset()
             self._nonce = 0
+            recovery_nonce = None
+            recovery_deadline = None
+            resync_attempts = 0
             try:
                 await self._refresh_configured_subscriptions()
                 url = self.HOSTS[self.settings.environment].replace("https://", "wss://") + "/v3/ws"
@@ -502,12 +507,44 @@ class NovigClient(NativeTransport):
                     self._ws, self.health = socket, "subscribing"
                     self.health_reason = "Waiting for Novig WebSocket subscription acknowledgement"
                     subscription_nonce = await self._command("subscribe", self.selection, wait=False)
-                    async for raw in socket:
+                    frames = aiter(socket)
+                    while True:
+                        try:
+                            # The resnapshot has an absolute deadline. Market
+                            # deltas or heartbeats can keep arriving while its
+                            # acknowledgement never does; a per-frame timeout
+                            # would then retain an invalid book indefinitely.
+                            remaining = (recovery_deadline - time.monotonic()
+                                         if recovery_deadline is not None else None)
+                            if remaining is not None and remaining <= 0:
+                                raise TimeoutError("Novig book resnapshot timed out")
+                            raw = await asyncio.wait_for(anext(frames),
+                                timeout=remaining)
+                        except StopAsyncIteration:
+                            break
                         frame = json.loads(raw, parse_float=Decimal)
                         if not isinstance(frame, dict):
                             raise ValueError("Novig frame must be an object")
                         self.last_message_time = time.time()
                         nonce = frame.get("nonce")
+                        if recovery_nonce is not None:
+                            # Deltas received while our local book is invalid cannot
+                            # restore it. Only the requested authoritative snapshot can.
+                            if nonce != recovery_nonce:
+                                continue
+                            snapshot = frame.get("snapshot")
+                            if (not isinstance(snapshot, dict) or
+                                    any(market not in snapshot or "book" not in snapshot[market]
+                                        for market in self.selection.get("markets", {}))):
+                                raise VenueError("Novig book resnapshot was rejected or incomplete")
+                            self.book.apply(frame)
+                            recovery_nonce = None
+                            recovery_deadline = None
+                            self.health = "streaming"
+                            self.health_reason = "Novig WebSocket book resnapshot confirmed"
+                            failures = 0
+                            yield frame
+                            continue
                         if self.health == "subscribing" and nonce in {None, subscription_nonce}:
                             if "error" in frame or "code" in frame:
                                 error = frame.get("error")
@@ -527,7 +564,23 @@ class NovigClient(NativeTransport):
                                 or not isinstance(frame.get("snapshot"), dict)
                             ):
                                 raise VenueError("Novig subscription acknowledgement is missing its snapshot")
-                        self.book.apply(frame)
+                        try:
+                            self.book.apply(frame)
+                        except SequenceGap as exc:
+                            # Novig documents snapshot recovery without dropping
+                            # subscriptions. Invalidate every mapped book first;
+                            # a stale or partial book must never be executable.
+                            if (self.health != "streaming" or not exc.subject.endswith(":book") or
+                                    exc.subject.removesuffix(":book") not in self.selection.get("markets", {})):
+                                raise
+                            if resync_attempts >= 2:
+                                raise  # Bound snapshot requests; reconnect after repeated inconsistencies.
+                            resync_attempts += 1
+                            self._record_sequence_gap(exc)
+                            yield self._invalidate_stream("resyncing", "Novig book gap; awaiting a fresh snapshot")
+                            recovery_nonce = await self._command("snapshot", self.selection, wait=False)
+                            recovery_deadline = time.monotonic() + self.settings.timeout_seconds
+                            continue
                         if nonce == subscription_nonce and "subscribed" in frame:
                             self.health = "streaming"
                             self.health_reason = "Novig WebSocket subscription confirmed"
@@ -564,7 +617,8 @@ class NovigClient(NativeTransport):
                     failures += 1
             finally:
                 self._ws = None
-                if self.health in {"streaming", "subscribing"}:
+                self.book.reset()
+                if self.health in {"streaming", "subscribing", "resyncing"}:
                     self.health = "disconnected"
                     self.health_reason = "Novig WebSocket disconnected"
                 for future in self._pending.values():

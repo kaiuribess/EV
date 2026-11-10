@@ -113,6 +113,35 @@ def test_prophetx_exact_american_limits_and_conservative_payout_bounds():
     assert order.instrument.payout_bound(D("20"), D("150")) == D("50")
 
 
+def test_prophetx_one_dollar_winnings_fee_is_not_upfront_cash_or_loss():
+    reviewed = intent("prophetx", quantity="1", limit_price="100", max_fee_usd=".02",
+                      fee_payment_timing="winnings_only")
+    assert reviewed.reserved_cost_usd == D("1")
+    assert reviewed.maximum_economic_cost_usd == D("1.02")
+    assert intent("prophetx", quantity="1", limit_price="100", max_fee_usd=".02").reserved_cost_usd == D("1.02")
+    assert reviewed.model_copy(update={"quantity": D("1.01")}).reserved_cost_usd > D("1")
+    with pytest.raises(ValidationError):
+        intent("kalshi", fee_payment_timing="winnings_only")
+
+
+def test_prophetx_win_loss_void_and_cancelled_remainder_cash_accounting():
+    order = intent("prophetx", quantity="1", limit_price="100", max_fee_usd=".02",
+                   fee_payment_timing="winnings_only")
+    ledger = NativeAccounting(order, "native-order")
+    ledger.apply_fill(fill(quantity=".50", price="100", cost_usd=".50",
+                           gross_payout_usd="1", fee_usd="0"))
+    assert ledger.totals.cost_usd == D(".50")  # Unfilled remainder never becomes a loss.
+    assert ledger.totals.fee_usd == 0
+    win = NativeSettlement(order_id="native-order", client_order_id="client-id",
+        settlement_id="win", kind="win", gross_return_usd="1", returned_fees_usd="0",
+        settled_at=NOW, source="OFFLINE wallet fixture", verified=True)
+    loss = win.model_copy(update={"kind": "loss", "gross_return_usd": D(0)})
+    void = win.model_copy(update={"kind": "void", "gross_return_usd": D(".50")})
+    assert win.realized_profit(ledger) == D(".50")
+    assert loss.realized_profit(ledger) == D("-.50")
+    assert void.realized_profit(ledger) == D(0)
+
+
 def test_prophetx_partial_usd_stake_and_actual_fill_price_not_order_limit():
     ledger = NativeAccounting(intent("prophetx"), "native-order")
     ledger.apply_fill(fill(quantity="10", price="-125", cost_usd="10", gross_payout_usd="18", fee_usd="0.15"))

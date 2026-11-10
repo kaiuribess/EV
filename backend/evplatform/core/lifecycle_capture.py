@@ -122,7 +122,7 @@ async def _pages(client, path, collection, *, params=None, envelope=None, cursor
                 and collection == "orders" and envelope == "data" and cursor_key == "next_cursor"):
             try:
                 cursor, end_marker = reporting_cursor(body, endpoint=path, collection=collection)
-                if end_marker == "observed_empty_order_null":
+                if end_marker in {"observed_empty_order_null", "observed_short_order_null"}:
                     # This compatibility path must retain real reporting time;
                     # local receipt must never manufacture a fresh empty result.
                     source_time(raw.get("last_synced_at"), observed_at=utcnow(),

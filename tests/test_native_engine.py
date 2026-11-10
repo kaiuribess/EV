@@ -108,12 +108,17 @@ async def test_offline_native_engine_stream_risk_fill_audit_and_restart(tmp_path
         assert engine.native.signals[market.id].status == "NEGATIVE EV"
         assert not adapter.submissions
 
+        engine.risk.kill_switch = False  # OFFLINE gate fixture only.
         engine.risk.auto_trade = True
+        engine.risk.native_enabled_venues = frozenset({"novig"})
+        engine.risk.native_authorization_expires_at = utcnow() + timedelta(minutes=5)
         await engine.bus.publish(Envelope(schema_name="exchange.native_book", source="OFFLINE fixture", payload=positive))
         await asyncio.wait_for(engine.process_queue.join(), 2)
         await asyncio.wait_for(engine.risk_queue.join(), 2)
         assert len(adapter.submissions) == 1, (engine.native.report().blocking_items, list(engine.events))
         assert not engine.risk.auto_trade
+        assert engine.risk.kill_switch
+        assert engine.risk.native_authorization_expires_at is None
         submitted = next(iter(engine.risk.native_orders.values()))
         assert submitted.status == OrderStatus.OPEN and submitted.filled_quantity == 0
         assert submitted.quantity == 100

@@ -137,6 +137,11 @@ def normalize_kalshi_order(intent: NativeOrderIntent, payload: dict, *, expected
     native_id = _identity(intent, data, "order_id", "client_order_id", expected_order_id)
     if data.get("ticker") != intent.instrument.instrument_id or data.get("action") != "buy":
         raise ReconciliationError("Kalshi contract/action does not match intent")
+    if intent.instrument.exchange_index is not None and (
+            type(data.get("exchange_index")) is not int
+            or data["exchange_index"] != intent.instrument.exchange_index
+            or data.get("subaccount_number") != 0):
+        raise ReconciliationError("Kalshi order shard or primary subaccount differs from durable intent")
     side = data.get("outcome_side", data.get("side"))
     if side != intent.instrument.native_outcome:
         raise ReconciliationError("Kalshi outcome does not match intent")
@@ -385,8 +390,13 @@ def match_client_order(venue: str, intent: NativeOrderIntent, rows: list[dict]) 
     if venue not in keys:
         raise ReconciliationError("Unsupported native venue")
     client_key, native_key = keys[venue]
-    matches = {_text(row.get(native_key), "native order ID") for row in rows
-               if _object(row, "history row").get(client_key) == intent.client_order_id}
+    candidates = [row for row in rows if _object(row, "history row").get(client_key) == intent.client_order_id]
+    if venue == "kalshi" and intent.instrument.exchange_index is not None and any(
+            row.get("ticker") != intent.instrument.instrument_id
+            or row.get("exchange_index") != intent.instrument.exchange_index
+            or row.get("subaccount_number") != 0 for row in candidates):
+        raise ReconciliationError("Kalshi recovered order escaped durable shard/account/market identity")
+    matches = {_text(row.get(native_key), "native order ID") for row in candidates}
     if len(matches) > 1:
         raise ReconciliationError("Multiple native orders share this client ID; manual review required")
     return next(iter(matches), None)

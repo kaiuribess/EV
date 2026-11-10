@@ -49,6 +49,10 @@ class MonitorCashObservation(Contract):
     reported_unmatched_order_balance_usd: Decimal | None = None
     reported_balance_reservation_usd: Decimal | None = None
     reported_unsettled_funds_usd: Decimal | None = None
+    reported_displayed_cash_usd: Decimal | None = None
+    reported_displayed_bonus_usd: Decimal | None = None
+    reported_bonus_reservation_usd: Decimal | None = None
+    reported_available_to_withdraw_usd: Decimal | None = None
     observed_at: datetime
     request_started_at: datetime
     identity_verified: bool = False
@@ -65,7 +69,9 @@ class MonitorCashObservation(Contract):
 
     @field_validator("reported_balance_usd", "reported_buying_power_usd", "reported_exposure_credit_usd",
                      "reported_matched_order_balance_usd", "reported_unmatched_order_balance_usd",
-                     "reported_balance_reservation_usd", "reported_unsettled_funds_usd", mode="before")
+                     "reported_balance_reservation_usd", "reported_unsettled_funds_usd",
+                     "reported_displayed_cash_usd", "reported_displayed_bonus_usd",
+                     "reported_bonus_reservation_usd", "reported_available_to_withdraw_usd", mode="before")
     @classmethod
     def exact_money(cls, value):
         return None if value is None else _money(value)
@@ -156,7 +162,7 @@ async def observe_monitor_cash(client, *, now: Callable[[], datetime] = utcnow) 
     elif venue == "prophetx":
         row = _object(_object(await client.fetch_balance()).get("data"))
         result.update(reported_balance_usd=_money(row.get("balance")),
-                      account_scope="Connected monitor session; reported balance may include exposure credits")
+                      account_scope="Connected ProphetX wallet; reported available cash excludes separately listed exposure credit")
         for field, output in (("gec_balance", "reported_exposure_credit_usd"),
                               ("matched_order_balance", "reported_matched_order_balance_usd"),
                               ("unmatched_order_balance", "reported_unmatched_order_balance_usd")):
@@ -180,7 +186,11 @@ async def observe_monitor_cash(client, *, now: Callable[[], datetime] = utcnow) 
                       **_clock(row.get("lastUpdated"), now()))
         for field, output in (("buyingPower", "reported_buying_power_usd"),
                               ("balanceReservation", "reported_balance_reservation_usd"),
-                              ("unsettledFunds", "reported_unsettled_funds_usd")):
+                              ("unsettledFunds", "reported_unsettled_funds_usd"),
+                              ("displayedCash", "reported_displayed_cash_usd"),
+                              ("displayedBonus", "reported_displayed_bonus_usd"),
+                              ("bonusReservation", "reported_bonus_reservation_usd"),
+                              ("availableToWithdraw", "reported_available_to_withdraw_usd")):
             if field in row:
                 result[output] = _money(row[field])
     if binding != _binding(client) or not _authenticated(client, venue):

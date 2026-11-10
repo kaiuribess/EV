@@ -1,12 +1,19 @@
 # Operator limits and overlap protection
 
-The current requested launch policy is **quarter Kelly**, with **$5 = one
-reporting unit**, each account's verified available cash as its spending cap,
-no fixed dollar stake cap, no daily-loss stop, and one active/unsettled bet per
-game or player across venues. The earlier $5-per-bet cap is superseded. Unit
-size is neither a minimum stake nor a required increment. The engine rounds
-quantity down and skips an order that cannot meet its verified venue minimum
-within the Kelly budget. See [the sizing calculation](STAKE_SIZING.md).
+The saved `data/operator_launch_limits.json` remains an unapplied draft. On
+October 26 the owner set a $25 Novig ceiling for each monetary limit: per-order
+debit, event/player/venue/correlated/total open exposure, daily upfront debit,
+and daily realized loss. Verified account cash remains a separate, tighter
+limit when below $25. The owner did not set a daily attempt-count cap; the
+existing one-order-per-minute and one-open-order limits remain. The draft is
+not an account-bound launch profile or recurring authorization.
+`unit_size_usd=5` is only a reporting unit.
+
+The Novig draft uses quarter Kelly and one active/unsettled bet per game or
+player across venues. The earlier $5-per-bet cap is superseded. Unit size is
+neither a minimum stake nor a required increment. The engine rounds quantity
+down and skips an order that cannot meet its verified venue minimum within the
+Kelly budget. See [the sizing calculation](STAKE_SIZING.md).
 
 `data/operator_launch_limits.json` is the local draft of these limits. It is not
 a launch profile or permission to submit orders. After the exact account,
@@ -23,6 +30,9 @@ stop. That local pilot draft supersedes the uncapped example below until it is
 explicitly changed after the first order has been fully reconciled. The script
 only probes the account and configures limits; it creates no market mapping,
 launch profile, execution certificate or order.
+
+The following uncapped JSON was an earlier example, not the current Novig
+draft or an approval:
 
 ```json
 {

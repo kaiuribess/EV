@@ -600,3 +600,15 @@ code { font: 9px 'IBM Plex Mono',monospace; background: #223046; padding: 2px 4p
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
+.reference-list { display: grid; gap: 12px; padding: 16px; max-height: 670px; overflow-y: auto; }
+.reference-card { width: 100%; text-align: left; color: inherit; background: rgba(18, 31, 47, .76); border: 1px solid #304158; border-radius: 12px; padding: 15px; display: grid; gap: 9px; cursor: pointer; }
+.reference-card:hover { border-color: #6c8b9e; }
+.reference-card > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.reference-card small, .reference-card p { color: #aabbd0; margin: 0; line-height: 1.5; }
+.reference-probabilities, .reference-books { display: flex; gap: 8px; flex-wrap: wrap; }
+.reference-probabilities > span, .reference-books > span { display: inline-block; padding: 7px 9px; border: 1px solid #304158; border-radius: 8px; font-size: 12px; }
+.reference-probabilities strong { color: #b4dd7c; margin-left: 5px; }
+.reference-books > span { color: #b8c6d4; }
+.reference-native { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px; border: 1px solid #4e654d; border-radius: 8px; background: rgba(92, 116, 72, .12); font-size: 12px; }
+.reference-native > span { color: #c1d1df; }
+.reference-native > small { flex-basis: 100%; }

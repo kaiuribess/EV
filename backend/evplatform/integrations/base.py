@@ -112,6 +112,8 @@ class QuotaGuard:
     clock: Callable[[], float] = time.monotonic
     calls: int = 0
     billable_requests: int = 0
+    provider_reported_cost: int = 0
+    provider_reported_cost_samples: int = 0
     provider_remaining: int | None = None
     minute_remaining: int | None = None
     blocked_until: float = 0
@@ -153,6 +155,10 @@ class QuotaGuard:
             except ValueError:
                 return None
 
+        reported_cost = number("x-requests-last")
+        if reported_cost is not None and reported_cost >= 0:
+            self.provider_reported_cost += reported_cost
+            self.provider_reported_cost_samples += 1
         remaining = number("x-ratelimit-remaining-month")
         if remaining is None:
             remaining = number("x-requests-remaining")
@@ -178,6 +184,8 @@ class QuotaGuard:
         return {
             "requests": self.calls,
             "reserved_cost": self.billable_requests,
+            "provider_reported_cost": self.provider_reported_cost,
+            "provider_reported_cost_samples": self.provider_reported_cost_samples,
             "local_session_budget": self.session_budget,
             "provider_remaining": self.provider_remaining,
             "minute_remaining": self.minute_remaining,

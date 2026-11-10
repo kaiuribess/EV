@@ -19,6 +19,32 @@ from evplatform.core.pricing import NoSignal, fair_value
 from evplatform.core.risk import RiskEngine, RiskRejected
 from evplatform.core.config import RiskConfig
 from evplatform.plugins.native_positive_ev import NativePositiveEV
+from evplatform.venues.common import PreflightRequired
+
+
+async def test_manual_prophetx_order_terms_use_fresh_ladder_without_dispatch():
+    refresh = AsyncMock(return_value={-164, 160})
+    encoded = []
+    adapter = SimpleNamespace(client=SimpleNamespace(refresh_verified_price_ladder=refresh),
+                              build_native_request=lambda intent: encoded.append(intent))
+    service = ManualNativeService(SimpleNamespace(native=SimpleNamespace(
+        manager=SimpleNamespace(adapters={"prophetx": adapter}))))
+    intent = object()
+    await service._verify_prophetx_request("prophetx", SimpleNamespace(intent=intent))
+    refresh.assert_awaited_once()
+    assert encoded == [intent]
+
+
+async def test_manual_prophetx_unverified_request_blocks_review():
+    refresh = AsyncMock(return_value={-164, 160})
+    adapter = SimpleNamespace(client=SimpleNamespace(refresh_verified_price_ladder=refresh),
+                              build_native_request=lambda _: (_ for _ in ()).throw(
+                                  PreflightRequired("Limit is absent from current ladder")))
+    service = ManualNativeService(SimpleNamespace(native=SimpleNamespace(
+        manager=SimpleNamespace(adapters={"prophetx": adapter}))))
+    with pytest.raises(RiskRejected, match="order terms cannot be verified"):
+        await service._verify_prophetx_request("prophetx", SimpleNamespace(intent=object()))
+    refresh.assert_awaited_once()
 
 
 def setup_native(market, quotes, *, venue="novig", price="0.450", quantity="100", **fees):
@@ -63,45 +89,182 @@ async def test_manual_review_is_one_use_and_does_not_enable_automation(market, q
     risk = RiskEngine(RiskConfig())
     reviewed = []
     def check(order):
-        assert risk.manual_order_active(order.id)
+        assert not risk.manual_order_active(order.id)  # Preview has no dispatch authority.
         reviewed.append(order.id)
     async def place(found, *, execution_origin):
         assert execution_origin == "manual" and risk.manual_order_active(found.intent.id)
         return SimpleNamespace(model_dump=lambda **_: {"id": found.intent.id, "status": "open"})
-    native = SimpleNamespace(manager=SimpleNamespace(_check=check),
-        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id), execute=place)
+    native = SimpleNamespace(preview_check=check,
+        books={(first.market_id, first.venue, first.outcome): data[2]},
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id, account_fingerprint="a" * 64),
+        execute=place)
     engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
                              markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
     service = ManualNativeService(engine)
-    service._gate = lambda: "reviewed-profile"
+    service._gate = lambda **_: "reviewed-profile"
     service._fresh_candidate = AsyncMock(side_effect=[first, second])
     preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
     assert preview["candidate"]["intent"]["id"] == first.intent.id
-    result = await service.submit(preview["review_token"])
+    result = await service.submit(preview["review_token"], preview["terms_digest"], D("1"), preview["proposal_digest"])
     assert result["order"]["id"] == second.intent.id
     assert reviewed == [first.intent.id]
     assert not risk.auto_trade and not risk.manual_order_active(second.intent.id)
     with pytest.raises(RiskRejected, match="already used"):
-        await service.submit(preview["review_token"])
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"), preview["proposal_digest"])
 
 
 async def test_manual_review_rejects_changed_price_without_placement(market, quotes):
     data = setup_native(market, quotes)
     first = candidate(data)
-    changed = first.model_copy(update={"roi": first.roi + D(".01")})
+    changed = first.model_copy(update={"roi": first.roi - D(".01")})
     risk = RiskEngine(RiskConfig())
     execute = AsyncMock()
-    native = SimpleNamespace(manager=SimpleNamespace(_check=lambda _: None),
-        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id), execute=execute)
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(first.market_id, first.venue, first.outcome): data[2]},
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id, account_fingerprint="a" * 64),
+        execute=execute)
     engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
                              markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
     service = ManualNativeService(engine)
-    service._gate = lambda: "reviewed-profile"
+    service._gate = lambda **_: "reviewed-profile"
     service._fresh_candidate = AsyncMock(side_effect=[first, changed])
     preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
-    with pytest.raises(RiskRejected, match="changed"):
-        await service.submit(preview["review_token"])
+    with pytest.raises(RiskRejected, match="approved bounds"):
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"), preview["proposal_digest"])
     execute.assert_not_awaited()
+
+
+async def test_manual_review_binds_explicit_owner_confirmation_and_never_places_on_mismatch(market, quotes):
+    data = setup_native(market, quotes)
+    found = candidate(data)
+    risk = RiskEngine(RiskConfig())
+    risk.kill_switch = True
+    execute = AsyncMock()
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(found.market_id, found.venue, found.outcome): data[2]},
+        build_order=lambda item, **_: SimpleNamespace(id=item.intent.id, account_fingerprint="a" * 64),
+        execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(return_value=found)
+    review = await service.preview(found.market_id, found.venue, found.outcome, D("1"))
+    assert review["unsigned"] and review["risk_decisions"]["kill_switch_on"]
+    with pytest.raises(RiskRejected, match="confirmation"):
+        await service.submit(review["review_token"], "0" * 64, D("1"), review["proposal_digest"])
+    execute.assert_not_awaited()
+
+
+async def test_manual_proposal_digest_and_account_recheck_block_changed_terms(market, quotes):
+    data = setup_native(market, quotes)
+    found = candidate(data)
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock()
+    accounts = iter(("a" * 64, "b" * 64))
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(found.market_id, found.venue, found.outcome): data[2]},
+        build_order=lambda item, **_: SimpleNamespace(id=item.intent.id,
+            account_fingerprint=next(accounts)), execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(return_value=found)
+    preview = await service.preview(found.market_id, found.venue, found.outcome, D("1"))
+    with pytest.raises(RiskRejected, match="Account, market"):
+        await service.submit(preview["review_token"], preview["terms_digest"],
+                             D("1"), preview["proposal_digest"])
+    execute.assert_not_awaited()
+    assert risk.kill_switch
+
+
+async def test_manual_proposal_expiry_and_duplicate_digest_fail_without_placement(market, quotes):
+    data = setup_native(market, quotes)
+    found = candidate(data)
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock()
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(found.market_id, found.venue, found.outcome): data[2]},
+        build_order=lambda item, **_: SimpleNamespace(id=item.intent.id,
+            account_fingerprint="a" * 64), execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(return_value=found)
+    review = await service.preview(found.market_id, found.venue, found.outcome, D("1"))
+    with pytest.raises(RiskRejected, match="confirmation"):
+        await service.submit(review["review_token"], review["terms_digest"], D("1"), "0" * 64)
+    with pytest.raises(RiskRejected, match="already used"):
+        await service.submit(review["review_token"], review["terms_digest"],
+                             D("1"), review["proposal_digest"])
+    execute.assert_not_awaited()
+
+
+async def test_manual_reverification_accepts_fresh_clock_and_harmless_depth_change(market, quotes):
+    data = setup_native(market, quotes)
+    first = candidate(data)
+    later = utcnow()
+    refreshed_refs = tuple({**row, "source_time": later.isoformat(),
+                            "source_observed_at": later.isoformat()} for row in first.references)
+    refreshed = first.model_copy(update={"references": refreshed_refs, "calculated_at": later,
+                                        "book_revision": first.book_revision + 1})
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock(return_value=SimpleNamespace(model_dump=lambda **_: {"id": first.intent.id}))
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(first.market_id, first.venue, first.outcome): data[2]},
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id, account_fingerprint="a" * 64),
+        execute=execute, build_id="build-1")
+    storage = SimpleNamespace(event=AsyncMock())
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"), storage=storage)
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(side_effect=[first, refreshed])
+    preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
+    native.books[(first.market_id, first.venue, first.outcome)] = data[2].model_copy(update={
+        "revision": 2, "source_time": later})
+    result = await service.submit(preview["review_token"], preview["terms_digest"], D("1"),
+                                  preview["proposal_digest"])
+    assert result["final_validation_digest"] != preview["proposal_digest"]
+    event = storage.event.await_args.args[0]
+    assert event.payload["original_proposal_digest"] == preview["proposal_digest"]
+    assert event.payload["final_validation_digest"] == result["final_validation_digest"]
+    assert storage.event.await_args.kwargs == {"durable": True}
+    execute.assert_awaited_once()
+    assert not risk.auto_trade and risk.kill_switch
+
+
+@pytest.mark.parametrize("change", ["policy", "build", "quantity", "debit", "fee", "edge"])
+async def test_manual_reverification_rejects_scope_or_worse_economics(market, quotes, change):
+    data = setup_native(market, quotes)
+    first = candidate(data)
+    updated = {"policy": {"reference_policy_digest": "different"},
+        "quantity": {"intent": first.intent.model_copy(update={"quantity": first.intent.quantity + D(1)})},
+        "debit": {"intent": first.intent.model_copy(update={"limit_price": first.intent.limit_price + D(".005")})},
+        "fee": {"intent": first.intent.model_copy(update={"max_fee_usd": first.intent.max_fee_usd + D(".001")})},
+        "edge": {"ev_per_usd_payout": first.ev_per_usd_payout - D(".01")}}
+    second = first.model_copy(update=updated.get(change, {}))
+    risk = RiskEngine(RiskConfig())
+    execute = AsyncMock()
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(first.market_id, first.venue, first.outcome): data[2]}, build_id="build-1",
+        build_order=lambda found, **_: SimpleNamespace(id=found.intent.id, account_fingerprint="a" * 64),
+        execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={data[0].id: data[0]}, settings=SimpleNamespace(mode="sandbox"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(side_effect=[first, second])
+    preview = await service.preview(first.market_id, first.venue, first.outcome, D("1"))
+    if change == "build":
+        native.build_id = "build-2"
+    with pytest.raises(RiskRejected, match="changed|approved bounds"):
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"),
+                             preview["proposal_digest"])
+    execute.assert_not_awaited()
+    assert risk.kill_switch and not risk.auto_trade
 
 
 async def test_manual_max_cost_resizes_candidate_before_review(market, quotes):
@@ -155,6 +318,88 @@ def test_fractional_kalshi_and_prophetx_stakes_keep_native_quantity(market, quot
     assert stake.intent.quantity == D("4.17")
     assert stake.intent.maximum_cost_usd == D("4.17")
     assert stake.intent.minimum_gross_payout_usd == D("8.34")  # each .01 match may round profit down
+
+
+def prophetx_one_dollar_fixture(market, quotes, *, fair_probability=".60", timing="winnings_only"):
+    m, q, book, fair, config, now = setup_native(market, quotes, venue="prophetx",
+        price="100", quantity="4", per_unit_usd=".02", per_fill_usd="0", fixed_order_usd="0",
+        fee_payment_timing=timing)
+    # A $1 minimum *fill* is a fixture assumption, not a verified venue fact.
+    instrument = book.instrument.model_copy(update={"quantity_step": D("1"),
+        "minimum_order_cost_usd": D("1"), "order_minimum_verified": True,
+        "order_minimum_source": "OFFLINE minimum-and-fill fixture"})
+    book = book.model_copy(update={"instrument": instrument, "fee_bound": book.fee_bound.model_copy(
+        update={"instrument_fingerprint": instrument_fingerprint(instrument)})})
+    p = D(fair_probability)
+    fair = fair.model_copy(update={"probabilities": {"home": p, "away": 1-p}})
+    return m, q, book, fair, config, now
+
+
+async def test_prophetx_owner_preview_has_no_location_or_order_write(market, quotes):
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes)
+    found = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+        mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    # Only this service boundary is under test; production fair-policy approval
+    # is deliberately absent from the fixture and remains a separate gate.
+    found = found.model_copy(update={"intent": found.intent.model_copy(update={"mode": "production"})})
+    risk = RiskEngine(RiskConfig())
+    geo = AsyncMock(side_effect=RiskRejected("Location denied"))
+    execute = AsyncMock()
+    native = SimpleNamespace(preview_check=lambda _: None,
+        books={(found.market_id, found.venue, found.outcome): book},
+        build_order=lambda item, **_: SimpleNamespace(id=item.intent.id,
+            account_fingerprint="a" * 64, intent=item.intent),
+        verify_prophetx_location=geo, execute=execute)
+    engine = SimpleNamespace(native=native, risk=risk, oms=SimpleNamespace(lock=asyncio.Lock()),
+        markets={m.id: m}, settings=SimpleNamespace(mode="production"))
+    service = ManualNativeService(engine)
+    service._gate = lambda **_: "reviewed-profile"
+    service._fresh_candidate = AsyncMock(return_value=found)
+    service._verify_prophetx_request = AsyncMock()
+    preview = await service.preview(found.market_id, "prophetx", found.outcome, D("1"))
+    assert preview["unsigned"] and preview["candidate"]["intent"]["quantity"] == "1"
+    geo.assert_not_awaited()
+    execute.assert_not_awaited()
+    with pytest.raises(RiskRejected, match="Location denied"):
+        await service.submit(preview["review_token"], preview["terms_digest"], D("1"),
+                             preview["proposal_digest"])
+    geo.assert_awaited_once()
+    execute.assert_not_awaited()
+
+
+def test_prophetx_one_dollar_limit_keeps_win_fee_in_ev_but_not_debit(market, quotes):
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes)
+    found = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+        mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    assert found.intent.quantity == D("1") and found.intent.reserved_cost_usd == D("1")
+    assert found.intent.max_fee_usd == D(".02") and found.expected_profit_usd == D(".188")
+    assert abs(found.sizing.full_kelly_fraction - D(".188") / D(".98")) < D("1e-26")
+    assert found.roi == D(".188") / D("1.012")
+    assert found.sizing.minimum_cost_with_fees_usd == D("1.02")
+    assert found.sizing.minimum_upfront_debit_usd == D("1")
+    with pytest.raises(NoSignal, match="minimum upfront debit"):
+        native_opportunity(m, fair, book.model_copy(update={"fee_bound": book.fee_bound.model_copy(
+            update={"fee_payment_timing": "upfront_or_unknown"})}), config, max_stake_usd=D("1"),
+            mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    with pytest.raises(NoSignal, match="timing changed"):
+        native_revalidate_intent(found.intent, m, fair, book.model_copy(update={
+            "fee_bound": book.fee_bound.model_copy(update={"fee_payment_timing": "upfront_or_unknown"})}),
+            config, now=now)
+
+
+def test_prophetx_one_dollar_no_forced_kelly_and_fee_negative_reject(market, quotes):
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes, fair_probability=".505")
+    before_fee = fair.probabilities["home"] * D("2") - D("1")
+    negative = native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+        mode="sandbox", stake_sizing="capped", now=now)
+    assert before_fee > 0 and negative.expected_profit_usd < 0 and not negative.qualified
+    m, q, book, fair, config, now = prophetx_one_dollar_fixture(market, quotes, fair_probability=".509")
+    with pytest.raises(NoSignal, match="below the verified native minimum"):
+        native_opportunity(m, fair, book, config, max_stake_usd=D("1"),
+            mode="sandbox", stake_sizing="quarter_kelly", available_cash_usd=D("50.10"), now=now)
+    with pytest.raises(NoSignal):
+        native_opportunity(m, fair, book.model_copy(update={"status": "suspended"}), config,
+            max_stake_usd=D("1"), mode="sandbox", now=now)
 
 
 def test_negative_native_observations_are_visible_but_not_qualified(market, quotes):

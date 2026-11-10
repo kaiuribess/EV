@@ -99,6 +99,21 @@ async def test_typed_bus_and_observer_overflow():
         await bus.publish(event.model_copy(update={"schema_name": "unknown"}))
 
 
+async def test_stopped_critical_consumer_cannot_halt_unrelated_ingestion():
+    schemas = SchemaRegistry()
+    schemas.register("game", 1, GameState)
+    halts = []
+    bus = EventBus(schemas, halts.append)
+    stopped = bus.subscribe("paper-only", ["game"], critical=True, capacity=1)
+    bus.unsubscribe(stopped)
+    event = Envelope(schema_name="game", source="test", payload=GameState(
+        event_id="e", score={"home": 1}, status="live", source_time=utcnow()))
+    for _ in range(4):
+        await bus.publish(event)
+    assert bus.counts["game"] == 4
+    assert not halts and not bus.subscribers
+
+
 def test_schema_migration():
     class V1(BaseModel):
         score: int

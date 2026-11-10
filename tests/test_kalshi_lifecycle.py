@@ -107,7 +107,8 @@ async def call(case, *, probe=False, managed=None, mutate=None, private=True):
             return deepcopy(value(kwargs.get("params", {})) if callable(value) else value)
         client.request = request
         inventory = [order] if managed is None else managed
-        result = await (probe_native_account(client, inventory) if probe else reconcile_kalshi_settlement(client, order, inventory))
+        result = await (probe_native_account(client, inventory, exchange_index=0)
+            if probe else reconcile_kalshi_settlement(client, order, inventory))
         assert not client.settings.gate.enabled
         matches = client.private.matches(result) if probe else None
         return result, calls, matches
@@ -246,6 +247,7 @@ async def test_private_subscriptions_are_unfiltered_and_not_duplicated_by_market
         client.tickers = ["TICKER"]
         await client._subscribe_current()
         assert len(sent) == 1 and sent[0]["params"]["channels"] == ["orderbook_delta"]
+        assert sent[0]["params"]["use_yes_price"] is True
 
 
 async def test_capability_requires_explicit_policy_exact_mapping_and_entire_order_history(market, kalshi_case):

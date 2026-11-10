@@ -58,12 +58,25 @@ def owned(quantity="3",side="yes",**kwargs):
 async def test_empty_inventory_and_rfq_participant_never_fabricate_account_or_write_scope():
     client=ReadOnlyClient()
     report=await probe_polymarket_us_account(client,adapter=baseline(),include_participant=True)
-    assert report.balance_usd==D("10.29") and report.open_order_count==report.position_count==0
+    assert report.balance_usd==D("8.29") and report.open_order_count==report.position_count==0
     assert report.inventory_quantities_agree and report.inventory_cash_agrees
     assert report.participant_fingerprint and "participant-fixture" not in report.model_dump_json()
     assert not report.account_fingerprint and not report.identity_verified and not report.reconciled
     assert not report.trading_permission_verified and not report.cash_available_verified
     assert report.api_key_scopes==() and report.private_connection_generation==2
+
+
+async def test_nonzero_balance_reservation_is_disclosed_without_spendable_cash_claim():
+    client=ReadOnlyClient()
+    original=client.account_balances
+    async def reserved():
+        result=await original()
+        result["balances"][0]["balanceReservation"]="25"
+        return result
+    client.account_balances=reserved
+    report=await probe_polymarket_us_account(client,adapter=baseline())
+    assert "balanceReservation" in report.reason
+    assert not report.cash_available_verified and not report.reconciled
 
 
 async def test_missing_balance_source_clock_returns_unverified_inventory_diagnostic():
@@ -75,7 +88,7 @@ async def test_missing_balance_source_clock_returns_unverified_inventory_diagnos
         return result
     client.account_balances=no_clock
     report=await probe_polymarket_us_account(client,adapter=baseline())
-    assert report.balance_usd==D("10.29") and report.open_order_count==report.position_count==0
+    assert report.balance_usd==D("8.29") and report.open_order_count==report.position_count==0
     assert not report.inventory_quantities_agree and not report.inventory_cash_agrees
     assert not report.cash_available_verified and not report.reconciled
     assert "Balance source clock is missing or invalid" in report.reason

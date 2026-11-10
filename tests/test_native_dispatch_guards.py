@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -29,6 +30,26 @@ def configured_client(venue, http):
         client._access_expires = time.time() + 3600
         client.set_verified_price_ladder([120])
     return client
+
+
+@pytest.mark.parametrize("payload", [
+    {"data": [-164, 160]},
+    {"data": []},
+    {"data": [-164, True]},
+    {"data": {"prices": [-164, 160]}},
+    {"success": False, "data": [-164, 160]},
+])
+async def test_prophetx_read_only_ladder_refresh_rejects_unverified_values(payload):
+    client = ProphetXClient(ProphetXSettings(api_key="offline", secret_key="offline"))
+    client.price_ladder = {120}  # An older ladder must not survive a failed read.
+    client.fetch_price_ladder = AsyncMock(return_value=payload)
+    if payload == {"data": [-164, 160]}:
+        assert await client.refresh_verified_price_ladder() == {-164, 160}
+    else:
+        with pytest.raises(VenueError, match="price ladder"):
+            await client.refresh_verified_price_ladder()
+        assert client.price_ladder == set()
+    client.fetch_price_ladder.assert_awaited_once()
 
 
 def acknowledgement(venue):

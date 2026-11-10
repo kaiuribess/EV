@@ -62,7 +62,8 @@ def runtime(market, quotes):
     strategy = SimpleNamespace(enabled=True)
     records = {"parlay_rest": provider, "novig": venue, "native_positive_ev": strategy}
     risk = SimpleNamespace(config=RiskConfig(live_max_order_stake=Decimal("1")), native_orders={},
-                           auto_trade=False, kill_switch=True, settled=set())
+                           auto_trade=False, kill_switch=True, settled=set(),
+                           external_exposure_bounded=lambda venue: True)
     engine = SimpleNamespace(registry=SimpleNamespace(records=records), risk=risk,
         settings=Settings(mode="sandbox"), markets={market.id: market},
         quotes={market.id: {str(index): q.model_copy(update={"provider": "parlay_rest", "source_time": utcnow()})
@@ -73,6 +74,7 @@ def runtime(market, quotes):
         signal_ledger=SimpleNamespace(started=True))
     native = NativeRuntime.__new__(NativeRuntime)
     native.engine, native.profile, native.profile_error, native.build_id = engine, profile, "", "OFFLINE fixture"
+    native.invalidated_family_markets = set()
     native.execution_lease = SimpleNamespace(held=True, scope=(profile.venue, profile.environment))
     native.books = {(market.id, "novig", "home"): book}
     native.mapper = SimpleNamespace(mapping_digest=profile.mapping_digest, mappings=())
@@ -208,6 +210,27 @@ def test_missing_or_wrong_execution_lease_blocks_native_routing(runtime):
     assert not runtime.runtime_facts().native_routing_supported
 
 
+def test_prophetx_order_location_capability_is_separate_from_stale_cash(runtime):
+    profile = runtime.profile.model_copy(update={"venue": "prophetx"})
+    runtime.profile = profile
+    client = SimpleNamespace(venue_id="prophetx",
+        settings=SimpleNamespace(environment="sandbox"),
+        check_current_location=lambda order_id: True,
+        location_valid_for=lambda order_id: False)
+    venue = runtime.engine.registry.records["novig"]
+    runtime.engine.registry.records["prophetx"] = SimpleNamespace(
+        enabled=True, health=venue.health, credential_status=venue.credential_status,
+        plugin=SimpleNamespace(client=client, task=Worker("OFFLINE-prophetx")))
+    # A dynamic family has no bound adapter until an exact market is found.
+    # Its per-order location method is already available on the venue client.
+    facts = runtime.runtime_facts("prophetx")
+    assert facts.order_bound_location_check_supported
+    assert not facts.account_identity_verified
+    assert not facts.native_routing_supported
+    client.check_current_location = None
+    assert not runtime.runtime_facts("prophetx").order_bound_location_check_supported
+
+
 def test_available_cash_policy_requires_verified_cash_in_readiness(runtime):
     runtime.engine.risk.config.available_cash_only = True
     assert not runtime.runtime_facts().account_identity_verified
@@ -254,7 +277,8 @@ async def test_malformed_launch_artifact_fails_closed_without_secret_echo(tmp_pa
     (tmp_path/"data").mkdir()
     secret_marker = "misplaced-secret-must-not-be-displayed"
     (tmp_path/"data"/"launch_profile.json").write_text('{"venue":"'+secret_marker+'"}', encoding="utf-8")
-    engine = Engine(Settings(mode="sandbox", database_path=str(tmp_path/"test.db")))
+    engine = Engine(Settings(mode="sandbox", database_path=str(tmp_path/"test.db"),
+                             data_dir=str(tmp_path / "data")))
     await engine.start()
     try:
         assert engine.native.profile is None

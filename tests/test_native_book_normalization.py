@@ -27,7 +27,9 @@ def mapping(market, venue="kalshi", **kwargs):
         settlement_rules_fingerprint=market.identity(), verified=True, source="fixture reviewed mapping",
     )
     fee = NativeFeeBound(instrument_fingerprint=instrument_fingerprint(instrument),
-                         per_unit_usd="0.001", per_fill_usd="0", fixed_order_usd="0", verified=True,
+                         per_unit_usd="0.05" if venue == "prophetx" else "0.001",
+                         per_fill_usd="0", fixed_order_usd="0", verified=True,
+                         fee_payment_timing="winnings_only" if venue == "prophetx" else "upfront_or_unknown",
                          source="fixture fee cap", observed_at=utcnow()-timedelta(hours=1), valid_until=utcnow()+timedelta(hours=1))
     return NativeMarketMapping(market=market, instrument=instrument, fee_bound=fee,
                                opposing_outcome="outcome-away" if venue == "novig" else None,
@@ -38,7 +40,7 @@ def mapping(market, venue="kalshi", **kwargs):
 def kalshi_snapshot(ts):
     return {"type": "orderbook_snapshot", "sid": 4, "seq": 2, "sending_ts_ms": ts,
             "msg": {"market_ticker": "TICKER", "yes_dollars_fp": [["0.40", "2.25"]],
-                    "no_dollars_fp": [["0.50", "3.50"], ["0.45", "2.00"]]}}
+                    "no_dollars_fp": [["0.50", "3.50"], ["0.55", "2.00"]]}}
 
 
 def test_kalshi_preserves_fractional_depth_and_oldest_untouched_clock(market):
@@ -60,7 +62,7 @@ def test_kalshi_preserves_fractional_depth_and_oldest_untouched_clock(market):
     assert second.provider_time > first.provider_time
     assert mapper.process("kalshi", client, delta) == []
     # Remove the untouched old rung; now the remaining source clock advances.
-    delta = {**delta, "seq": 4, "msg": {**delta["msg"], "price_dollars": "0.45", "delta_fp": "-2.00"}}
+    delta = {**delta, "seq": 4, "msg": {**delta["msg"], "price_dollars": "0.55", "delta_fp": "-2.00"}}
     client.book.apply(delta)
     assert mapper.process("kalshi", client, delta)[0][1].source_time > first.source_time
 
@@ -160,6 +162,21 @@ def test_prophetx_explicit_clock_unit_scope_and_placeholder_withdrawal(market):
     frame["scope"] = {"event_id": 13}
     invalid = mapper.process("prophetx", None, frame)[0][1]
     assert invalid.status == "suspended" and not invalid.synchronized
+
+
+def test_prophetx_zero_price_placeholder_and_delete_never_keep_old_depth(market):
+    mapper = NativeBookMapper([mapping(market, "prophetx")])
+    assert mapper.process("prophetx", None, prophet_frame())[0][1].asks
+    placeholder = prophet_frame(seq=101)
+    placeholder["data"]["info"]["selections"][0] = [{
+        "strike_id": "strike-home", "outcome_id": 1, "price": 0, "value": 0}]
+    assert mapper.process("prophetx", None, placeholder)[0][1].asks == ()
+    assert mapper.process("prophetx", None, prophet_frame(seq=102))[0][1].asks
+    deletion = {"event": "v2.market_selections", "scope": {"event_id": 12},
+        "envelope": {"op": "d"}, "data": {"sport_event_id": 12, "market_id": 22,
+        "info": {"id": 22, "sequence_number": 103, "selections": []}}}
+    invalid = mapper.process("prophetx", None, deletion)[0][1]
+    assert not invalid.synchronized and invalid.asks == ()
 
 
 def test_prophetx_subtype_does_not_match_other_scope(market):

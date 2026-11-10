@@ -200,7 +200,7 @@ async def test_account_probe_blocks_old_reporting_watermark_even_if_recent(case)
         return value
     client.request = old
     snapshot = await probe_prophetx_account(client, [order], review=review, observed_at=NOW)
-    assert not snapshot.reconciled and not snapshot.cash_available_verified and snapshot.private_as_of is None
+    assert not snapshot.reconciled and snapshot.cash_available_verified and snapshot.private_as_of is None
 
 
 async def test_account_probe_missing_heartbeat_does_not_certify_empty_history(case):

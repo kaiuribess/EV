@@ -13,7 +13,7 @@ import os
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -165,7 +165,12 @@ def _get(client: httpx.Client, path: str) -> dict:
 def _post_control(client: httpx.Client, *, enabled: bool, digest: str | None = None) -> dict:
     body = {"auto_trade": enabled}
     if digest is not None:
+        body["kill_switch"] = False
         body["expected_launch_digest"] = digest
+        body["authorization_expires_at"] = (datetime.now(timezone.utc)
+            + timedelta(minutes=5)).isoformat()
+    else:
+        body["kill_switch"] = True
     response = client.post("/api/control", json=body, headers=CONTROL_HEADER)
     response.raise_for_status()
     return response.json()

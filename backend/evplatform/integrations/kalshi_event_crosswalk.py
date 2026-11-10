@@ -7,12 +7,14 @@ Exact schedule and settlement review remain separate requirements.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 import hashlib
 import re
 from zoneinfo import ZoneInfo
 
 from .base import parse_timestamp
+from .nba_moneyline import source_moneyline_outcomes
+from .review_report import observation_evidence
 from .team_aliases import NBA_TEAMS
 
 
@@ -24,6 +26,26 @@ _EASTERN = ZoneInfo("America/New_York")
 # Oddize's catalogue instead spells them BRK, CHO and PHO.
 _KALSHI_TEAMS = {**NBA_TEAMS, "BKN": "Brooklyn Nets", "CHA": "Charlotte Hornets",
                  "PHX": "Phoenix Suns"}
+# The winner labels are venue-specific listing text observed in the public
+# KXNBAGAME catalog. They are checked against each live listing, not used to
+# approve settlement equivalence with a sportsbook.
+_KALSHI_WIN_LABELS = {
+    "ATL": "Atlanta", "BKN": "Brooklyn", "BOS": "Boston", "CHA": "Charlotte",
+    "CHI": "Chicago", "CLE": "Cleveland", "DAL": "Dallas", "DEN": "Denver",
+    "DET": "Detroit", "GSW": "Golden State", "HOU": "Houston",
+    "IND": "Indiana", "LAC": "Los Angeles C", "LAL": "Los Angeles L",
+    "MEM": "Memphis", "MIA": "Miami", "MIL": "Milwaukee",
+    "MIN": "Minnesota", "NOP": "New Orleans", "NYK": "New York",
+    "OKC": "Oklahoma City", "ORL": "Orlando", "PHI": "Philadelphia",
+    "PHX": "Phoenix", "POR": "Portland", "SAC": "Sacramento",
+    "SAS": "San Antonio", "TOR": "Toronto", "UTA": "Utah",
+    "WAS": "Washington",
+}
+_WIN_RULE = re.compile(
+    r"^If (?P<winner>.+?) wins the (?P<away>.+?) vs (?P<home>.+?) "
+    r"Pro Basketball game originally scheduled for "
+    r"(?P<month>[A-Z][a-z]{2}) (?P<day>\d{1,2}), (?P<year>\d{4}), "
+    r"then the market resolves to Yes\.$")
 
 
 def _fixture(event_ticker: str):
@@ -37,6 +59,27 @@ def _fixture(event_ticker: str):
     if match["away"] == match["home"]:
         return None
     return local_day, _KALSHI_TEAMS[match["home"]], _KALSHI_TEAMS[match["away"]]
+
+
+def _listed_winner(market: dict) -> str | None:
+    ticker, event_id = market.get("ticker"), market.get("event_ticker")
+    if not isinstance(ticker, str) or not isinstance(event_id, str):
+        return None
+    code = ticker.removeprefix(event_id + "-")
+    rule = market.get("rules_primary")
+    match = _WIN_RULE.fullmatch(rule) if isinstance(rule, str) else None
+    event = _EVENT.fullmatch(event_id)
+    if (match is None or event is None or code not in _KALSHI_WIN_LABELS
+            or event["away"] not in _KALSHI_WIN_LABELS
+            or event["home"] not in _KALSHI_WIN_LABELS
+            or match["winner"] != _KALSHI_WIN_LABELS[code]
+            or match["away"] != _KALSHI_WIN_LABELS[event["away"]]
+            or match["home"] != _KALSHI_WIN_LABELS[event["home"]]
+            or match["month"].upper() != event["month"]
+            or int(match["day"]) != int(event["day"])
+            or int(match["year"]) != 2000 + int(event["year"])):
+        return None
+    return _KALSHI_TEAMS[code]
 
 
 def fixture_candidates(kalshi_catalog: dict, source_snapshot: dict) -> dict:
@@ -132,7 +175,8 @@ def fixture_candidates(kalshi_catalog: dict, source_snapshot: dict) -> dict:
             rules = {row["ticker"]: {
                 "listing_url": ("https://external-api.kalshi.com/trade-api/v2/markets/" + row["ticker"]),
                 "text_sha256": hashlib.sha256((row["rules_primary"] + "\n" + row["rules_secondary"])
-                                              .encode("utf-8")).hexdigest()}
+                                              .encode("utf-8")).hexdigest(),
+                "winning_team": _listed_winner(row)}
                 for row in native_rows}
             candidates.append({"provider": provider, "source_event_id": source_id,
                 "native_venue": "kalshi", "native_event_id": event_id,
@@ -140,6 +184,8 @@ def fixture_candidates(kalshi_catalog: dict, source_snapshot: dict) -> dict:
                 "native_occurrence_times": sorted({entry[1].isoformat() for entry in outcomes.values()}),
                 "occurrence_is_tipoff": False,
                 "native_tickers": sorted(outcomes), "native_rule_evidence": rules,
+                "native_outcome_rules_verified":
+                    {item["winning_team"] for item in rules.values()} == {home, away},
                 "bookmakers": sorted(item["books"]),
                 "source_observations": item["rows"],
                 "native_fair_price_on_cancel": "resolve to a fair price" in secondary,
@@ -168,3 +214,87 @@ def fixture_candidates(kalshi_catalog: dict, source_snapshot: dict) -> dict:
             "source_quarantine_capped": capped,
             "event_identity_verified": False, "market_mapping_verified": False,
             "settlement_equivalence_verified": False, "execution_authorized": False}
+
+
+def moneyline_candidates(fixtures: dict, source_snapshot: dict, *,
+                         now: datetime | None = None, max_quote_age_seconds=120.0) -> dict:
+    """Pair exact source side labels with live native contract rule labels.
+
+    This report deliberately does not create canonical market mappings. In
+    particular, a fresh quote and matching winning team are insufficient to
+    establish the two contracts' cancellation and settlement payouts.
+    """
+    matches = fixtures.get("matches") if isinstance(fixtures, dict) else None
+    rows = source_snapshot.get("items") if isinstance(source_snapshot, dict) else None
+    if (not isinstance(matches, list) or len(matches) > 1000 or not isinstance(rows, list)
+            or len(rows) > 10000):
+        raise ValueError("Expected bounded fixture and source review windows")
+    now = now or datetime.now(timezone.utc)
+    if now.utcoffset() is None:
+        raise ValueError("Review clock must include a timezone")
+    by_event = defaultdict(list)
+    for row in rows:
+        identity = row.get("identity") if isinstance(row, dict) else None
+        if isinstance(identity, dict):
+            by_event[(identity.get("provider"), identity.get("event_id"))].append(row)
+    candidates, seen = [], set()
+    for fixture in matches:
+        if (not isinstance(fixture, dict) or fixture.get("native_outcome_rules_verified") is not True
+                or not isinstance(fixture.get("native_event_id"), str)
+                or not isinstance(fixture.get("home"), str)
+                or not isinstance(fixture.get("away"), str)):
+            continue
+        home, away, event_id = fixture["home"], fixture["away"], fixture["native_event_id"]
+        tickers, rules = fixture.get("native_tickers"), fixture.get("native_rule_evidence")
+        if not isinstance(tickers, list) or len(tickers) != 2 or not isinstance(rules, dict):
+            continue
+        native_outcomes = {}
+        for ticker in tickers:
+            evidence = rules.get(ticker) if isinstance(ticker, str) else None
+            if (not ticker.startswith(event_id + "-") or not isinstance(evidence, dict)
+                    or evidence.get("winning_team") not in {home, away}):
+                break
+            native_outcomes[evidence["winning_team"]] = ticker
+        if len(native_outcomes) != 2 or set(native_outcomes) != {home, away}:
+            continue
+        for row in by_event[(fixture.get("provider"), fixture.get("source_event_id"))]:
+            identity, observation = row.get("identity"), row.get("observation")
+            signature = row.get("signature")
+            if (not isinstance(identity, dict) or not isinstance(observation, dict)
+                    or not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature)):
+                continue
+            source_outcomes = source_moneyline_outcomes(identity, observation, home=home, away=away)
+            if source_outcomes is None:
+                continue
+            key = (event_id, signature)
+            if key in seen:
+                continue
+            seen.add(key)
+            quote = observation_evidence(observation, now=now,
+                                         max_age_seconds=max_quote_age_seconds)
+            candidates.append({"provider": identity["provider"],
+                "bookmaker": identity.get("bookmaker"),
+                "source_event_id": identity["event_id"], "source_signature": signature,
+                "source_market_key": identity["market_key"],
+                "source_outcomes": source_outcomes, "native_event_id": event_id,
+                "native_outcomes": native_outcomes,
+                "native_rule_evidence": rules,
+                "source_start_conflict": fixture.get("source_start_conflict") is True,
+                "native_outcome_rules_verified": True,
+                "source_status": observation.get("status"),
+                "source_price_changed_at": observation.get("source_price_changed_at"),
+                **quote, "candidate_only": True,
+                "settlement_equivalence_verified": False,
+                "execution_authorized": False})
+    collection = source_snapshot.get("collection")
+    return {"schema_version": 1, "candidates": candidates,
+            "candidate_count": len(candidates),
+            "quote_evidence_ready_count": sum(c["quote_evidence_ready"] for c in candidates),
+            "source_window_truncated": not isinstance(collection, dict) or collection.get("truncated") is not False,
+            "source_window_nonatomic": not isinstance(collection, dict) or collection.get("atomic") is not True,
+            "source_window_total_changed": isinstance(collection, dict) and collection.get("total_changed") is True,
+            "source_quarantine_capped": fixtures.get("source_quarantine_capped") is True,
+            "native_catalog_truncated": fixtures.get("native_catalog_truncated") is True,
+            "market_mapping_verified": False,
+            "settlement_equivalence_verified": False,
+            "execution_authorized": False}

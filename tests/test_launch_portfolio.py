@@ -2,11 +2,13 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from decimal import Decimal
+import hashlib
 
 import pytest
 from pydantic import ValidationError
 
 from evplatform.core.config import Settings
+from evplatform.core.external_inventory import ExternalInventoryFile, PendingExternalOrder
 from evplatform.core.native_runtime import NativeRuntime
 from evplatform.core.portfolio import LaunchPortfolio
 from evplatform.engine import Engine
@@ -72,12 +74,51 @@ async def test_both_launch_files_fail_closed(tmp_path, monkeypatch):
     a, b, _, _ = accounts()
     (tmp_path/"data/launch_profile.json").write_text(a.model_dump_json())
     (tmp_path/"data/launch_portfolio.json").write_text(LaunchPortfolio(profiles=(a,b)).model_dump_json())
-    runtime = NativeRuntime(Engine(Settings()))
+    runtime = NativeRuntime(Engine(Settings(data_dir=str(tmp_path / "data"))))
     runtime.manager.start = AsyncMock()
     await runtime.start()
     assert "conflicting" in runtime.profile_error
     assert not runtime.profiles_by_venue() and runtime.execution_lease is None
     assert not runtime.report().safe_to_arm
+
+
+async def test_pending_external_raw_order_blocks_production_execution(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    receipt = data / "kalshi_raw_smoke_attempt.json"
+    receipt.write_text('{"order_id":"external-1","status":"filled_unsettled"}', encoding="utf-8")
+    row = PendingExternalOrder(venue="kalshi", native_order_id="external-1",
+        source_artifact=receipt.name, source_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
+    (data / "external_native_positions.json").write_text(
+        ExternalInventoryFile(pending_orders=(row,)).model_dump_json(), encoding="utf-8")
+    engine = Engine(Settings(mode="production", data_dir=str(data),
+        database_path=str(tmp_path / "native.db")))
+    runtime = NativeRuntime(engine)
+    runtime.manager.start = AsyncMock()
+    await runtime.start()
+    assert len(runtime.pending_external_orders) == 1
+    assert runtime.profile_error == ""
+    assert runtime.engine.risk.pending_external_orders == (row,)
+    assert not runtime.runtime_facts().external_exposure_bounded
+    assert "runtime.external_exposure_bounded" in {b.code for b in runtime.report().blockers}
+    assert not runtime.report().safe_to_arm
+
+
+async def test_single_reviewed_profile_binds_account_only_external_exposure_scope(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    profile, _, _ = ready_fixture("production")
+    profile = profile.model_copy(update={"limits": profile.limits.model_copy(update={
+        "external_exposure_scope": "profile_account"})})
+    (data / "launch_profile.json").write_text(profile.model_dump_json(), encoding="utf-8")
+    engine = Engine(Settings(mode="production", data_dir=str(data),
+        database_path=str(tmp_path / "native.db")))
+    runtime = NativeRuntime(engine)
+    runtime.manager.start = AsyncMock()
+    await runtime.start()
+    assert runtime.engine.risk.native_exposure_scope == (
+        profile.venue, profile.account_fingerprint)
+    assert runtime.runtime_facts(profile.venue).configured_limits == profile.limits
 
 
 async def test_portfolio_refresh_visits_each_account_under_one_coordinator(system):
@@ -95,7 +136,7 @@ def scoped_portfolio(runtime, market):
     a = a.model_copy(update={"venue": "novig", "market_ids": (market.id,), "strategy_ids": ("native_positive_ev",)})
     b = a.model_copy(update={"venue": "second", "account_fingerprint": "e"*64})
     runtime.portfolio = LaunchPortfolio(profiles=(a,b))
-    runtime.report = lambda: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
+    runtime.report = lambda *args, **kwargs: SimpleNamespace(live_trading_ready=False, sandbox_trading_ready=True)
     runtime.engine.risk.config.available_cash_only = True
     runtime.account_snapshots = {"novig": SimpleNamespace(cash_available_verified=True, balance_usd=Decimal(".1")),
         "second": SimpleNamespace(cash_available_verified=True, balance_usd=Decimal("100"))}

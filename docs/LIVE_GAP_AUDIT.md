@@ -1,5 +1,49 @@
 # Live readiness audit — October 21, 2026
 
+## October 22, 11:17 PDT Kalshi NBA outcome and quote review
+
+The read-only Kalshi NBA crosswalk now checks both sides of each native game
+winner listing against its public `rules_primary` winner, opponent, and original
+game-date wording, including the venue-specific Los Angeles team labels. It pairs that explicit winner with a
+two-sided source moneyline outcome only when the source event, participants,
+market family, period and outcome set pass the narrow review checks. The
+OddsPapi path additionally requires its NBA full-game market 111, the actual
+zero-handicap/overtime-inclusive catalog entry, and documented home/away
+outcome IDs 111/112. This is an outcome-label lead, **not** settlement
+equivalence or an executable mapping. [Kalshi market listing](https://external-api.kalshi.com/trade-api/v2/markets/KXNBAGAME-26OCT22CLEPHI-PHI),
+[OddsPapi NBA market identifiers](https://oddspapi.io/blog/genius-sports-alternative/).
+
+The bounded production read-only run at `data/kalshi-nba-crosswalk-20261022-v8.json`
+found 39 fixture leads with both native winner rules verified and 75 exact
+two-sided source moneyline leads: 61 Oddize, 12 Parlay game WebSocket and 2
+OddsPapi. It found **zero** leads with complete current quote evidence. All 75
+failed the 120-second quote-observation limit; 73 lacked verified current
+market status. The two with affirmative status were OddsPapi FanDuel (no
+complete bookmaker timestamp pair) and Pinnacle (last bookmaker change more
+than an hour before this review). The source quarantine reached its bounded
+capacity, and 12 native events had conflicting provider start times. These
+counts describe the captured review window, not universal provider quality or
+future opportunities. No mapping, profile, order or live permission was issued.
+
+OddsPapi documents `bookmakerChangedAt` as the last bookmaker-reported
+**change** and `changedAt` as its system's last recorded change. Its active
+fixture/market/selection flags can establish reported availability, but an
+unchanged price's old change clock does not become a recent sportsbook
+observation merely because a REST response arrived. The review keeps those
+facts separate. [OddsPapi odds response fields](https://oddspapi.io/en/docs/get-odds).
+Parlay likewise says its retained `last_update` does not advance on unchanged
+upstream polls and its heartbeat does not verify each quote.
+[Parlay WebSocket timing and snapshot semantics](https://www.parlay-api.com/docs/websocket).
+The documented Kalshi fair-price cancellation contingency still differs from
+ordinary sportsbook refunds; matching winner labels do not remove that payout
+difference.
+
+Reproduce the review without sending an order:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\review_kalshi_nba.py --output data\kalshi-nba-crosswalk-new.json
+```
+
 ## October 22, 09:56 PDT Kalshi NBA fixture and contract review
 
 The public Kalshi `KXNBAGAME` catalog exposed both sides of tonight's

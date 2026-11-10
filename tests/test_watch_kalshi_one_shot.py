@@ -73,8 +73,12 @@ def test_ready_one_dollar_scope_arms_then_disarms_after_intent(monkeypatch):
             body = __import__("json").loads(request.content)
             if body["auto_trade"]:
                 assert body["expected_launch_digest"] == DIGEST
+                assert datetime.now(timezone.utc) < datetime.fromisoformat(body["authorization_expires_at"])
                 assert current["auto_trade"] is False
+            else:
+                assert body["kill_switch"] is True
             current["auto_trade"] = body["auto_trade"]
+            current["kill_switch"] = body["kill_switch"]
             return httpx.Response(200, json=current)
         if request.url.path == "/api/native/orders":
             order_reads += 1
@@ -89,6 +93,7 @@ def test_ready_one_dollar_scope_arms_then_disarms_after_intent(monkeypatch):
     assert pilot.watch("http://127.0.0.1:8002", poll_seconds=1) == "attempted"
     assert calls.count(("POST", "/api/control")) == 2
     assert current["auto_trade"] is False
+    assert current["kill_switch"] is True
 
 
 def test_wrong_account_or_uncapped_limits_cannot_arm():

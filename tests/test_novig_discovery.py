@@ -1,8 +1,9 @@
 """Read-only Novig discovery rotates native book scope without order access."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from decimal import Decimal
 
 import pytest
 
@@ -10,6 +11,7 @@ from evplatform.integrations.novig_discovery import balanced_open_market_ids, op
 from evplatform.plugins.external import NativeMonitor, NovigMonitorConfig
 from evplatform.venues.novig import NovigBook, NovigClient
 from evplatform.venues.common import SequenceGap
+from evplatform.core.models import Market, Settlement
 
 
 NOW = datetime(2026, 10, 22, 3, tzinfo=timezone.utc)
@@ -82,9 +84,12 @@ async def test_monitor_read_failure_retains_last_discovered_scope(monkeypatch):
 
     client = Client()
     client.calls = 0
+    async def no_research_matches():
+        return []
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_leagues": ["NBA", "NFL"], "discovery_market_types": ["MONEY"],
-        "max_discovered_markets": 1}), discovery_status="disabled", discovered_market_ids=[])
+        "max_discovered_markets": 1}), discovery_status="disabled", discovered_market_ids=[],
+        _refresh_research_matches=no_research_matches)
     await NativeMonitor._refresh_novig_discovery(monitor)
     assert monitor.discovered_market_ids == [LIVE] and monitor.discovery_status == "truncated"
     client.fail = True
@@ -99,7 +104,7 @@ async def test_market_rotation_uses_reconnect_snapshot_only_after_success(monkey
     async def one_cycle(_):
         nonlocal cycles
         cycles += 1
-        if cycles > 1:
+        if cycles > 12:
             raise asyncio.CancelledError
 
     monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
@@ -117,14 +122,50 @@ async def test_market_rotation_uses_reconnect_snapshot_only_after_success(monkey
         monitor.discovered_market_ids = [NEXT]
         monitor.discovery_status = "current"
 
+    async def no_research_matches():
+        return []
+
     monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
         "discovery_interval_seconds": 60, "market_ids": [LIVE]}),
         discovered_market_ids=[LIVE], _subscribed_market_ids=[LIVE],
-        discovery_status="current", _refresh_novig_discovery=refresh)
+        discovery_status="current", _refresh_novig_discovery=refresh,
+        _refresh_research_matches=no_research_matches, research_matches={})
     with pytest.raises(asyncio.CancelledError):
         await NativeMonitor._discover_novig_periodically(monitor)
     assert client.selections == [[LIVE, NEXT]]
     assert monitor._subscribed_market_ids == [LIVE, NEXT]
+
+
+@pytest.mark.asyncio
+async def test_novig_rotation_keeps_focused_prop_ahead_of_full_research_slots(monkeypatch):
+    cycles = 0
+
+    async def one_cycle(_):
+        nonlocal cycles
+        cycles += 1
+        if cycles > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", one_cycle)
+
+    class Client:
+        selections = []
+
+        async def replace_monitor_markets(self, ids):
+            self.selections.append(ids)
+
+    client = Client()
+    monitor = SimpleNamespace(client=client, context=SimpleNamespace(config={
+        "discovery_interval_seconds": 300, "market_ids": [], "max_discovered_markets": 2}),
+        discovered_market_ids=[CLOSED], _subscribed_market_ids=[], discovery_status="current",
+        research_matches={"priced": [SimpleNamespace(native_market_id=LIVE),
+                                      SimpleNamespace(native_market_id=NEXT)]},
+        focused_prop_source_ids=["needs_complete_pair"],
+        focused_prop_matches={"needs_complete_pair": [SimpleNamespace(native_market_id=CLOSED)]},
+        engine=None)
+    with pytest.raises(asyncio.CancelledError):
+        await NativeMonitor._discover_novig_periodically(monitor)
+    assert client.selections == [[CLOSED, LIVE]]
 
 
 @pytest.mark.asyncio
@@ -161,6 +202,55 @@ def test_gap_health_identifies_channel_without_exposing_market_or_account_id():
     assert client.health_check()["last_sequence_gap_kind"] == "missing_book_order"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_fair", [False, True])
+async def test_incomplete_nfl_prop_prewarms_only_exact_native_research_scope(already_fair):
+    start = datetime(2026, 10, 25, 17, tzinfo=timezone.utc)
+    source = Market(id="research:parlay:nfl-prop", event_id="research:parlay:old-event",
+        event_name="Indianapolis Colts at Minnesota Vikings", sport="football", league="NFL",
+        participants=("Minnesota Vikings", "Indianapolis Colts"), start_time=start,
+        market_type="player_prop", player="Aaron Jones", player_id="Aaron Jones",
+        statistic="receptions", line=Decimal("2.5"), outcomes=("over", "under"),
+        settlement=Settlement(period="FULL"), extensions={
+            "research_only": True, "source_market_key": "player_receptions"})
+    native = {"marketId": LIVE, "eventId": EVENT, "marketType": "RECEPTIONS",
+              "status": "OPEN", "voids": "FMV", "strike": "2.5",
+              "startsTs": int(start.timestamp()*1000),
+              "description": "Aaron Jones 2.5 RECEPTIONS",
+              "outcomes": [{"outcomeId": NEXT, "name": "Over 2.5", "status": "TBD"},
+                           {"outcomeId": CLOSED, "name": "Under 2.5", "status": "TBD"}]}
+    event = {"eventId": EVENT, "league": "NFL", "status": "OPEN_PREGAME",
+             "startsTs": native["startsTs"],
+             "description": "Indianapolis Colts @ Minnesota Vikings"}
+    calls = []
+
+    async def request(method, path):
+        calls.append((method, path))
+        return event
+
+    monitor = SimpleNamespace(manifest=SimpleNamespace(name="novig"),
+        engine=SimpleNamespace(markets={source.id: source}, quotes={source.id: {
+            "f": SimpleNamespace(provider="parlay_rest", bookmaker="fanduel", status="unknown",
+                verification_reason="truncated_response", decimal_odds={"over": 2, "under": 2},
+                source_observed_at=None, observation_verified=False, source_stored_at=NOW),
+            "d": SimpleNamespace(provider="parlay_rest", bookmaker="draftkings", status="unknown",
+                verification_reason="truncated_response", decimal_odds={"over": 2, "under": 2},
+                source_observed_at=None, observation_verified=False, source_stored_at=NOW)}},
+            reference_estimates={}, consensus_estimates=(
+                {source.id: {"independent_book_count": 2}} if already_fair else {})),
+        context=SimpleNamespace(config={"discovery_leagues": ["NFL"], "max_discovered_markets": 16}),
+        client=SimpleNamespace(request=request), research_catalog_at=NOW,
+        research_catalog_rows=[native], research_events={}, research_fee_metadata={},
+        research_matches={}, focused_prop_matches={}, focused_prop_source_ids=[],
+        _last_research_source_ids=frozenset())
+    priority = await NativeMonitor._refresh_research_matches(monitor)
+    assert priority == ([LIVE] if already_fair else [])
+    assert bool(monitor.research_matches) is already_fair
+    assert monitor.focused_prop_source_ids == [source.id]
+    assert {item.native_market_id for item in monitor.focused_prop_matches[source.id]} == {LIVE}
+    assert calls == [("GET", f"/v3/catalog/events/{EVENT}")]
+
+
 def test_missing_remove_diagnostic_distinguishes_zero_update_from_unseen_order():
     book = NovigBook()
     book.apply({"snapshot": {LIVE: {"lifecycle": {"seq": 1, "status": "OPEN"},
@@ -175,3 +265,74 @@ def test_missing_remove_diagnostic_distinguishes_zero_update_from_unseen_order()
         "last_lifecycle": None, "market_status": "OPEN", "book_size": 0}
     book.reset()
     assert book.last_gap_context is None
+
+
+@pytest.mark.asyncio
+async def test_quiet_matched_book_requires_authoritative_resnapshot_before_reuse(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+    book = NovigBook()
+    frame = {"snapshot": {LIVE: {"lifecycle": {"seq": 2, "status": "OPEN"},
+        "book": {"seq": 9, "orders": {NEXT: [{"orderId": "bid", "price": "0.6", "qty": 100}]}}}}}
+    book.apply(frame)
+
+    class Client:
+        def __init__(self):
+            self.book, self.calls = book, []
+
+        def health_check(self):
+            return {"streaming": True}
+
+        async def fetch_snapshot(self, market_id):
+            self.calls.append(market_id)
+            return frame
+
+    client = Client()
+    monitor = SimpleNamespace(client=client, manifest=SimpleNamespace(name="novig"),
+        engine=SimpleNamespace(consensus_estimates={}, reference_estimates={}, markets={}),
+        focused_prop_matches={"prop": [SimpleNamespace(native_market_id=LIVE,
+            opposing_outcome_id=NEXT, outcome="over")]},
+        research_matches={}, _subscribed_market_ids=[LIVE], _book_at={LIVE: NOW-timedelta(seconds=25)},
+        _novig_snapshot_attempts={}, _novig_snapshot_window=[], _novig_snapshot_error=None,
+        _novig_book_snapshots={}, _novig_book_deltas={}, _novig_subscription_ack_at=None,
+        _market_data_updates=0, _last_market_data_at=None, _last_valid_book_at=None,
+        health_snapshot=lambda: {"valid_book_ids": [LIVE]})
+    monitor.research_book_current = lambda market_id, now=None: NativeMonitor.research_book_current(
+        monitor, market_id, now=now)
+    assert not NativeMonitor.research_book_current(monitor, LIVE, now=NOW+timedelta(seconds=6))
+    await NativeMonitor._refresh_quiet_novig_books(monitor)
+    assert client.calls == [LIVE]
+    assert monitor._book_at[LIVE] == NOW-timedelta(seconds=25)  # the request is not evidence
+    NativeMonitor._observe_market_frame(monitor, frame)
+    assert NativeMonitor.research_book_current(monitor, LIVE, now=NOW)
+    evidence = NativeMonitor._novig_matched_book_evidence(monitor, NOW)
+    assert evidence[0]["last_snapshot_at"] == NOW.isoformat()
+    assert evidence[0]["directions"][0]["opposing_bid_count_retained"] == 1
+    await NativeMonitor._refresh_quiet_novig_books(monitor)
+    assert client.calls == [LIVE]  # no duplicate paid/stream snapshot on the same book
+
+
+@pytest.mark.asyncio
+async def test_empty_novig_book_does_not_trigger_repeated_snapshot(monkeypatch):
+    monkeypatch.setattr("evplatform.plugins.external.utcnow", lambda: NOW)
+    book = NovigBook()
+    book.apply({"snapshot": {LIVE: {"lifecycle": {"seq": 1, "status": "OPEN"},
+        "book": {"seq": 1, "orders": {}}}}})
+
+    class Client:
+        def __init__(self):
+            self.book, self.calls = book, 0
+
+        def health_check(self):
+            return {"streaming": True}
+
+        async def fetch_snapshot(self, _):
+            self.calls += 1
+
+    client = Client()
+    monitor = SimpleNamespace(client=client, engine=SimpleNamespace(
+        consensus_estimates={}, reference_estimates={}, markets={}),
+        focused_prop_matches={"prop": [SimpleNamespace(native_market_id=LIVE)]},
+        research_matches={}, _subscribed_market_ids=[LIVE], _book_at={LIVE: NOW-timedelta(seconds=60)},
+        _novig_snapshot_attempts={}, _novig_snapshot_window=[])
+    await NativeMonitor._refresh_quiet_novig_books(monitor)
+    assert client.calls == 0

@@ -437,18 +437,23 @@ class NativeOrderManager:
                             client_order_id=order.client_order_id,status="unknown",fills=tuple(fills)))
                 self.metrics.observe("native_order_ack_ms", (order.acknowledged_at-order.submitted_at).total_seconds()*1000)
             except (Exception, asyncio.CancelledError) as exc:
-                from ..venues.common import DispatchRejected
+                from ..venues.common import ConfirmedOrderRejected, DispatchRejected
                 adapter = self.adapters[order.venue]
                 known_bindings = getattr(adapter,"_native_intents",{})
                 known_unsent = (isinstance(exc,DispatchRejected) and order.venue_order_id is None
                     and order.acknowledged_at is None and not order.filled_quantity
                     and not self._fill_evidence.get(order.id) and order.id not in self._fill_conflicts
                     and not any(intent.client_order_id == order.client_order_id for intent in known_bindings.values()))
-                uncertain = transmission_started and not known_unsent
+                known_rejected = (isinstance(exc, ConfirmedOrderRejected)
+                    and order.venue_order_id is None and not order.filled_quantity
+                    and not self._fill_evidence.get(order.id) and order.id not in self._fill_conflicts)
+                uncertain = transmission_started and not (known_unsent or known_rejected)
                 state = OrderStatus.UNKNOWN if uncertain else OrderStatus.REJECTED
                 order = await asyncio.shield(self._save(order.model_copy(update={"status": state,
-                    "reconciliation_complete": known_unsent,
-                    "reason": f"Native transmission outcome uncertain: {type(exc).__name__}" if uncertain else "Native pre-transmission validation rejected"})))
+                    "reconciliation_complete": known_unsent or known_rejected,
+                    "reason": f"Native transmission outcome uncertain: {type(exc).__name__}" if uncertain
+                        else f"Venue rejected placement: {exc.code}" if known_rejected
+                        else "Native pre-transmission validation rejected"})))
                 if uncertain:
                     self.risk.halt("Unknown native outcome; reconcile without retrying placement")
                 if isinstance(exc, asyncio.CancelledError):

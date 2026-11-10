@@ -39,10 +39,24 @@ def supports_kalshi_settlement_scope(profile, adapter, mappings, managed_orders)
         return False
     try:
         reviewed = NativeBookMapper(tuple(NativeMarketMapping.model_validate(m.model_dump()) for m in mappings))
-        requested = [m for m in reviewed.mappings if m.instrument.venue == "kalshi" and m.market.id in profile.market_ids]
-        if {m.market.id for m in requested} != set(profile.market_ids):
-            return False
         now = utcnow()
+        family = profile.family_rule
+        requested = [m for m in reviewed.mappings if m.instrument.venue == "kalshi"
+            and (m.market.id in profile.market_ids or family is not None
+                 and family.matches(m.market)
+                 and m.instrument.source.startswith(f"family:{family.digest()}:")
+                 and m.market.start_time > now
+                 and m.fee_bound.observed_at <= now < m.fee_bound.valid_until)]
+        if family is None:
+            if {m.market.id for m in requested} != set(profile.market_ids):
+                return False
+        else:
+            complete = {market_id for market_id in {m.market.id for m in requested}
+                if {m.instrument.outcome for m in requested if m.market.id == market_id}
+                   == set(next(m.market for m in requested if m.market.id == market_id).outcomes)}
+            requested = [m for m in requested if m.market.id in complete]
+            if not requested or not family.approved_at <= now < family.expires_at:
+                return False
         for mapping in requested:
             instrument = mapping.instrument
             execution = adapter.mappings.get((mapping.market.id, instrument.outcome))

@@ -73,8 +73,8 @@ async def test_kalshi_missing_cursor_is_not_exhaustion():
 
 
 @pytest.mark.parametrize("age,nonempty,accepted", [(0, False, True), (11, False, False),
-    (-1, False, False), (None, False, False), (0, True, False)])
-async def test_prophetx_observed_null_only_accepts_empty_current_order_window(monkeypatch, age, nonempty, accepted):
+    (-1, False, False), (None, False, False), (0, True, True), (11, True, False)])
+async def test_prophetx_observed_null_accepts_short_current_order_window(monkeypatch, age, nonempty, accepted):
     now = datetime(2026, 10, 21, tzinfo=timezone.utc)
     monkeypatch.setattr("evplatform.core.lifecycle_capture.utcnow", lambda: now)
     client = Pages([{"data": {"orders": [{"order_id": "offline"}] if nonempty else [], "next_cursor": None},
@@ -84,7 +84,8 @@ async def test_prophetx_observed_null_only_accepts_empty_current_order_window(mo
                           cursor_key="next_cursor", cursor_param="next_cursor")
     assert result["complete"] is accepted
     if accepted:
-        assert result["pagination_end"] == "observed_empty_order_null"
+        assert result["pagination_end"] == (
+            "observed_short_order_null" if nonempty else "observed_empty_order_null")
     assert all(call[0] == "GET" for call in client.calls)
     assert client.calls[0][2]["limit"] == 1000
 

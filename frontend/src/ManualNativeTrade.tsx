@@ -6,6 +6,8 @@ import './ManualNativeTrade.css'
 
 type Review = {
   review_token: string
+  terms_digest: string
+  max_cost_usd: string
   expires_at: string
   environment: string
   market: { id: string; event_name: string; market_type: string; player?: string | null }
@@ -25,9 +27,9 @@ export function ManualNativeTrade({ state, connected }: { state: State; connecte
   const native = ['sandbox', 'production'].includes(state.mode)
   const candidates = (Array.isArray(state.native_opportunities) ? state.native_opportunities : [])
     .filter((candidate: Json) => candidate.synthetic === false && candidate.qualified === true && candidate.execution_eligible === true)
-  const paused = native && state.auto_trade !== true && state.kill_switch !== true
+  const paused = native && state.auto_trade !== true
   const canReview = connected && paused && state.live_enabled === true && Number(maxCost) > 0 && Number.isFinite(Number(maxCost))
-  const validReview = review && now < Date.parse(review.expires_at) && connected && paused && state.mode === review.environment
+  const validReview = review && now < Date.parse(review.expires_at) && connected && paused && state.kill_switch !== true && state.mode === review.environment
 
   const preview = async (candidate: Json) => {
     if (!canReview || busy) return
@@ -50,7 +52,10 @@ export function ManualNativeTrade({ state, connected }: { state: State; connecte
     const token = review.review_token
     setReview(null) // Never offer a retry of the same submission click.
     try {
-      const response = await request('/api/native/manual/submit', { review_token: token })
+      const response = await request('/api/native/manual/submit', {
+        review_token: token, terms_digest: review.terms_digest,
+        approved_max_cost_usd: review.max_cost_usd,
+      })
       const order = response.order as Json
       setMessage(`Manual ${human(order?.intent?.mode)} order ${text(order?.status)}. Check the native ledger for its confirmed fill and reconciliation.`)
     } catch (failure) {
@@ -64,13 +69,13 @@ export function ManualNativeTrade({ state, connected }: { state: State; connecte
     <div className="section-head"><div><h2>Place one trade manually</h2><p>Review one qualifying exchange offer, then send only that order. Automation stays paused.</p></div><ShieldCheck size={19} /></div>
     {!native && <p className="quiet-message">This paper workspace cannot place an exchange order. Open a paused native sandbox or production workspace to review one.</p>}
     {native && state.auto_trade && <p className="quiet-message">Pause automation before choosing a manual order, so it cannot race your click.</p>}
-    {native && state.kill_switch && <p className="quiet-message">The emergency stop blocks manual orders too.</p>}
+    {native && state.kill_switch && <p className="quiet-message">You can review a qualifying order while stopped. Sending it still requires the normal arming control.</p>}
     {native && <label className="manual-trade-cap">Maximum spend for this one order, including fees <span>$<input type="number" min="0.01" step="0.01" value={maxCost} onChange={event => setMaxCost(event.target.value)} aria-label="Maximum spend for one manual order in dollars" /></span><small>Starts at $1 for a test. A venue minimum or quarter-Kelly budget may make that size unavailable.</small></label>}
     {native && !candidates.length && <p className="quiet-message">No verified, qualifying native EV offer is available to review. A connected exchange feed alone does not create an eligible trade.</p>}
     {message && <p className="manual-trade-message" role="status">{message}</p>}
     {native && candidates.length > 0 && <div className="manual-trade-list">{candidates.slice(0, 12).map((candidate: Json) => <div className="manual-trade-row" key={candidate.id}>
       <div><strong>{human(candidate.venue)} · {human(candidate.outcome)}</strong><small>{text(candidate.market_id)} · {human(candidate.intent?.instrument?.quantity_unit)}</small></div>
-      <div><strong>{money(candidate.intent?.reserved_cost_usd)} max</strong><small>Limit {text(candidate.intent?.limit_price)} · ROI {percent(candidate.roi, 2)}</small></div>
+      <div><strong>{money(candidate.intent?.reserved_cost_usd)} max</strong><small>Limit {text(candidate.intent?.limit_price)} · ROI {percent(candidate.roi, 2)}</small><small>{text(candidate.estimate_label ?? 'Estimated EV')}</small></div>
       <button className="button quiet" disabled={!canReview || busy} onClick={() => void preview(candidate)}>Review trade</button>
     </div>)}</div>}
     <p className="quiet-message">A manual click uses current launch checks, account cash, configured stake sizing, price limits, conflict protection and durable order reconciliation. The order may remain unfilled or settle at a loss.</p>
@@ -85,6 +90,7 @@ export function ManualNativeTrade({ state, connected }: { state: State; connecte
         <div><dt>Maximum cost including fees</dt><dd>{money(intent?.reserved_cost_usd)}</dd></div>
         <div><dt>Maximum fee</dt><dd>{money(intent?.max_fee_usd)}</dd></div>
         <div><dt>Estimated fair probability / net ROI</dt><dd>{percent(c?.fair_probability, 2)} / {percent(c?.roi, 2)}</dd></div>
+        <div><dt>Pricing assumption</dt><dd>{text(c?.estimate_label ?? 'Estimated EV')}</dd></div>
         <div><dt>Reference books</dt><dd>{(c?.references ?? []).map((r: Json) => human(r.bookmaker)).join(', ')}</dd></div>
       </dl>
       <p className="manual-trade-warning"><TriangleAlert size={17} />{validReview ? `Review expires in ${Math.max(0, Math.ceil((Date.parse(review.expires_at) - now) / 1000))}s. The server will reprice before sending.` : 'This review expired or the trading state changed. Close it and review again.'}</p>
