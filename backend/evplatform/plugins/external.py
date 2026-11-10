@@ -456,7 +456,8 @@ class ProphetXMonitorConfig(BaseModel):
     prop_subtypes: dict[str, list[str]] = Field(default_factory=dict, description="Event ID to discovered prop sub_type values")
     discovery_tournament_ids: list[int] = Field(default_factory=list, max_length=4,
         description="Authenticated tournament catalogs to refresh for game-market subscriptions")
-    discovery_leagues: list[Literal["NFL", "NBA", "MLB", "NHL", "NCAAF", "NCAABM", "UFC", "ATP", "WTA"]] = Field(default_factory=list, max_length=9,
+    discovery_leagues: list[Literal["NFL", "NBA", "MLB", "NHL", "NCAAF", "NCAABM", "UFC", "ATP", "WTA",
+        "LIGA_MX", "EFL_LEAGUE_ONE", "BRAZIL_SERIE_A"]] = Field(default_factory=list, max_length=12,
         description="Exact active tournament names to discover through the Trading/MM catalog")
     discovery_lookahead_hours: int = Field(default=30, ge=30, le=168,
         description="Upcoming event subscription horizon; does not relax quote freshness or identity matching")

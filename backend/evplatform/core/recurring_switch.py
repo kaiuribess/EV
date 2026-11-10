@@ -1,6 +1,6 @@
 """Owner-operated, expiring ProphetX recurring authorization.
 
-The switch renews only the already reviewed NBA family and monetary scope.
+The switch renews only the already reviewed pregame family and monetary scope.
 It never submits an order; the supervised recurring controller still performs
 the release and the normal OMS still owns every submission.
 """
@@ -41,6 +41,34 @@ NFL_NATIVE_EVIDENCE = (
     "unless a shorter period is named; exact NFL subtype/title/strike evidence is "
     "revalidated from V4/Talaria per fixture; "
     "https://framerusercontent.com/assets/xFIxMV69o6oKsLMzIkdlbTdqrTc.pdf")
+COLLEGE_SOURCE_EVIDENCE = (
+    "Parlay complete-board game h2h contract and canonical sport keys "
+    "americanfootball_ncaaf and basketball_ncaab: https://parlay-api.com/docs; "
+    "only exact complete full-game two-sided pairs enter the reviewed policy")
+COLLEGE_NATIVE_EVIDENCE = (
+    "ProphetX CFTC filing 61599 Appendix A applies event-result official-score rules "
+    "and includes overtime unless a shorter period is named; exact tournament, event, "
+    "two-team Moneyline subtype and strike identity are revalidated from V4/Talaria; "
+    "https://framerusercontent.com/assets/xFIxMV69o6oKsLMzIkdlbTdqrTc.pdf")
+TENNIS_SOURCE_EVIDENCE = (
+    "Parlay complete-board game h2h contract and canonical tennis_atp/tennis_wta sport "
+    "keys: https://parlay-api.com/docs; only exact complete full-match two-sided pairs "
+    "enter the reviewed normal-completion policy")
+TENNIS_NATIVE_EVIDENCE = (
+    "ProphetX CFTC filing 61599 Appendix A event-result rules plus the authenticated V4 "
+    "catalog's distinct unqualified match Moneyline and separately named set markets; "
+    "only the unqualified two-player match winner is admitted and exceptional retirement "
+    "settlement remains outside winner_only_binary; "
+    "https://framerusercontent.com/assets/xFIxMV69o6oKsLMzIkdlbTdqrTc.pdf")
+
+REVIEWED_ADDITIONAL_COMPETITIONS = (
+    ("football", "NFL"), ("football", "NCAAF"),
+    ("basketball", "NCAABM"), ("tennis", "ATP"), ("tennis", "WTA"),
+)
+REVIEWED_COMPETITION_SETS = {
+    frozenset(), frozenset({("football", "NFL")}),
+    frozenset(REVIEWED_ADDITIONAL_COMPETITIONS),
+}
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -69,8 +97,7 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
             or (rule.scope.sport, rule.scope.league, rule.scope.market_type,
                 rule.scope.period, rule.scope.phase) !=
                 ("basketball", "NBA", "moneyline", "FULL", "pregame")
-            or frozenset(rule.scope.additional_competitions) not in {
-                frozenset(), frozenset({("football", "NFL")})}
+            or frozenset(rule.scope.additional_competitions) not in REVIEWED_COMPETITION_SETS
             or (rule.scope.additional_player_prop_statistics
                 and tuple(sorted(rule.scope.additional_player_prop_statistics)) != NBA_PROP_SCOPE)
             or (rule.scope.additional_nfl_player_prop_statistics
@@ -117,7 +144,7 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
             or limits.daily_loss_limit_usd > Decimal("20")
             or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1
             or limits.unit_size_usd != Decimal("5")):
-        raise ValueError("The saved ProphetX scope differs from the reviewed NBA recurring policy")
+        raise ValueError("The saved ProphetX scope differs from the reviewed pregame recurring policy")
     if profile.pricing_digest != digest_json(engine.settings.pricing.model_dump(mode="json")):
         raise ValueError("Pricing changed; review the source policy before turning Live on")
     if (engine.settings.pricing.min_ev < Decimal("0.015")
@@ -129,18 +156,22 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
         raise ValueError("Native mapping rules changed; review them before turning Live on")
 
 
-def _expanded_nba_nfl_scope(scope):
+def _expanded_pregame_scope(scope):
     evidence = scope.source_normal_rule_evidence or ""
     if NBA_PROP_SOURCE_EVIDENCE not in evidence:
         evidence = f"{evidence}; {NBA_PROP_SOURCE_EVIDENCE}".strip("; ")
     if NFL_SOURCE_EVIDENCE not in evidence:
         evidence = f"{evidence}; {NFL_SOURCE_EVIDENCE}".strip("; ")
+    if COLLEGE_SOURCE_EVIDENCE not in evidence:
+        evidence = f"{evidence}; {COLLEGE_SOURCE_EVIDENCE}".strip("; ")
+    if TENNIS_SOURCE_EVIDENCE not in evidence:
+        evidence = f"{evidence}; {TENNIS_SOURCE_EVIDENCE}".strip("; ")
     return type(scope).model_validate({
         **scope.model_dump(mode="json"),
-        "additional_competitions": (("football", "NFL"),),
+        "additional_competitions": REVIEWED_ADDITIONAL_COMPETITIONS,
         "additional_player_prop_statistics": NBA_PROP_SCOPE,
         "additional_nfl_player_prop_statistics": NFL_PROP_SCOPE,
-        "reviewed_normal_rule_id": "PARLAY-NBA-NFL-FULL-MONEYLINE-PROPS-20261110",
+        "reviewed_normal_rule_id": "PARLAY-PREGAME-MULTISPORT-FULL-MONEYLINE-PROPS-20261110",
         "source_normal_rule_evidence": evidence,
     })
 
@@ -181,13 +212,13 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
         raise ValueError("Unresolved ProphetX inventory or settlement blocks Live")
     approval_id = str(uuid4())
     expires = now + timedelta(hours=24)
-    expanded_scope = _expanded_nba_nfl_scope(profile.family_rule.scope)
+    expanded_scope = _expanded_pregame_scope(profile.family_rule.scope)
     updated_policy = type(engine.settings.pricing.trusted_pilot_policy).model_validate({
         **engine.settings.pricing.trusted_pilot_policy.model_dump(mode="json"),
         "market_scope": expanded_scope.model_dump(mode="json"),
         "player_prop_provider_id": "parlay_ws",
-        "approval_evidence": (f"owner-live-switch:{approval_id}:NBA/NFL moneylines "
-                              "and exact full-game player props"),
+        "approval_evidence": (f"owner-live-switch:{approval_id}:NBA/NFL/NCAAF/NCAABM/"
+                              "ATP/WTA moneylines and exact NBA/NFL full-game player props"),
     })
     updated_pricing = type(engine.settings.pricing).model_validate({
         **engine.settings.pricing.model_dump(mode="json"),
@@ -196,16 +227,24 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
     updated_rule = type(profile.family_rule).model_validate({
         **profile.family_rule.model_dump(mode="json"),
         "scope": expanded_scope.model_dump(mode="json"),
-        "rule_version": "NBA-NFL-MONEYLINE-AND-PROPS-20261110",
+        "rule_version": "PREGAME-MULTISPORT-MONEYLINE-AND-PROPS-20261110",
         "allowed_native_rule_texts": tuple(dict.fromkeys((
             *profile.family_rule.allowed_native_rule_texts,
             "NFL|moneyline|moneyline|default_full_game",
+            "NCAAF|moneyline|moneyline|default_full_game",
+            "NCAABM|moneyline|moneyline|default_full_game",
+            "ATP|moneyline|moneyline|default_full_game",
+            "WTA|moneyline|moneyline|default_full_game",
             *reviewed_nba_prop_rule_tokens(),
             *reviewed_nfl_prop_rule_tokens(),
         ))),
         "prophetx_native_settlement_evidence": NBA_PROP_NATIVE_EVIDENCE,
         "additional_native_settlement_evidence": {
             "football:NFL": NFL_NATIVE_EVIDENCE,
+            "football:NCAAF": COLLEGE_NATIVE_EVIDENCE,
+            "basketball:NCAABM": COLLEGE_NATIVE_EVIDENCE,
+            "tennis:ATP": TENNIS_NATIVE_EVIDENCE,
+            "tennis:WTA": TENNIS_NATIVE_EVIDENCE,
         },
         "approved_by": "local_owner_live_switch",
         "approval_evidence": f"owner-live-switch:{approval_id}",
