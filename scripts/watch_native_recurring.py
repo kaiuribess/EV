@@ -43,6 +43,24 @@ def _quiet_family_standby(client: httpx.Client, setup: dict, digest: str) -> boo
             or profiles[0].get("owner_approved_recurring_lifecycle_deferral") is not True
             or not isinstance(profiles[0].get("family_rule"), dict)):
         return False
+    # launch/setup already computed the account-scoped readiness report used
+    # by this tick. Recomputing /api/readiness here is both redundant and, on
+    # a busy production catalog, slow enough to outlive the private-account
+    # heartbeat fence that made the setup snapshot current. Prefer the same
+    # atomic report whenever it is present. Older fixture/server shapes keep
+    # the read-only fallback below.
+    accounts = setup.get("accounts")
+    if isinstance(accounts, list):
+        matching = [row for row in accounts if isinstance(row, dict)
+                    and row.get("venue") == "prophetx"]
+        if len(matching) != 1 or not isinstance(matching[0].get("blockers"), list):
+            return False
+        blockers = matching[0]["blockers"]
+        if not all(isinstance(row, dict) and isinstance(row.get("code"), str)
+                   for row in blockers):
+            return False
+        codes = {row["code"] for row in blockers}
+        return "family.no_current_market" in codes and codes <= _QUIET_FAMILY_BLOCKERS
     try:
         report = shared._get(client, "/api/readiness")
     except (httpx.HTTPError, ValueError):
