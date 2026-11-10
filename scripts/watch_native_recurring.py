@@ -253,7 +253,12 @@ def _status(phase: str, detail: str, identity: str | None = None,
 def tick(url: str = "http://127.0.0.1:8002", *, check_only: bool = False,
          now: datetime | None = None) -> str:
     now = now or datetime.now(timezone.utc)
-    with shared._single_controller(), httpx.Client(base_url=shared._local_url(url), timeout=8) as client:
+    # The production launch snapshot evaluates the current account, family
+    # books and source policy together. With the expanded catalog that bounded
+    # read can exceed the former eight-second client deadline even though the
+    # service is healthy. Keep this below the supervisor's 52-second release
+    # window while allowing one complete, same-snapshot readiness read.
+    with shared._single_controller(), httpx.Client(base_url=shared._local_url(url), timeout=30) as client:
         state = shared._get(client, "/api/state")
         if state.get("mode") != "production":
             raise ValueError("Port 8002 is not the production scanner")
