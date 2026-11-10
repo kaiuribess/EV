@@ -275,16 +275,16 @@ class NativeRuntime:
                 return True
             if venue != "prophetx" or market.market_type != "player_prop":
                 return False
-            from ..venues.prophetx_props import (PROPHETX_NBA_PROP_SUBTYPES,
-                native_prop_rule_token)
+            from ..venues.prophetx_props import native_prop_rule_token, prophetx_prop_subtypes
             native = monitor.client.public_market_data.catalog.get(
                 (item.native_event_id, item.native_market_id))
             if not isinstance(native, dict):
                 return False
-            subtype = PROPHETX_NBA_PROP_SUBTYPES.get(str(native.get("sub_type")))
+            subtype = prophetx_prop_subtypes(market.league).get(str(native.get("sub_type")))
             return bool(subtype is not None and subtype[0] == market.statistic
                 and native.get("period") is None
-                and native_prop_rule_token(str(native.get("sub_type")), subtype[2], None)
+                and native_prop_rule_token(str(native.get("sub_type")), subtype[2], None,
+                    league=market.league)
                     in rule.allowed_native_rule_texts
                 and rule.settlement_evidence_for(market))
         if (len(selected) != 2 or {item.outcome for item in selected} != set(market.outcomes)
@@ -341,16 +341,16 @@ class NativeRuntime:
                     source_event_id=match.native_event_id,
                     source_market_id=match.native_market_id)
             elif venue == "prophetx":
-                from ..venues.prophetx_props import (PROPHETX_NBA_PROP_SUBTYPES,
-                    native_prop_rule_token)
+                from ..venues.prophetx_props import native_prop_rule_token, prophetx_prop_subtypes
                 native = monitor.client.public_market_data.catalog.get(
                     (match.native_event_id, match.native_market_id))
                 event = monitor.research_events.get(match.native_event_id)
-                subtype_rule = (PROPHETX_NBA_PROP_SUBTYPES.get(str(native.get("sub_type")))
+                subtype_rule = (prophetx_prop_subtypes(market.league).get(str(native.get("sub_type")))
                     if isinstance(native, dict) and market.market_type == "player_prop" else None)
                 if subtype_rule is not None:
                     prop_default_token = native_prop_rule_token(
-                        str(native.get("sub_type")), subtype_rule[2], None)
+                        str(native.get("sub_type")), subtype_rule[2], None,
+                        league=market.league)
                     prop_default_full_game = (native.get("period") is None
                         and prop_default_token in rule.allowed_native_rule_texts
                         and bool(rule.settlement_evidence_for(market)))
@@ -369,10 +369,11 @@ class NativeRuntime:
                 except (ValueError, TypeError, ArithmeticError):
                     native_line = None
                 exact_prop = (isinstance(native, dict) and market.market_type == "player_prop"
-                    and ((market.league == "NBA" and subtype_rule is not None
+                    and ((market.league in {"NBA", "NFL"} and subtype_rule is not None
                           and subtype_rule[0] == market.statistic
                           and native.get("type") in {subtype_rule[2], "player_prop"})
-                         or (market.league != "NBA" and native.get("type") == "player_prop"))
+                         or (native.get("type") == "player_prop"
+                             and native.get("period") in {"FULL", "full", "full_game"}))
                     and native.get("player_id") == market.player_id
                     and native.get("player_name") in {None, market.player}
                     and native.get("statistic") == market.statistic

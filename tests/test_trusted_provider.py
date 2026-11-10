@@ -334,7 +334,9 @@ def test_approved_prop_scope_requires_explicit_full_period_and_exact_half_line()
         source_normal_rule_evidence="OFFLINE full-game player participation and overtime rule review")
     policy = TrustedPilotPolicy(enabled=True, owner_approved=True, market_scope=scope,
         provider_id="parlay_rest", trusted_books=["fanduel", "draftkings", "caesars"],
-        min_distinct_books=3, accept_unknown_active_status=True,
+        min_distinct_books=3, reference_weights_percent={"fanduel": Decimal(34),
+            "draftkings": Decimal(33), "caesars": Decimal(33)},
+        accept_unknown_active_status=True,
         accept_unknown_quote_observation_age=True, max_indicator_age_ms=30000,
         independent_crosscheck="two_distinct_books",
         uncertainty_margin_probability=Decimal("0.01"), max_debit_usd=Decimal(25),
@@ -342,7 +344,7 @@ def test_approved_prop_scope_requires_explicit_full_period_and_exact_half_line()
         maximum_native_attempts=None, automatic_followups=True,
         approval_evidence="OFFLINE approved prop scope fixture")
     pricing = PricingConfig.model_validate({**config().model_dump(),
-        "multi_book_consensus_enabled": True,
+        "multi_book_consensus_enabled": True, "live_multi_book_enabled": True,
         "trusted_pilot_policy": policy.model_dump()})
     envelope = ProviderEnvelope("parlay_rest", "props_snapshot", [], NOW, 1,
         published_at=NOW, metadata={"sport": "americanfootball_nfl",
@@ -364,6 +366,21 @@ def test_approved_prop_scope_requires_explicit_full_period_and_exact_half_line()
         [replace(offer, period=None)]) == []
     assert TrustedSourceProjector(lambda: pricing).apply(envelope,
         [replace(offer, line="4", outcome_points={key: "4" for key in offer.outcome_points})]) == []
+    # The live consensus compares the exact NFL question across independent
+    # sportsbook pairs; a delivery from the same book through another source
+    # would still count only once in the pricing layer.
+    from evplatform.core.multi_book_consensus import live_consensus_scope
+    projector = TrustedSourceProjector(lambda: pricing)
+    updates = [projector.apply(envelope, [replace(offer, bookmaker=book)])[0]
+               for book in ("fanduel", "draftkings", "caesars")]
+    compared_market = updates[0][0]
+    quotes = [quote for _, quote in updates]
+    live_pricing = live_consensus_scope(compared_market, quotes, pricing, NOW)
+    fair = fair_value(compared_market, quotes, live_pricing, NOW)
+    assert {reference["bookmaker"] for reference in fair.references} == {
+        "fanduel", "draftkings", "caesars"}
+    assert sum(Decimal(reference["effective_weight_percent"])
+               for reference in fair.references) == Decimal(100)
 
 
 def test_refreshed_game_baseline_cannot_make_old_retained_row_live_eligible():
@@ -767,6 +784,16 @@ def test_prophetx_recurring_scope_requires_reviewed_exact_nfl_moneyline():
     assert combined.matches(nba_prop.model_copy(update={"statistic": "steals", "line": Decimal("1.5")}))
     assert combined.matches(nba_prop.model_copy(update={"statistic": "double_double", "line": Decimal("0.5")}))
     assert not combined.matches(nba_prop.model_copy(update={"statistic": "blocks"}))
+    nba_nfl = combined.model_copy(update={
+        "additional_competitions": (("football", "NFL"),),
+        "additional_nfl_player_prop_statistics": ("passing_yards", "receptions",
+            "anytime_touchdown")})
+    assert nba_nfl.matches(market)
+    assert nba_nfl.matches(prop.model_copy(update={"statistic": "passing_yards",
+        "line": Decimal("244.5")}))
+    assert nba_nfl.matches(prop.model_copy(update={"statistic": "anytime_touchdown",
+        "line": Decimal("0.5")}))
+    assert not nba_nfl.matches(prop.model_copy(update={"statistic": "pass_attempts"}))
     with pytest.raises(ValueError, match="ProphetX pilot scope"):
         TrustedPilotMarketScope(venue="prophetx", sport="football", league="NFL",
             market_type="player_prop", statistics=("shots_on_goal",), reviewed_normal_rule_id=rule_id)

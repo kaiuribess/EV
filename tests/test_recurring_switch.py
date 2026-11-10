@@ -79,6 +79,14 @@ def test_owner_switch_issues_24_hour_scope_and_real_account_evidence(tmp_path):
         "points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers",
         "points_rebounds", "points_assists", "rebounds_assists",
         "points_rebounds_assists", "double_double", "triple_double"}
+    assert engine.native.profile.family_rule.scope.additional_competitions == (("football", "NFL"),)
+    assert set(engine.native.profile.family_rule.scope.additional_nfl_player_prop_statistics) >= {
+        "passing_yards", "passing_touchdowns", "pass_completions", "pass_attempts",
+        "rushing_yards", "rushing_attempts", "receiving_yards", "receptions",
+        "kicking_points", "field_goals_made", "anytime_touchdown", "first_touchdown"}
+    assert "NFL|moneyline|moneyline|default_full_game" in (
+        engine.native.profile.family_rule.allowed_native_rule_texts)
+    assert "football:NFL" in engine.native.profile.family_rule.additional_native_settlement_evidence
     assert engine.native.profile.provider_ids == ("parlay_game_ws", "parlay_ws")
     assert engine.settings.pricing.trusted_pilot_policy.player_prop_provider_id == "parlay_ws"
     assert engine.settings.pricing.trusted_pilot_policy.market_scope == engine.native.profile.family_rule.scope

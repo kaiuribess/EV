@@ -16,10 +16,12 @@ from uuid import uuid4
 
 from .paths import runtime_data_file
 from .readiness import LaunchEvidence, LaunchProfile, digest_json
-from ..venues.prophetx_props import NBA_PROP_STATISTICS, reviewed_nba_prop_rule_tokens
+from ..venues.prophetx_props import (NBA_PROP_STATISTICS, NFL_PROP_STATISTICS,
+    reviewed_nba_prop_rule_tokens, reviewed_nfl_prop_rule_tokens)
 
 
 NBA_PROP_SCOPE = tuple(sorted(NBA_PROP_STATISTICS))
+NFL_PROP_SCOPE = tuple(sorted(NFL_PROP_STATISTICS))
 NBA_PROP_SOURCE_EVIDENCE = (
     "Parlay full-game NBA player-prop keys and two-sided line payloads: "
     "https://parlay-api.com/docs/websocket/player-props; ordinary participation/void rules "
@@ -28,6 +30,16 @@ NBA_PROP_NATIVE_EVIDENCE = (
     "CFTC ProphetX NBA filing 61599 Appendix A: player-stat markets require participation "
     "and use official statistics including corrections within 48 hours; full-event markets "
     "include overtime unless a shorter period is specified; "
+    "https://framerusercontent.com/assets/xFIxMV69o6oKsLMzIkdlbTdqrTc.pdf")
+NFL_SOURCE_EVIDENCE = (
+    "Parlay full-game NFL h2h and documented player-prop keys/period fields: "
+    "https://parlay-api.com/docs/websocket/player-props; only exact complete opposing "
+    "book pairs with period FULL enter the reviewed normal-outcome policy")
+NFL_NATIVE_EVIDENCE = (
+    "ProphetX CFTC filing 61599 Appendix A applies official-stat, participation and "
+    "correction rules to player-stat markets; event-result markets include overtime "
+    "unless a shorter period is named; exact NFL subtype/title/strike evidence is "
+    "revalidated from V4/Talaria per fixture; "
     "https://framerusercontent.com/assets/xFIxMV69o6oKsLMzIkdlbTdqrTc.pdf")
 
 
@@ -57,13 +69,20 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
             or (rule.scope.sport, rule.scope.league, rule.scope.market_type,
                 rule.scope.period, rule.scope.phase) !=
                 ("basketball", "NBA", "moneyline", "FULL", "pregame")
-            or rule.scope.additional_competitions
+            or frozenset(rule.scope.additional_competitions) not in {
+                frozenset(), frozenset({("football", "NFL")})}
             or (rule.scope.additional_player_prop_statistics
                 and tuple(sorted(rule.scope.additional_player_prop_statistics)) != NBA_PROP_SCOPE)
+            or (rule.scope.additional_nfl_player_prop_statistics
+                and tuple(sorted(rule.scope.additional_nfl_player_prop_statistics)) != NFL_PROP_SCOPE)
+            or bool(rule.scope.additional_nfl_player_prop_statistics) !=
+               (("football", "NFL") in rule.scope.additional_competitions)
             or rule.prophetx_fee_evidence_kind != "owner_approved_assumption"
             or rule.prophetx_assumed_winnings_profit_rate != Decimal("0.02")
             or profile.provider_ids != (("parlay_game_ws", "parlay_ws")
-                if rule.scope.additional_player_prop_statistics else ("parlay_game_ws",))
+                if (rule.scope.additional_player_prop_statistics
+                    or rule.scope.additional_nfl_player_prop_statistics)
+                else ("parlay_game_ws",))
             or profile.strategy_ids != ("native_positive_ev",)
             or profile.min_reference_books < 3
             or profile.max_reference_age_ms > 30000
@@ -110,14 +129,18 @@ def _reviewed_scope(engine, profile: LaunchProfile) -> None:
         raise ValueError("Native mapping rules changed; review them before turning Live on")
 
 
-def _expanded_nba_scope(scope):
+def _expanded_nba_nfl_scope(scope):
     evidence = scope.source_normal_rule_evidence or ""
     if NBA_PROP_SOURCE_EVIDENCE not in evidence:
         evidence = f"{evidence}; {NBA_PROP_SOURCE_EVIDENCE}".strip("; ")
+    if NFL_SOURCE_EVIDENCE not in evidence:
+        evidence = f"{evidence}; {NFL_SOURCE_EVIDENCE}".strip("; ")
     return type(scope).model_validate({
         **scope.model_dump(mode="json"),
+        "additional_competitions": (("football", "NFL"),),
         "additional_player_prop_statistics": NBA_PROP_SCOPE,
-        "reviewed_normal_rule_id": "PARLAY-NBA-FULL-MONEYLINE-PROPS-20261110",
+        "additional_nfl_player_prop_statistics": NFL_PROP_SCOPE,
+        "reviewed_normal_rule_id": "PARLAY-NBA-NFL-FULL-MONEYLINE-PROPS-20261110",
         "source_normal_rule_evidence": evidence,
     })
 
@@ -158,12 +181,13 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
         raise ValueError("Unresolved ProphetX inventory or settlement blocks Live")
     approval_id = str(uuid4())
     expires = now + timedelta(hours=24)
-    expanded_scope = _expanded_nba_scope(profile.family_rule.scope)
+    expanded_scope = _expanded_nba_nfl_scope(profile.family_rule.scope)
     updated_policy = type(engine.settings.pricing.trusted_pilot_policy).model_validate({
         **engine.settings.pricing.trusted_pilot_policy.model_dump(mode="json"),
         "market_scope": expanded_scope.model_dump(mode="json"),
         "player_prop_provider_id": "parlay_ws",
-        "approval_evidence": f"owner-live-switch:{approval_id}:NBA moneyline and exact full-game props",
+        "approval_evidence": (f"owner-live-switch:{approval_id}:NBA/NFL moneylines "
+                              "and exact full-game player props"),
     })
     updated_pricing = type(engine.settings.pricing).model_validate({
         **engine.settings.pricing.model_dump(mode="json"),
@@ -172,12 +196,17 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
     updated_rule = type(profile.family_rule).model_validate({
         **profile.family_rule.model_dump(mode="json"),
         "scope": expanded_scope.model_dump(mode="json"),
-        "rule_version": "NBA-MONEYLINE-AND-PROPS-20261110",
+        "rule_version": "NBA-NFL-MONEYLINE-AND-PROPS-20261110",
         "allowed_native_rule_texts": tuple(dict.fromkeys((
             *profile.family_rule.allowed_native_rule_texts,
+            "NFL|moneyline|moneyline|default_full_game",
             *reviewed_nba_prop_rule_tokens(),
+            *reviewed_nfl_prop_rule_tokens(),
         ))),
         "prophetx_native_settlement_evidence": NBA_PROP_NATIVE_EVIDENCE,
+        "additional_native_settlement_evidence": {
+            "football:NFL": NFL_NATIVE_EVIDENCE,
+        },
         "approved_by": "local_owner_live_switch",
         "approval_evidence": f"owner-live-switch:{approval_id}",
         "approved_at": now, "expires_at": expires,
