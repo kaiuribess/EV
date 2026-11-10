@@ -3,6 +3,7 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 import pytest
@@ -373,6 +374,35 @@ async def test_periodic_discovery_changes_stream_scope_only_after_success(monkey
         await NativeMonitor._discover_periodically(monitor)
     assert client.calls == [(["100", "200"], {})]
     assert monitor._subscribed_event_ids == ["100", "200"]
+
+
+@pytest.mark.asyncio
+async def test_periodic_discovery_defers_subscription_rotation_during_account_probe(monkeypatch):
+    sleeps = 0
+
+    async def bounded_sleep(_):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 15:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("evplatform.plugins.external.asyncio.sleep", bounded_sleep)
+    refresh = AsyncMock()
+    rematch = AsyncMock(return_value=[])
+    lock = SimpleNamespace(locked=lambda: True)
+    monitor = SimpleNamespace(client=SimpleNamespace(subscribe=AsyncMock()),
+        engine=SimpleNamespace(native=SimpleNamespace(_account_probe_lock=lock),
+            reference_estimates={}, consensus_estimates={}),
+        context=SimpleNamespace(config={"discovery_interval_seconds": 60,
+            "event_ids": ["100"], "prop_subtypes": {}}),
+        discovered_event_ids=["100"], _subscribed_event_ids=["100"],
+        _last_research_source_ids=frozenset(),
+        discovery_status="current", _refresh_discovery=refresh,
+        _refresh_research_matches=rematch)
+    with pytest.raises(asyncio.CancelledError):
+        await NativeMonitor._discover_periodically(monitor)
+    refresh.assert_not_awaited()
+    monitor.client.subscribe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
