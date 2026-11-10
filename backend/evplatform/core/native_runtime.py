@@ -261,14 +261,34 @@ class NativeRuntime:
         # A catalog without a period can be promoted only when this exact
         # league's normal full-game settlement has its own reviewed token.
         # Retain the original NBA token for already signed NBA rules.
-        default_token = ("moneyline|moneyline|default_full_game"
-            if market.league == "NBA" else
-            f"{market.league}|moneyline|moneyline|default_full_game")
-        default_full_game = (venue == "prophetx" and market.market_type == "moneyline"
+        if market.market_type == "moneyline":
+            default_token = ("moneyline|moneyline|default_full_game"
+                if market.league == "NBA" else
+                f"{market.league}|moneyline|moneyline|default_full_game")
+        else:
+            default_token = None
+        default_full_game = (venue == "prophetx" and default_token is not None
             and default_token in rule.allowed_native_rule_texts
             and bool(rule.settlement_evidence_for(market)))
+        def reviewed_missing_period(item) -> bool:
+            if default_full_game:
+                return True
+            if venue != "prophetx" or market.market_type != "player_prop":
+                return False
+            from ..venues.prophetx_props import (PROPHETX_NBA_PROP_SUBTYPES,
+                native_prop_rule_token)
+            native = monitor.client.public_market_data.catalog.get(
+                (item.native_event_id, item.native_market_id))
+            if not isinstance(native, dict):
+                return False
+            subtype = PROPHETX_NBA_PROP_SUBTYPES.get(str(native.get("sub_type")))
+            return bool(subtype is not None and subtype[0] == market.statistic
+                and native.get("period") is None
+                and native_prop_rule_token(str(native.get("sub_type")), subtype[2], None)
+                    in rule.allowed_native_rule_texts
+                and rule.settlement_evidence_for(market))
         if (len(selected) != 2 or {item.outcome for item in selected} != set(market.outcomes)
-                or any((item.identity_limitations and not (default_full_game and
+                or any((item.identity_limitations and not (reviewed_missing_period(item) and
                             item.identity_limitations == ("Native period is not explicit in the catalog",)))
                         or item.source_market_fingerprint != market.identity()
                        or item.source_start != market.start_time or item.native_start is None
@@ -321,12 +341,25 @@ class NativeRuntime:
                     source_event_id=match.native_event_id,
                     source_market_id=match.native_market_id)
             elif venue == "prophetx":
+                from ..venues.prophetx_props import (PROPHETX_NBA_PROP_SUBTYPES,
+                    native_prop_rule_token)
                 native = monitor.client.public_market_data.catalog.get(
                     (match.native_event_id, match.native_market_id))
                 event = monitor.research_events.get(match.native_event_id)
+                subtype_rule = (PROPHETX_NBA_PROP_SUBTYPES.get(str(native.get("sub_type")))
+                    if isinstance(native, dict) and market.market_type == "player_prop" else None)
+                if subtype_rule is not None:
+                    prop_default_token = native_prop_rule_token(
+                        str(native.get("sub_type")), subtype_rule[2], None)
+                    prop_default_full_game = (native.get("period") is None
+                        and prop_default_token in rule.allowed_native_rule_texts
+                        and bool(rule.settlement_evidence_for(market)))
+                else:
+                    prop_default_token, prop_default_full_game = None, False
                 # The unqualified main Moneyline shape needs a reviewed
                 # competition-specific default rule when period is omitted.
-                native_period_rule = (default_token
+                native_period_rule = (prop_default_token
+                    if prop_default_full_game else default_token
                     if native.get("period") is None and native.get("name") == "Moneyline"
                     and native.get("type") == "moneyline" and native.get("sub_type") == "moneyline"
                     and default_full_game else
@@ -336,9 +369,15 @@ class NativeRuntime:
                 except (ValueError, TypeError, ArithmeticError):
                     native_line = None
                 exact_prop = (isinstance(native, dict) and market.market_type == "player_prop"
+                    and ((market.league == "NBA" and subtype_rule is not None
+                          and subtype_rule[0] == market.statistic
+                          and native.get("type") in {subtype_rule[2], "player_prop"})
+                         or (market.league != "NBA" and native.get("type") == "player_prop"))
                     and native.get("player_id") == market.player_id
+                    and native.get("player_name") in {None, market.player}
                     and native.get("statistic") == market.statistic
-                    and native.get("period") in {"FULL", "full", "full_game"}
+                    and (native.get("period") in {"FULL", "full", "full_game"}
+                         or prop_default_full_game)
                     and native_line is not None and native_line.is_finite()
                     and native_line == market.line)
                 exact_moneyline = (isinstance(native, dict) and market.market_type == "moneyline"

@@ -169,6 +169,52 @@ def test_rest_prop_seed_preserves_price_and_value_without_claiming_live_depth():
     assert sample["executable_stake_usd"] == "0" and not view["rest_price_observation_verified"]
 
 
+def test_scoped_stream_completes_exact_standard_prop_identity_without_guessing_period():
+    payload = {"data": {"123": [{"id": 301, "name": "Trae Young Total Points",
+        "type": "total", "sub_type": "player_total_points", "period": None,
+        "status": "active", "selections": None}]}}
+    data = ProphetXMarketData()
+    data.replace_catalog([payload], ["123"], observed_at=NOW)
+    update = {"event": "v2.market_selections",
+        "scope": {"event_id": 123, "sub_type": "player_total_points"},
+        "envelope": {"op": "u"}, "data": {"sport_event_id": 123, "market_id": 301,
+        "info": {"id": 301, "status": "active", "sequence_number": 1,
+        "selections": [[{"strike_id": "prop-over", "outcome_id": 12,
+            "name": "over 24.5", "price": -110, "value": "8.25",
+            "updated_at": 1792731906663622000}],
+            [{"strike_id": "prop-under", "outcome_id": 13,
+            "name": "under 24.5", "price": 105, "value": "5.50",
+            "updated_at": 1792731906663622000}]]}}}
+    data.apply(update, received_at=NOW)
+    market = data.catalog[("123", "301")]
+    assert (market["player_id"], market["statistic"], market["line"], market["period"]) == (
+        "Trae Young", "points", "24.5", None)
+    assert {row["name"] for row in market["strikes"].values()} == {"Over", "Under"}
+    view = data.snapshot(now=NOW, connected=True)
+    assert view["current_player_prop_markets"] == 1
+    assert {row["executable_stake_usd"] for row in view["levels"]} == {"8.25", "5.50"}
+
+
+def test_scoped_stream_rejects_one_sided_or_mismatched_prop_thresholds():
+    payload = {"data": {"123": [{"id": 301, "name": "Trae Young Total Points",
+        "type": "total", "sub_type": "player_total_points", "period": None,
+        "status": "active", "selections": None}]}}
+    data = ProphetXMarketData()
+    data.replace_catalog([payload], ["123"], observed_at=NOW)
+    update = {"event": "v2.market_selections",
+        "scope": {"event_id": 123, "sub_type": "player_total_points"},
+        "envelope": {"op": "u"}, "data": {"sport_event_id": 123, "market_id": 301,
+        "info": {"id": 301, "status": "active", "selections": [
+            [{"strike_id": "prop-over", "outcome_id": 12, "name": "over 24.5",
+              "price": -110, "value": "8.25", "updated_at": 1792731906663622000}],
+            [{"strike_id": "prop-under", "outcome_id": 13, "name": "under 25.5",
+              "price": 105, "value": "5.50", "updated_at": 1792731906663622000}]]}}}
+    data.apply(update, received_at=NOW)
+    assert data.rejected_frames == 1
+    assert data.catalog[("123", "301")]["strikes"] == {}
+    assert data.snapshot(now=NOW, connected=True)["current_player_prop_markets"] == 0
+
+
 def test_native_research_read_uses_the_existing_monitor_and_never_calls_placement():
     client = ProphetXClient(ProphetXSettings(environment="production"))
     client.public_market_data.replace_catalog([catalog()], ["123"], observed_at=NOW)

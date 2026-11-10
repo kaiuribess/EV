@@ -448,8 +448,18 @@ def prophetx_matches(market: Market, catalog: dict[tuple[str, str], dict],
                 continue
             labels = {outcome: outcome for outcome in market.outcomes}
         elif market.market_type == "player_prop":
-            if (native.get("player_id") != market.player_id or native.get("statistic") != market.statistic
-                    or native.get("period") not in {"full", "full_game", "FULL"}):
+            from ..venues.prophetx_props import PROPHETX_NBA_PROP_SUBTYPES
+            subtype = PROPHETX_NBA_PROP_SUBTYPES.get(str(native.get("sub_type")))
+            nba_shape = (market.league == "NBA" and subtype is not None
+                and subtype[0] == market.statistic
+                and native.get("type") in {subtype[2], "player_prop"}
+                and native.get("player_name") in {None, market.player}
+                and native.get("period") in {None, "full", "full_game", "FULL"})
+            legacy_shape = (market.league != "NBA"
+                and native.get("period") in {"full", "full_game", "FULL"})
+            if (not (nba_shape or legacy_shape)
+                    or native.get("player_id") != market.player_id
+                    or native.get("statistic") != market.statistic):
                 continue
             try:
                 if D(native.get("line")) != market.line:

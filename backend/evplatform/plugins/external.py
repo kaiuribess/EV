@@ -462,8 +462,8 @@ class ProphetXMonitorConfig(BaseModel):
         description="Upcoming event subscription horizon; does not relax quote freshness or identity matching")
     discovery_interval_seconds: int = Field(default=300, ge=60, le=3600)
     max_discovered_events: int = Field(default=20, ge=1, le=50)
-    max_discovered_prop_subscriptions: int = Field(default=3, ge=0, le=10,
-        description="Read-only player prop subtype channels selected from the current V4 catalog")
+    max_discovered_prop_subscriptions: int = Field(default=100, ge=0, le=400,
+        description="Read-only event/subtype prop channels, bounded again by the returned Talaria channel limit")
     account_review: ProphetXAccountReview | None = Field(default=None,
         description="Non-secret account inception/funded-cash evidence; does not authorize orders")
     legacy_market_ids: list[str] = Field(default_factory=list, deprecated=True,
@@ -1193,6 +1193,7 @@ class NativeMonitor(Plugin):
     async def _refresh_discovery_once(self, *, preserve_scope=False):
         from ..integrations.prophetx_discovery import active_tournament_options, open_event_ids
         from ..core.native_research import _aware
+        from ..venues.prophetx_props import PROPHETX_NBA_PROP_SUBTYPES
         try:
             config = self.context.config
             engine = getattr(self, "engine", None)
@@ -1309,14 +1310,21 @@ class NativeMonitor(Plugin):
                                 and row.get("statistic") == market.statistic
                                 and row.get("period") in {"full", "full_game", "FULL"}
                                 and str(row.get("line")) == str(market.line)), default=0)
-                            family = subtype.removeprefix("player_total_") if subtype.startswith(
-                                "player_total_") else None
+                            reviewed_nba = (event.get("tournament_id") == 132
+                                and subtype in PROPHETX_NBA_PROP_SUBTYPES)
+                            family = (PROPHETX_NBA_PROP_SUBTYPES[subtype][0]
+                                if reviewed_nba else subtype.removeprefix("player_total_")
+                                if subtype.startswith("player_total_") else None)
                             family_score = max((count for market, count in related
                                 if market.statistic == family), default=0)
-                            prop_candidates.append((-int(exact >= 3), -exact,
+                            prop_candidates.append((-int(reviewed_nba), -int(exact >= 3), -exact,
                                 -int(family_score >= 3), -family_score, event_id, subtype))
-            for *_, event_id, subtype in sorted(prop_candidates)[:config.get(
-                    "max_discovered_prop_subscriptions", 3)]:
+            configured_prop_cap = config.get("max_discovered_prop_subscriptions", 100)
+            returned_limit = getattr(self.client, "_channel_limit", None)
+            prop_cap = min(configured_prop_cap,
+                max(0, int(returned_limit) - len(selected)) if returned_limit is not None
+                else configured_prop_cap)
+            for *_, event_id, subtype in sorted(prop_candidates)[:prop_cap]:
                 props.setdefault(event_id, []).append(subtype)
             if hasattr(self.client, "public_market_data"):
                 observed_at = utcnow()

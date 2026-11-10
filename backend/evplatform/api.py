@@ -542,6 +542,13 @@ def create_app(settings=None):
                     async with engine.native.manager.lock:
                         authorization = issue_prophetx_authorization(
                             engine, body.expected_launch_digest)
+                        # The reviewed Live action expands the reusable NBA
+                        # family to exact full-game props. Persist the matching
+                        # source policy with the saved launch scope
+                        # so a supervised restart cannot restore moneyline-only
+                        # pricing against a moneyline-plus-props profile.
+                        await engine.storage.save_config("pricing",
+                            engine.settings.pricing.model_dump(mode="json"))
                 recurring._status("pending", "Owner approved reviewed ProphetX Live scope",
                                   authorization["authorization_id"])
             phase = await asyncio.to_thread(recurring.tick,
