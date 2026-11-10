@@ -1392,6 +1392,17 @@ class NativeMonitor(Plugin):
                     if NativeMonitor._research_match_refresh_due(self, elapsed):
                         await self._refresh_research_matches()
                     continue
+                # A changed discovery scope reconnects Talaria. Do not rotate
+                # that account-bound private channel while the execution
+                # inventory probe is using its generation/revision fence.
+                # Keep the existing subscriptions streaming and retry this
+                # local catalog refresh in five seconds; no paid source poll
+                # or order action is introduced by the deferral.
+                native = getattr(getattr(self, "engine", None), "native", None)
+                account_lock = getattr(native, "_account_probe_lock", None)
+                if account_lock is not None and account_lock.locked():
+                    elapsed = max(0, interval - 5)
+                    continue
                 await self._refresh_discovery()
                 elapsed = 0
                 if self.discovery_status != "current":
