@@ -457,6 +457,82 @@ def test_one_reviewed_prophetx_moneyline_rule_covers_distinct_leagues_without_st
                 market.id, market.outcomes[0])
 
 
+@pytest.mark.parametrize(("sport_key", "sport", "league", "participants"), (
+    ("americanfootball_ncaaf", "football", "NCAAF",
+        ("Kent State Golden Flashes", "Bowling Green Falcons")),
+    ("basketball_ncaab", "basketball", "NCAABM",
+        ("Florida Gators", "Florida State Seminoles")),
+    ("tennis_atp", "tennis", "ATP", ("Toby Samuel", "Lorenzo Musetti")),
+    ("tennis_wta", "tennis", "WTA", ("Player One", "Player Two")),
+))
+def test_reviewed_multisport_default_moneyline_onboards_without_fixture_ids(
+        sport_key, sport, league, participants):
+    now = utcnow().replace(microsecond=0)
+    config, base_scope = approved_config("prophetx")
+    competitions = (("football", "NFL"), ("football", "NCAAF"),
+        ("basketball", "NCAABM"), ("tennis", "ATP"), ("tennis", "WTA"))
+    scope = TrustedPilotMarketScope.model_validate({**base_scope.model_dump(),
+        "additional_competitions": competitions})
+    config = config.model_copy(update={"trusted_pilot_policy":
+        config.trusted_pilot_policy.model_copy(update={"market_scope": scope})})
+    evidence = {f"{item_sport}:{item_league}": f"OFFLINE reviewed {item_league} normal winner evidence"
+        for item_sport, item_league in competitions}
+    rule = ApprovedNativeFamilyRule(scope=scope, rule_version="OFFLINE-multisport-v2",
+        approved_by="fixture", approval_evidence="OFFLINE multisport review fixture only",
+        approved_at=now-timedelta(minutes=1), expires_at=now+timedelta(days=1),
+        allowed_native_rule_texts=tuple(
+            f"{item_league}|moneyline|moneyline|default_full_game"
+            for _, item_league in competitions),
+        quantity_step=Decimal(".01"), minimum_quantity=Decimal(1),
+        minimum_order_cost_usd=Decimal(1), cash_quantum_usd=Decimal(".01"),
+        order_minimum_source="OFFLINE ProphetX order-grid fixture",
+        prophetx_fee_evidence_kind="owner_approved_assumption",
+        prophetx_assumed_winnings_profit_rate=Decimal(".02"),
+        prophetx_fee_source="OFFLINE fee assumption fixture",
+        prophetx_native_settlement_evidence="OFFLINE reviewed NBA normal winner evidence",
+        additional_native_settlement_evidence=evidence,
+        prophetx_source_timestamp_unit="nanoseconds",
+        prophetx_timestamp_unit_evidence="OFFLINE catalog timestamp fixture")
+    start = now + timedelta(days=1)
+    market, _ = source_fixture(config, now, f"{league}-future", start,
+        sport_key=sport_key, teams=participants)
+    assert (market.sport, market.league) == (sport, league) and rule.matches(market)
+    native = {"name": "Moneyline", "type": "moneyline", "sub_type": "moneyline",
+        "period": None, "status": "active", "strikes": {
+            "home-strike": {"name": participants[0], "outcome_id": "4", "status": "active"},
+            "away-strike": {"name": participants[1], "outcome_id": "5", "status": "active"}}}
+    catalog = {("100", "200"): native}
+    events = {"100": {"event_id": 100, "name": market.event_name,
+        "scheduled": start.isoformat(), "status": "not_started", "league": league}}
+    matches = prophetx_matches(market, catalog, events, observed_at=now)
+    assert len(matches) == 2 and all(match.identity_limitations for match in matches)
+    profile = SimpleNamespace(venue="prophetx", market_ids=(), family_rule=rule)
+    runtime = SimpleNamespace(profile_for=lambda venue: profile, mapper=NativeBookMapper(),
+        engine=SimpleNamespace(settings=SimpleNamespace(pricing=config), markets={market.id: market}))
+    monitor = SimpleNamespace(research_catalog_at=now, research_events=events,
+        client=SimpleNamespace(public_market_data=SimpleNamespace(catalog=catalog)))
+    assert NativeRuntime.onboard_family_matches(runtime, "prophetx", market, matches,
+        monitor, now=now) == 2
+    assert all(NativeRuntime.profile_permits_market(runtime, profile, market.id, outcome)
+               for outcome in market.outcomes)
+
+
+def test_soccer_three_way_source_cannot_be_promoted_to_two_way_moneyline():
+    now = utcnow().replace(microsecond=0)
+    config, _ = approved_config("prophetx")
+    payload = [{"id": "soccer-fixture", "sport_key": "soccer_epl",
+        "home_team": "Home FC", "away_team": "Away FC",
+        "commence_time": (now+timedelta(days=1)).isoformat(), "bookmakers": [{
+            "key": "fanduel", "markets": [{"key": "h2h", "period": "FULL",
+                "outcomes": [{"name": "Home FC", "price": 2.1},
+                    {"name": "Draw", "price": 3.2}, {"name": "Away FC", "price": 3.4}]}]}]}]
+    mapper = VerifiedProviderMapper()
+    mapper.research_projector = TrustedSourceProjector(lambda: config)
+    envelope = ProviderEnvelope("parlay_rest", "snapshot", payload, now, 1,
+        published_at=now, metadata={"sport": "soccer_epl"})
+    assert mapper(envelope) == [] and mapper.research_updates == []
+
+
 
 def test_one_reviewed_prophetx_moneyline_rule_covers_distinct_leagues_without_static_ids():
     now = utcnow().replace(microsecond=0)

@@ -50,7 +50,9 @@ def active_tournament_options(payload: dict, leagues: list[str]) -> list[tuple[s
     if not isinstance(rows, list) or len(rows) > 5000:
         raise ValueError("Unexpected ProphetX tournament catalog shape")
     requested = set(leagues)
-    aliases = {"College Football": "NCAAF", "College Basketball": "NCAABM"}
+    aliases = {"College Football": "NCAAF", "College Basketball": "NCAABM",
+               "Liga MX": "LIGA_MX", "League One": "EFL_LEAGUE_ONE",
+               "Brazilian Serie A": "BRAZIL_SERIE_A"}
     options: list[tuple[str, int]] = []
     by_id: dict[int, str] = {}
     for row in rows:

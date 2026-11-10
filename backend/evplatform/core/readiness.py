@@ -307,7 +307,10 @@ class LaunchProfile(StrictRecord):
                     or self.family_rule.scope.period != "FULL"
                     or self.family_rule.scope.phase != "pregame"
                     or frozenset(self.family_rule.scope.additional_competitions) not in {
-                        frozenset(), frozenset({("football", "NFL")})}
+                        frozenset(), frozenset({("football", "NFL")}),
+                        frozenset({("football", "NFL"), ("football", "NCAAF"),
+                            ("basketball", "NCAABM"), ("tennis", "ATP"),
+                            ("tennis", "WTA")})}
                     or self.min_reference_books < 3
                     or (self.family_rule.scope.additional_player_prop_statistics
                         and set(self.family_rule.scope.additional_player_prop_statistics)
@@ -333,7 +336,7 @@ class LaunchProfile(StrictRecord):
                     or limits.daily_loss_limit_usd is None
                     or limits.daily_loss_limit_usd > Decimal("20")
                     or limits.max_open_orders != 1 or limits.max_orders_per_minute != 1):
-                raise ValueError("Recurring lifecycle deferral requires the reviewed bounded ProphetX NBA scope")
+                raise ValueError("Recurring lifecycle deferral requires the reviewed bounded ProphetX pregame scope")
         return self
 
     @model_validator(mode="after")
