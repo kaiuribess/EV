@@ -106,6 +106,34 @@ def test_owner_switch_issues_24_hour_scope_and_real_account_evidence(tmp_path):
     assert len(list((tmp_path / "recurring_switch_audit").glob("*.json"))) == 3
 
 
+def test_owner_switch_can_reset_recovered_audit_persistence_halt(tmp_path):
+    engine, now = fixture_engine(tmp_path)
+    engine.risk.kill_reason = "Audit persistence unavailable"
+    engine.native.runtime_facts = lambda venue: SimpleNamespace(
+        persistence_healthy=True, durable_intents=True, signal_ledger_healthy=True)
+
+    result = issue_prophetx_authorization(engine,
+        engine.native.report().profile_digest, now=now,
+        authorization_path=tmp_path / "authorization.json")
+
+    assert result["venues"] == ["prophetx"]
+    assert (tmp_path / "authorization.json").exists()
+
+
+def test_owner_switch_rejects_unrecovered_audit_persistence_halt(tmp_path):
+    engine, now = fixture_engine(tmp_path)
+    engine.risk.kill_reason = "Audit persistence unavailable"
+    engine.native.runtime_facts = lambda venue: SimpleNamespace(
+        persistence_healthy=False, durable_intents=True, signal_ledger_healthy=True)
+
+    with pytest.raises(ValueError, match="inventory or settlement"):
+        issue_prophetx_authorization(engine,
+            engine.native.report().profile_digest, now=now,
+            authorization_path=tmp_path / "authorization.json")
+
+    assert not (tmp_path / "authorization.json").exists()
+
+
 @pytest.mark.parametrize("change", ["stale", "inventory", "scope", "pricing", "emergency", "unknown_order"])
 def test_owner_switch_rejects_unverified_facts_without_writing_authorization(tmp_path, change):
     engine, now = fixture_engine(tmp_path,

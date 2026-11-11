@@ -202,10 +202,21 @@ def issue_prophetx_authorization(engine, expected_digest: str, *, now: datetime 
             or snapshot.open_order_count is None or snapshot.position_count is None
             or native.account_probe_errors.get("prophetx")):
         raise ValueError("A current reconciled ProphetX account read is required")
+    resettable_stop = engine.risk.kill_reason in {"", "Operator emergency stop",
+        "Native account inventory differs from the managed order ledger",
+        "Persisted emergency stop; reset explicitly"}
+    if engine.risk.kill_reason == "Audit persistence unavailable":
+        # A transient startup burst can fill the asynchronous audit queue and
+        # correctly latch the emergency stop even after the writer catches up.
+        # Permit a fresh owner switch only when the live runtime independently
+        # proves that durable intents, audit persistence and the signal ledger
+        # are healthy again.  The switch still creates a new bounded
+        # authorization and the normal activation gate is re-evaluated.
+        runtime = native.runtime_facts("prophetx")
+        resettable_stop = bool(runtime.persistence_healthy
+            and runtime.durable_intents and runtime.signal_ledger_healthy)
     if (not engine.risk.external_exposure_bounded("prophetx")
-            or engine.risk.kill_reason not in {"", "Operator emergency stop",
-                "Native account inventory differs from the managed order ledger",
-                "Persisted emergency stop; reset explicitly"}
+            or not resettable_stop
             or any(order.venue == "prophetx" and not order.reconciliation_complete
                    for order in engine.risk.native_orders.values())
             or native.manager.invalidated_settlements):
