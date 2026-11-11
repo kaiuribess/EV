@@ -443,6 +443,31 @@ async def test_recovered_catalog_reconnects_with_events_after_startup_read_failu
 
 
 @pytest.mark.asyncio
+async def test_recovered_catalog_defers_subscription_rotation_during_account_probe():
+    client = SimpleNamespace(subscribe=AsyncMock())
+    lock = SimpleNamespace(locked=lambda: True)
+
+    async def refresh(*, preserve_scope=False):
+        assert preserve_scope is True
+        monitor.discovery_status = "current"
+        monitor.discovered_event_ids = ["123"]
+        monitor.discovered_prop_subtypes = {"123": ["player_total_points"]}
+
+    monitor = SimpleNamespace(client=client,
+        engine=SimpleNamespace(native=SimpleNamespace(_account_probe_lock=lock)),
+        context=SimpleNamespace(config={"event_ids": [], "prop_subtypes": {}}),
+        discovery_status="read_failed", discovered_event_ids=[],
+        discovered_prop_subtypes={}, _subscribed_event_ids=[],
+        _subscribed_prop_subtypes={}, _refresh_discovery=refresh)
+
+    await NativeMonitor._recover_prophetx_catalog(monitor)
+
+    client.subscribe.assert_not_awaited()
+    assert monitor.discovered_event_ids == ["123"]
+    assert monitor._subscribed_event_ids == []
+
+
+@pytest.mark.asyncio
 async def test_reconnect_catalog_refresh_does_not_block_talaria_message_loop():
     refresh_started, release_refresh = asyncio.Event(), asyncio.Event()
 

@@ -1365,6 +1365,16 @@ class NativeMonitor(Plugin):
             await self._refresh_discovery(preserve_scope=True)
             if self.discovery_status != "current":
                 return
+            # Startup/reconnect recovery runs independently of the periodic
+            # discovery task.  It must honor the same account-inventory fence:
+            # re-registering Talaria channels resets the private generation
+            # and otherwise discards an authoritative account probe that is
+            # already in flight.  Periodic discovery will apply this freshly
+            # cached scope as soon as the bounded probe releases the lock.
+            native = getattr(getattr(self, "engine", None), "native", None)
+            account_lock = getattr(native, "_account_probe_lock", None)
+            if account_lock is not None and account_lock.locked():
+                return
             selected = list(dict.fromkeys([*self.context.config.get("event_ids", []),
                                            *self.discovered_event_ids]))
             props = NativeMonitor._prophetx_prop_scope(self)
