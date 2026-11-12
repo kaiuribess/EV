@@ -77,6 +77,29 @@ async def test_retention_does_not_prune_future_or_malformed_clocks(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_raw_detail_window_leaves_capacity_headroom(tmp_path):
+    storage = Storage(str(tmp_path / "headroom.db"))
+    await storage.open()
+    expired = (utcnow() - timedelta(hours=3)).isoformat()
+    retained = (utcnow() - timedelta(hours=1)).isoformat()
+    try:
+        await storage.write([
+            ("INSERT INTO events(id,schema_name,emitted_at,data) VALUES(?,?,?,?)",
+             ("expired-quote", "odds.quote", expired, "{}")),
+            ("INSERT INTO events(id,schema_name,emitted_at,data) VALUES(?,?,?,?)",
+             ("retained-quote", "odds.quote", retained, "{}")),
+        ], (), durable=True)
+
+        assert await storage.retention_pass(max_batches=1) == {
+            "events": 1, "signal_observations": 0, "signal_transitions": 0}
+        rows = await (await storage.connection.execute(
+            "SELECT id FROM events ORDER BY seq")).fetchall()
+        assert rows == [("retained-quote",)]
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_offline_bulk_prune_keeps_permanent_events_and_counts_once(tmp_path):
     path = tmp_path / "bulk.db"
     storage = Storage(str(path))

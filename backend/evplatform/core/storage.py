@@ -44,7 +44,12 @@ class Storage:
     # keeping every repeated tick in the operational database indefinitely can
     # exhaust a workstation. Financial events and compact signal episodes are
     # retained separately and are never selected by this raw-detail policy.
-    RAW_DETAIL_HOURS = 6
+    # At the production fan-out rate, a six-hour raw replay window can fill the
+    # 3 GiB safety cap before the next retention pass can reclaim enough pages.
+    # Compact signal results and every financial/lifecycle record are retained
+    # separately; two hours still provides an operational replay window while
+    # leaving ample headroom for bursts and SQLite indexes.
+    RAW_DETAIL_HOURS = 2
     RETENTION_BATCH = 2000
     MAX_DATABASE_BYTES = 3 * 1024**3
     PERMANENT_EVENT_SCHEMAS = (
