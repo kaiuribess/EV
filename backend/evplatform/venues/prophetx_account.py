@@ -1,5 +1,4 @@
 """Authenticated ProphetX wallet cash and separate full-inventory verification."""
-import asyncio
 from datetime import timedelta
 from decimal import Decimal
 import math
@@ -11,6 +10,22 @@ from .prophetx_financial import (
 )
 from .reconciliation import ReconciliationError, _number, _object, _text
 from .common import decimal_value
+
+
+async def current_positions(client) -> tuple[dict, ...]:
+    """Read the documented current net-position inventory.
+
+    Unlike the eventually consistent order-history store, this endpoint is the
+    account's current position view.  Keep every returned row conservative: a
+    fully hedged position is still inventory and therefore still blocks the
+    current-empty fast path.
+    """
+    raw = _object(await client.request("GET", "/v4/mm/positions", params={}),
+                  "current positions")
+    rows = raw.get("data")
+    if not isinstance(rows, list):
+        raise ReconciliationError("Incomplete ProphetX current-position inventory")
+    return tuple(_object(row, "current position") for row in rows)
 
 
 def balance_facts(raw, *, observed_at, max_age=timedelta(seconds=10), funded_cash_only=False):
@@ -91,47 +106,32 @@ async def probe_prophetx_account(client, managed_orders=(), *, settled_order_ids
                 # not assert that the account has no older settled history.
                 query_to = math.ceil(now.timestamp())
                 query_from = query_to - 60 * 86400 + 1
-                # The reporting store can trail the matching/private stream by
-                # tens of seconds. A lagging page is never enough on its own:
-                # its watermark must eventually cover this probe's start while
-                # the wallet and private-stream fence remain unchanged.
-                for attempt in range(5):
-                    try:
-                        histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
-                            params={"status": status, "from": query_from, "to": query_to},
-                            observed_at=observed_at,
-                            max_age=timedelta(seconds=30))
-                            for status in ("open", "inactive")]
-                    except ReconciliationError as exc:
-                        if attempt < 4 and str(exc) == "Reporting watermark is stale or in the future":
-                            # A lagging report may catch up during the existing
-                            # bounded retry. Never accept a stale page.
-                            await asyncio.sleep(5)
-                            query_to = math.ceil(utcnow().timestamp())
-                            query_from = query_to - 60 * 86400 + 1
-                            continue
-                        raise
-                    after = balance_facts(await client.fetch_balance(),
-                        observed_at=observed_at or utcnow(), funded_cash_only=True)
-                    if before != after:
-                        blockers.append("ProphetX wallet changed during active-order reads")
-                        break
-                    if any(history.rows for history in histories):
-                        blockers.append("ProphetX active-order history is not empty")
-                        break
-                    watermark = min(history.last_synced_at for history in histories)
-                    if watermark < now and attempt < 4:
-                        # Reporting replicates behind the private order stream.
-                        # One paced retry lets its watermark cover this probe;
-                        # the unchanged wallet and private fence remain required.
-                        await asyncio.sleep(5)
-                        query_to = math.ceil(utcnow().timestamp())
-                        query_from = query_to - 60 * 86400 + 1
-                        continue
+                # Order history is eventually consistent. Its last_synced_at
+                # can remain unchanged on an idle account, so it cannot be the
+                # sole clock for a current-empty decision. Read both active
+                # states for attribution, then bind the documented current
+                # positions view to two unchanged, synchronized wallet reads
+                # and the live private-stream fence.
+                histories = [await reporting_pages(client, "/v4/mm/get_order_history", "orders",
+                    params={"status": status, "from": query_from, "to": query_to},
+                    observed_at=observed_at, max_age=None)
+                    for status in ("open", "inactive")]
+                positions = await current_positions(client)
+                positions_observed_at = observed_at or utcnow()
+                after = balance_facts(await client.fetch_balance(),
+                    observed_at=observed_at or utcnow(), funded_cash_only=True)
+                if before != after:
+                    blockers.append("ProphetX wallet changed during current inventory reads")
+                elif any(history.rows for history in histories):
+                    blockers.append("ProphetX active-order history is not empty")
+                elif positions:
+                    blockers.append("ProphetX current-position inventory is not empty")
+                else:
                     current = private.reconcile_current_empty(started_at=now,
-                        reporting_watermark=watermark, captured_fence=captured_fence,
-                        client=client, observed_at=observed_at or utcnow())
-                    break
+                        reporting_watermark=min(history.last_synced_at for history in histories),
+                        current_positions_observed_at=positions_observed_at,
+                        captured_fence=captured_fence, client=client,
+                        observed_at=observed_at or utcnow())
             except ReconciliationError as exc:
                 blockers.append(str(exc))
                 current = None

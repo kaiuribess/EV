@@ -10,7 +10,7 @@ from evplatform.core.conflicts import reviewed_correlations, risk_family
 from evplatform.core.models import OrderStatus
 from evplatform.core.native_accounting import NativeInstrument, NativeOrderIntent
 from evplatform.core.native_oms import NativeOrder
-from evplatform.venues.prophetx_account import balance_facts, probe_prophetx_account
+from evplatform.venues.prophetx_account import balance_facts, current_positions, probe_prophetx_account
 from evplatform.venues.prophetx_financial import (
     ProphetXAccountReview, complete_order_history, normalize_financial_order,
     prophetx_fingerprint, reconcile_prophetx_financial, reporting_pages,
@@ -87,6 +87,8 @@ class Client:
             stamp = datetime.fromisoformat(self.row["created_at"]).timestamp()
             rows = [self.row] if params["from"] <= stamp <= params["to"] else []
             return {"data": {"orders": deepcopy(rows), "next_cursor": ""}, "last_synced_at": iso()}
+        if path.endswith("/positions"):
+            return {"data": []}
         if path.endswith("get_order_matched_detail"):
             return {"data": {"matching_details": deepcopy(self.fills), "next_cursor": ""}, "last_synced_at": iso()}
         if path.endswith("get_transactions"):
@@ -396,7 +398,8 @@ async def test_current_empty_inventory_uses_wallet_active_history_and_private_fe
     assert result.external_position_count == 0 and result.external_cost_usd == 0
     assert result.balance_usd == D("49.10")
     assert client.private.matches(result, client=client)
-    assert [params["status"] for _, params in client.calls] == ["open", "inactive"]
+    assert [params["status"] for path, params in client.calls
+            if path.endswith("get_order_history")] == ["open", "inactive"]
 
 
 async def test_current_empty_inventory_timestamp_is_completion_time(case, monkeypatch):
@@ -419,11 +422,7 @@ async def test_current_empty_inventory_timestamp_is_completion_time(case, monkey
     assert result.observed_at == NOW + timedelta(seconds=24)
 
 
-async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case, monkeypatch):
-    from evplatform.venues import prophetx_account
-    async def pace(_seconds):
-        pass
-    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
+async def test_current_empty_inventory_rejects_active_or_private_evidence(case):
     _, client, _ = case
     client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
     client.overrides["/v4/mm/get_order_history"] = lambda params: {
@@ -433,11 +432,6 @@ async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case, 
     assert not active.reconciled and active.open_order_count is None
     assert "active-order history is not empty" in active.reason
     client.overrides["/v4/mm/get_order_history"] = lambda _: {
-        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-1)}
-    lagging = await probe_prophetx_account(client, observed_at=NOW)
-    assert not lagging.reconciled
-    assert "reporting has not caught up" in lagging.reason
-    client.overrides["/v4/mm/get_order_history"] = lambda _: {
         "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso()}
     client.private.orders[OID] = ({"status": "open"}, 1)
     private_active = await probe_prophetx_account(client, observed_at=NOW)
@@ -445,66 +439,34 @@ async def test_current_empty_inventory_rejects_active_or_lagging_evidence(case, 
     assert "private stream still has active" in private_active.reason
 
 
-async def test_current_empty_inventory_retries_one_lagging_reporting_watermark(case):
+async def test_current_empty_inventory_accepts_idle_history_with_current_positions(case):
     _, client, _ = case
     client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
-    clocks = iter((iso(-1), iso(-1), iso(), iso()))
     client.overrides["/v4/mm/get_order_history"] = lambda _: {
-        "data": {"orders": [], "next_cursor": None}, "last_synced_at": next(clocks)}
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-120)}
     result = await probe_prophetx_account(client, observed_at=NOW)
     assert result.reconciled and result.open_order_count == result.position_count == 0
-    assert [params["status"] for _, params in client.calls] == [
-        "open", "inactive", "open", "inactive"]
+    history_calls = [params["status"] for path, params in client.calls if path.endswith("get_order_history")]
+    assert history_calls == ["open", "inactive"]
 
 
-async def test_current_empty_inventory_waits_for_documented_reporting_lag(case, monkeypatch):
-    from evplatform.venues import prophetx_account
-    _, client, _ = case
-    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
-    clocks = iter((iso(-12), iso(-12), iso(-12), iso(-12), iso(), iso()))
-    client.overrides["/v4/mm/get_order_history"] = lambda _: {
-        "data": {"orders": [], "next_cursor": None}, "last_synced_at": next(clocks)}
-    slept = []
-    async def pace(seconds):
-        slept.append(seconds)
-    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
-    result = await probe_prophetx_account(client, observed_at=NOW)
-    assert result.reconciled and result.open_order_count == result.position_count == 0
-    assert slept == [5, 5]
-    assert [params["status"] for _, params in client.calls] == [
-        "open", "inactive", "open", "inactive", "open", "inactive"]
-
-
-async def test_current_empty_inventory_retries_stale_page_without_accepting_it(case, monkeypatch):
-    from evplatform.venues import prophetx_account
-    _, client, _ = case
-    client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
-    calls = iter((iso(-31), iso(), iso()))
-    client.overrides["/v4/mm/get_order_history"] = lambda _: {
-        "data": {"orders": [], "next_cursor": None}, "last_synced_at": next(calls)}
-    slept = []
-    async def pace(seconds):
-        slept.append(seconds)
-    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
-    result = await probe_prophetx_account(client, observed_at=NOW)
-    assert result.reconciled and result.balance_usd == D("49.10")
-    assert slept == [5]
-    assert [params["status"] for _, params in client.calls] == ["open", "open", "inactive"]
-
-
-async def test_current_empty_inventory_still_rejects_persistently_stale_report(case, monkeypatch):
-    from evplatform.venues import prophetx_account
+async def test_current_empty_inventory_rejects_nonempty_current_positions(case):
     _, client, _ = case
     client.balance.update(balance="49.10", matched_order_balance="0", unmatched_order_balance="0")
     client.overrides["/v4/mm/get_order_history"] = lambda _: {
-        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-31)}
-    async def pace(_seconds):
-        pass
-    monkeypatch.setattr(prophetx_account.asyncio, "sleep", pace)
+        "data": {"orders": [], "next_cursor": None}, "last_synced_at": iso(-120)}
+    client.overrides["/v4/mm/positions"] = lambda _: {
+        "data": [{"sport_event_id": 1, "market_id": 2, "net_size": "1"}]}
     result = await probe_prophetx_account(client, observed_at=NOW)
     assert not result.reconciled and result.open_order_count is None
-    assert "Reporting watermark is stale or in the future" in result.reason
-    assert [params["status"] for _, params in client.calls] == ["open"] * 5
+    assert "current-position inventory is not empty" in result.reason
+
+
+async def test_current_position_inventory_requires_a_complete_list(case):
+    _, client, _ = case
+    client.overrides["/v4/mm/positions"] = lambda _: {"data": {}}
+    with pytest.raises(ReconciliationError, match="current-position"):
+        await current_positions(client)
 
 
 async def test_external_fill_allows_cash_diagnostic_without_certifying_inventory(case):

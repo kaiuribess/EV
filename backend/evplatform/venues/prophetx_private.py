@@ -227,7 +227,8 @@ class ProphetXPrivateState:
         return watermark
 
     def reconcile_current_empty(self, *, started_at, reporting_watermark,
-                                captured_fence, client, observed_at=None):
+                                captured_fence, client, observed_at=None,
+                                current_positions_observed_at=None):
         """Bind a current zero-inventory REST read to the live private stream.
 
         Terminal private events may remain cached. Any active or unrecognized
@@ -240,16 +241,26 @@ class ProphetXPrivateState:
         start = source_time(started_at, observed_at=now, name="Private reconciliation start")
         watermark = source_time(reporting_watermark, observed_at=now,
                                 name="Private reporting watermark")
-        if watermark < start:
+        positions_read = (source_time(current_positions_observed_at, observed_at=now,
+                                      name="Current position inventory")
+                          if current_positions_observed_at is not None else None)
+        if positions_read is None and watermark < start:
             raise ReconciliationError("Current ProphetX reporting has not caught up to the wallet probe")
+        if positions_read is not None and positions_read < start:
+            raise ReconciliationError("Current ProphetX positions do not cover the wallet probe")
         terminal = {"canceled", "cancelled", "invalid", "settled", "closed"}
         if any(facts.get("status") not in terminal for facts, _ in self.orders.values()):
             raise ReconciliationError("ProphetX private stream still has active or unknown orders")
         if self.fence(client=client) != captured_fence:
             raise ReconciliationError("ProphetX private account changed during current inventory validation")
-        self.baseline = captured_fence, watermark
+        # A current positions read plus synchronized zero matched/unmatched
+        # wallet balances supersedes an idle reporting watermark. The caller
+        # obtains both wallet reads and the position response while this exact
+        # private fence is held.
+        baseline = positions_read or watermark
+        self.baseline = captured_fence, baseline
         self.reason = "Private stream agrees with current empty account inventory"
-        return watermark
+        return baseline
 
     def matches(self, snapshot, *, client):
         fence = self.fence(client=client)
