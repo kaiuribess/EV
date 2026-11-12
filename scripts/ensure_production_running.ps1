@@ -51,11 +51,19 @@ function Managed-Process-Alive {
             $actual = [datetimeoffset]$process.CreationDate
             $startedMatches = [Math]::Abs(($actual - $reported).TotalSeconds) -lt 2
         }
-        return [bool]($process -and $listener -and $listener.OwningProcess -eq $process.ProcessId -and
+        $expectedProcess = [bool]($process -and
             $process.CommandLine -match [regex]::Escape($expected) -and
             $startedMatches -and
             ($process.ExecutablePath -eq (Join-Path $projectRoot '.venv\Scripts\python.exe') -or
              $parent.ExecutablePath -eq (Join-Path $projectRoot '.venv\Scripts\python.exe')))
+        if (-not $expectedProcess) { return $false }
+        if ($listener) { return $listener.OwningProcess -eq $process.ProcessId }
+        # Loading and reconciling a large durable ledger can take longer than
+        # the launcher's HTTP readiness window.  Treat the exact recorded
+        # process as an initializing managed instance for a bounded period so
+        # the next scheduler tick cannot create a duplicate database writer.
+        $age = ([datetimeoffset]::UtcNow - [datetimeoffset]$process.CreationDate).TotalMinutes
+        return $age -ge 0 -and $age -lt 5
     } catch { return $false }
 }
 
