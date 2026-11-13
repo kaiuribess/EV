@@ -119,7 +119,10 @@ class Engine:
                                                                    "exchange.native_book",
                                                                    "sports.game_state", "player.projection"], critical=True)
         self.risk_queue = self.bus.subscribe("central-risk", ["trade.candidate", "trade.native_candidate"], critical=True)
-        self.audit_queue = self.bus.subscribe("audit", critical=True)
+        # Complete provider baselines can legitimately fan out tens of thousands
+        # of typed records before SQLite catches up. This remains bounded and
+        # critical; it only avoids mistaking a valid startup burst for data loss.
+        self.audit_queue = self.bus.subscribe("audit", critical=True, capacity=65536)
         self.dashboard_queue = self.bus.subscribe("dashboard-events", ["trade.order", "trade.fill", "system.notice"])
         self.settlement_queue = self.bus.subscribe("settlement-accounting", ["trade.settlement"], critical=True)
         self.signal_queue = self.bus.subscribe("signal-ledger", ["signal.observation", "signal.result"], critical=True)

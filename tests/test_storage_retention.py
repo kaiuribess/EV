@@ -1,4 +1,5 @@
 """Raw-detail pruning must preserve the audit and signal accounting contract."""
+import asyncio
 from datetime import timedelta
 import sqlite3
 
@@ -97,6 +98,36 @@ async def test_raw_detail_window_leaves_capacity_headroom(tmp_path):
         assert rows == [("retained-quote",)]
     finally:
         await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_audit_queue_backpressures_and_prioritizes_emergency_writes(tmp_path):
+    storage = Storage(str(tmp_path / "priority.db"))
+    storage.queue = asyncio.PriorityQueue(1)
+    await storage.write("raw audit", (), durable=False)
+
+    blocked = asyncio.create_task(
+        storage.write("second raw audit", (), durable=False))
+    await asyncio.sleep(0)
+    assert not blocked.done()
+
+    raw = storage.queue.get_nowait()
+    storage.queue.task_done()
+    await asyncio.wait_for(blocked, 1)
+    second_raw = storage.queue.get_nowait()
+    storage.queue.task_done()
+    assert raw[2] == "raw audit"
+    assert second_raw[2] == "second raw audit"
+
+    storage.queue = asyncio.PriorityQueue(2)
+    await storage.write("later raw", (), durable=False)
+    storage.enqueue_config("kill_switch", True)
+    first = storage.queue.get_nowait()
+    second = storage.queue.get_nowait()
+    storage.queue.task_done()
+    storage.queue.task_done()
+    assert first[0] == 0 and "config" in first[2]
+    assert second[0] == 1 and second[2] == "later raw"
 
 
 @pytest.mark.asyncio

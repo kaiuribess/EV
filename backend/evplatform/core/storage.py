@@ -7,6 +7,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import count
 from pathlib import Path
 
 import aiosqlite
@@ -52,6 +53,10 @@ class Storage:
     RAW_DETAIL_HOURS = 2
     RETENTION_BATCH = 2000
     MAX_DATABASE_BYTES = 3 * 1024**3
+    # Complete-board snapshots can publish more than eight thousand audit
+    # records in a burst. Keep the queue bounded, but large enough to absorb a
+    # real startup snapshot while the single SQLite writer catches up.
+    WRITE_QUEUE_CAPACITY = 65536
     PERMANENT_EVENT_SCHEMAS = (
         "trade.order", "trade.fill", "trade.settlement", "native.order",
         "native.settlement", "signal.result", "system.notice",
@@ -67,7 +72,12 @@ class Storage:
     def __init__(self, path: str):
         self.path = path
         self.connection = None
-        self.queue = asyncio.Queue(8192)
+        # Durable order/config writes sort ahead of raw replay detail. Sequence
+        # preserves FIFO within each class. Queue capacity remains a hard memory
+        # bound; async producers apply backpressure instead of treating a
+        # transient startup burst as permanent storage corruption.
+        self.queue = asyncio.PriorityQueue(self.WRITE_QUEUE_CAPACITY)
+        self._queue_sequence = count()
         self.task = None
         self.failure = None
         self.on_failure = None
@@ -112,15 +122,16 @@ class Storage:
 
     async def _writer(self):
         while True:
-            item = await self.queue.get()
-            if item is None:
+            _, _, sql, params, future = await self.queue.get()
+            if sql is None:
                 self.queue.task_done()
                 return
-            batch = [item]
+            batch = [(sql, params, future)]
             # One fsync per batch, while every durable caller waits for that commit.
             # The queue owns disk IO; the event processing loop only enqueues.
             while len(batch) < 256 and not self.queue.empty():
-                batch.append(self.queue.get_nowait())
+                _, _, sql, params, future = self.queue.get_nowait()
+                batch.append((sql, params, future))
             try:
                 if any(_has_pending_audit_data(sql, params) for sql, params, _ in batch):
                     prepared = await asyncio.to_thread(_prepare_audit_batch, batch)
@@ -153,7 +164,8 @@ class Storage:
         if self.failure:
             raise RuntimeError("Persistence unavailable")
         future = asyncio.get_running_loop().create_future() if durable else None
-        self.queue.put_nowait((sql, params, future))
+        await self.queue.put((0 if durable else 1, next(self._queue_sequence),
+                              sql, params, future))
         if future:
             await future
 
@@ -188,6 +200,7 @@ class Storage:
     def enqueue_config(self, key, value):
         """Synchronous enqueue only, for fail-closed callbacks; no disk IO here."""
         self.queue.put_nowait((
+            0, next(self._queue_sequence),
             "INSERT INTO config VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data",
             (key, json.dumps(value)), None,
         ))
@@ -292,7 +305,7 @@ class Storage:
     async def close(self):
         if self.task:
             await self.queue.join()
-            await self.queue.put(None)
+            await self.queue.put((2, next(self._queue_sequence), None, (), None))
             await self.task
         if self.connection:
             await self.connection.close()
